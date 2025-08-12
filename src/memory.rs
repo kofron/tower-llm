@@ -86,8 +86,6 @@ impl Session for MemorySession {
     }
 }
 
-
-
 /// Session manager for handling multiple sessions
 #[derive(Debug)]
 pub struct SessionManager {
@@ -187,7 +185,7 @@ mod tests {
         // Test moved to sqlite_session.rs with real implementation
         // This test now uses the real SqliteSession from sqlite_session module
         use crate::sqlite_session::SqliteSession;
-        
+
         let session = SqliteSession::new_in_memory("user_123").await.unwrap();
         assert_eq!(session.session_id(), "user_123");
 

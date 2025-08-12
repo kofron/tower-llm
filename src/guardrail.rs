@@ -1,5 +1,5 @@
 //! Guardrails for input and output validation
-//! 
+//!
 //! Guardrails provide safety checks to validate user input and agent output.
 
 use async_trait::async_trait;
@@ -13,10 +13,10 @@ use crate::error::{AgentsError, Result};
 pub struct GuardrailResult {
     /// Whether the check passed
     pub passed: bool,
-    
+
     /// Reason if the check failed
     pub reason: Option<String>,
-    
+
     /// Optional modified content (for output guardrails)
     pub modified_content: Option<String>,
 }
@@ -187,7 +187,9 @@ impl GuardrailRunner {
             let result = guardrail.check(input).await?;
             if !result.passed {
                 return Err(AgentsError::InputGuardrailTriggered {
-                    message: result.reason.unwrap_or_else(|| "Input validation failed".to_string()),
+                    message: result
+                        .reason
+                        .unwrap_or_else(|| "Input validation failed".to_string()),
                 });
             }
         }
@@ -200,25 +202,27 @@ impl GuardrailRunner {
         output: &str,
     ) -> Result<String> {
         let mut current_output = output.to_string();
-        
+
         // Sort by priority (descending)
         let mut sorted_guards: Vec<_> = guardrails.iter().collect();
         sorted_guards.sort_by_key(|g| -g.priority());
 
         for guardrail in sorted_guards {
             let result = guardrail.check(&current_output).await?;
-            
+
             if !result.passed {
                 return Err(AgentsError::OutputGuardrailTriggered {
-                    message: result.reason.unwrap_or_else(|| "Output validation failed".to_string()),
+                    message: result
+                        .reason
+                        .unwrap_or_else(|| "Output validation failed".to_string()),
                 });
             }
-            
+
             if let Some(modified) = result.modified_content {
                 current_output = modified;
             }
         }
-        
+
         Ok(current_output)
     }
 }
@@ -247,13 +251,16 @@ mod tests {
     #[tokio::test]
     async fn test_max_length_guardrail() {
         let guard = MaxLengthGuardrail::new(10);
-        
+
         let short_result = guard.check("short").await.unwrap();
         assert!(short_result.passed);
-        
+
         let long_result = guard.check("this is a very long input").await.unwrap();
         assert!(!long_result.passed);
-        assert!(long_result.reason.unwrap().contains("exceeds maximum length"));
+        assert!(long_result
+            .reason
+            .unwrap()
+            .contains("exceeds maximum length"));
     }
 
     #[tokio::test]
@@ -262,16 +269,22 @@ mod tests {
             "ProfanityFilter",
             vec!["badword".to_string(), "forbidden".to_string()],
         );
-        
-        let clean_result = InputGuardrail::check(&guard, "This is clean text").await.unwrap();
+
+        let clean_result = InputGuardrail::check(&guard, "This is clean text")
+            .await
+            .unwrap();
         assert!(clean_result.passed);
-        
-        let blocked_result = InputGuardrail::check(&guard, "This contains badword here").await.unwrap();
+
+        let blocked_result = InputGuardrail::check(&guard, "This contains badword here")
+            .await
+            .unwrap();
         assert!(!blocked_result.passed);
         assert!(blocked_result.reason.unwrap().contains("blocked pattern"));
-        
+
         // Test case insensitive
-        let blocked_caps = InputGuardrail::check(&guard, "This has FORBIDDEN content").await.unwrap();
+        let blocked_caps = InputGuardrail::check(&guard, "This has FORBIDDEN content")
+            .await
+            .unwrap();
         assert!(!blocked_caps.passed);
     }
 
@@ -284,16 +297,16 @@ mod tests {
                 vec!["spam".to_string()],
             )),
         ];
-        
+
         // Should pass
         let result = GuardrailRunner::check_input(&guards, "Valid input").await;
         assert!(result.is_ok());
-        
+
         // Should fail on length
         let long_input = "x".repeat(200);
         let result = GuardrailRunner::check_input(&guards, &long_input).await;
         assert!(result.is_err());
-        
+
         // Should fail on pattern
         let result = GuardrailRunner::check_input(&guards, "This is spam").await;
         assert!(result.is_err());
@@ -301,18 +314,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_guardrail_runner_output() {
-        let guards: Vec<Arc<dyn OutputGuardrail>> = vec![
-            Arc::new(PatternBlockGuardrail::new(
-                "Filter",
-                vec!["secret".to_string()],
-            )),
-        ];
-        
+        let guards: Vec<Arc<dyn OutputGuardrail>> = vec![Arc::new(PatternBlockGuardrail::new(
+            "Filter",
+            vec!["secret".to_string()],
+        ))];
+
         // Should pass
         let result = GuardrailRunner::check_output(&guards, "Normal output").await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "Normal output");
-        
+
         // Should fail
         let result = GuardrailRunner::check_output(&guards, "This is secret info").await;
         assert!(result.is_err());
@@ -350,10 +361,10 @@ mod tests {
             name: "CommandBlocker".to_string(),
             priority: 10,
         };
-        
+
         let result = guard.check("!command").await.unwrap();
         assert!(!result.passed);
-        
+
         let result = guard.check("normal text").await.unwrap();
         assert!(result.passed);
     }
@@ -395,7 +406,7 @@ mod tests {
 
         let result = GuardrailRunner::check_input(&guards, "test").await;
         assert!(result.is_err());
-        
+
         // Should fail with high priority guard first
         if let Err(AgentsError::InputGuardrailTriggered { message }) = result {
             assert_eq!(message, "HighPriority");

@@ -260,7 +260,6 @@ impl Runner {
             }
 
             // Process tool calls
-            let mut handoff_detected = false;
             for tool_call in &response.tool_calls {
                 items.push(RunItem::ToolCall(ToolCallItem {
                     id: tool_call.id.clone(),
@@ -283,7 +282,7 @@ impl Runner {
 
                     // Switch to the new agent
                     agent = handoff.agent().clone();
-                    handoff_detected = true;
+
                     break; // Exit the tool call loop to start a new turn
                 }
 
@@ -349,11 +348,7 @@ impl Runner {
             }
 
             // Complete the agent span if not already completed
-            if !handoff_detected {
-                agent_span.complete();
-            } else {
-                agent_span.complete();
-            }
+            agent_span.complete();
         }
     }
 }

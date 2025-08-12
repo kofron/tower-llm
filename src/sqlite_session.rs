@@ -247,7 +247,8 @@ impl std::fmt::Debug for SqliteSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::items::ToolCall;
+    use crate::items::{HandoffItem, MessageItem, Role, ToolCallItem, ToolOutputItem};
+    use chrono::Utc;
 
     #[tokio::test]
     async fn test_sqlite_session_basic() {

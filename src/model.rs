@@ -76,22 +76,23 @@ impl OpenAIProvider {
             Role::Assistant => {
                 let mut builder = ChatCompletionRequestAssistantMessageArgs::default();
                 builder.content(msg.content.clone());
-                
+
                 // Add tool calls if present
                 if let Some(tool_calls) = &msg.tool_calls {
-                    let openai_tool_calls: Vec<_> = tool_calls.iter().map(|tc| {
-                        async_openai::types::ChatCompletionMessageToolCall {
+                    let openai_tool_calls: Vec<_> = tool_calls
+                        .iter()
+                        .map(|tc| async_openai::types::ChatCompletionMessageToolCall {
                             id: tc.id.clone(),
                             r#type: async_openai::types::ChatCompletionToolType::Function,
                             function: async_openai::types::FunctionCall {
                                 name: tc.name.clone(),
                                 arguments: tc.arguments.to_string(),
                             },
-                        }
-                    }).collect();
+                        })
+                        .collect();
                     builder.tool_calls(openai_tool_calls);
                 }
-                
+
                 builder.build().unwrap().into()
             }
             Role::Tool => ChatCompletionRequestToolMessageArgs::default()

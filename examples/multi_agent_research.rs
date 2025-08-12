@@ -5,9 +5,7 @@
 //!
 //! Run with: cargo run --example multi_agent_research
 
-use openai_agents_rs::{
-    handoff::Handoff, runner::RunConfig, Agent, FunctionTool, Runner,
-};
+use openai_agents_rs::{handoff::Handoff, runner::RunConfig, Agent, FunctionTool, Runner};
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
 
@@ -27,7 +25,7 @@ impl KnowledgeBase {
              "Python is a high-level, interpreted programming language known for its simplicity and readability. Created by Guido van Rossum and first released in 1991.".to_string()),
             ("Machine Learning".to_string(),
              "Machine Learning is a subset of artificial intelligence that enables systems to learn and improve from experience without being explicitly programmed. Key algorithms include neural networks, decision trees, and support vector machines.".to_string()),
-            
+
             // Historical facts
             ("World War II".to_string(),
              "World War II (1939-1945) was a global conflict involving most of the world's nations. It ended with the Allied victory and reshaped the global political landscape.".to_string()),
@@ -35,7 +33,7 @@ impl KnowledgeBase {
              "The Apollo 11 mission successfully landed humans on the Moon on July 20, 1969. Neil Armstrong and Buzz Aldrin were the first humans to walk on the lunar surface.".to_string()),
             ("Industrial Revolution".to_string(),
              "The Industrial Revolution (1760-1840) was a period of major industrialization that transformed largely rural, agrarian societies into industrialized, urban ones.".to_string()),
-            
+
             // Science facts
             ("DNA Structure".to_string(),
              "DNA (Deoxyribonucleic acid) has a double helix structure discovered by Watson and Crick in 1953. It carries genetic instructions for all known living organisms.".to_string()),
@@ -44,7 +42,7 @@ impl KnowledgeBase {
             ("Quantum Mechanics".to_string(),
              "Quantum mechanics describes nature at the smallest scales of energy levels of atoms and subatomic particles. Key principles include wave-particle duality and uncertainty.".to_string()),
         ];
-        
+
         Self {
             data: Arc::new(Mutex::new(data)),
         }
@@ -53,11 +51,11 @@ impl KnowledgeBase {
     fn search(&self, query: &str) -> Vec<(String, String)> {
         let data = self.data.lock().unwrap();
         let query_lower = query.to_lowercase();
-        
+
         data.iter()
             .filter(|(topic, content)| {
-                topic.to_lowercase().contains(&query_lower) ||
-                content.to_lowercase().contains(&query_lower)
+                topic.to_lowercase().contains(&query_lower)
+                    || content.to_lowercase().contains(&query_lower)
             })
             .cloned()
             .collect()
@@ -86,18 +84,20 @@ fn create_search_tool(kb: KnowledgeBase) -> Arc<FunctionTool> {
             "required": ["query"]
         }),
         move |args| {
-            let query = args.get("query")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            
+            let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+
             println!("  [Search Tool] Searching for: {}", query);
-            
+
             let results = kb.search(query);
-            
+
             if results.is_empty() {
-                Ok(Value::String(format!("No information found for '{}'", query)))
+                Ok(Value::String(format!(
+                    "No information found for '{}'",
+                    query
+                )))
             } else {
-                let formatted: Vec<String> = results.iter()
+                let formatted: Vec<String> = results
+                    .iter()
                     .map(|(topic, content)| format!("**{}**: {}", topic, content))
                     .collect();
                 Ok(Value::String(formatted.join("\n\n")))
@@ -126,17 +126,22 @@ fn create_store_tool(kb: KnowledgeBase) -> Arc<FunctionTool> {
             "required": ["topic", "content"]
         }),
         move |args| {
-            let topic = args.get("topic")
+            let topic = args
+                .get("topic")
                 .and_then(|v| v.as_str())
                 .unwrap_or("Unknown")
                 .to_string();
-            let content = args.get("content")
+            let content = args
+                .get("content")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            
+
             kb.add_fact(topic.clone(), content);
-            Ok(Value::String(format!("Successfully stored fact about '{}'", topic)))
+            Ok(Value::String(format!(
+                "Successfully stored fact about '{}'",
+                topic
+            )))
         },
     ))
 }
@@ -175,7 +180,7 @@ fn create_analyst_agent() -> Agent {
         "AnalystAgent",
         "You are an analytical specialist. Your job is to analyze information, identify patterns, 
          draw conclusions, and provide insights. You can summarize complex information and 
-         synthesize multiple sources into coherent analysis."
+         synthesize multiple sources into coherent analysis.",
     )
     .with_tool(create_summarize_tool())
 }
@@ -185,7 +190,7 @@ fn create_archivist_agent(kb: KnowledgeBase) -> Agent {
         "ArchivistAgent",
         "You are an information archivist. Your job is to store new facts and information 
          in the knowledge base for future reference. Use the store_fact tool to save 
-         important information."
+         important information.",
     )
     .with_tool(create_store_tool(kb))
 }
@@ -205,17 +210,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create handoffs
     let research_handoff = Handoff::new(
         research_agent,
-        "Searches the knowledge base for specific information"
+        "Searches the knowledge base for specific information",
     );
-    
+
     let analyst_handoff = Handoff::new(
         analyst_agent,
-        "Analyzes and synthesizes information to provide insights"
+        "Analyzes and synthesizes information to provide insights",
     );
-    
+
     let archivist_handoff = Handoff::new(
         archivist_agent,
-        "Stores new information in the knowledge base"
+        "Stores new information in the knowledge base",
     );
 
     // Create the coordinator agent that delegates to specialists
@@ -227,7 +232,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
          - Use ArchivistAgent when you need to store new information
          
          Always delegate to the appropriate specialist rather than trying to answer directly.
-         After receiving results from specialists, provide a comprehensive response to the user."
+         After receiving results from specialists, provide a comprehensive response to the user.",
     )
     .with_handoffs(vec![research_handoff, analyst_handoff, archivist_handoff])
     .with_max_turns(10);
@@ -244,18 +249,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Query: {}", query);
         println!("{}", "-".repeat(60));
 
-        let result = Runner::run(
-            coordinator.clone(),
-            query,
-            RunConfig::default(),
-        )
-        .await?;
+        let result = Runner::run(coordinator.clone(), query, RunConfig::default()).await?;
 
         if result.is_success() {
             println!("\nResponse: {}\n", result.final_output);
-            
+
             // Show which agents were involved
-            let handoffs: Vec<_> = result.items.iter()
+            let handoffs: Vec<_> = result
+                .items
+                .iter()
                 .filter_map(|item| {
                     if let openai_agents_rs::items::RunItem::Handoff(h) = item {
                         Some(format!("{} → {}", h.from_agent, h.to_agent))
@@ -264,14 +266,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 })
                 .collect();
-            
+
             if !handoffs.is_empty() {
                 println!("Agent handoffs: {}", handoffs.join(", "));
             }
         } else {
             println!("Error: {:?}", result.error());
         }
-        
+
         println!("\n{}\n", "=".repeat(70));
     }
 
@@ -283,29 +285,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  - Type 'quit' to exit\n");
 
     use std::io::{self, Write};
-    
+
     loop {
         print!("Your request: ");
         io::stdout().flush()?;
-        
+
         let mut input = String::new();
         io::stdin().read_line(&mut input)?;
         let input = input.trim();
-        
+
         if input.eq_ignore_ascii_case("quit") || input.eq_ignore_ascii_case("exit") {
             println!("Goodbye!");
             break;
         }
-        
+
         println!("\nProcessing...\n");
-        
-        let result = Runner::run(
-            coordinator.clone(),
-            input,
-            RunConfig::default(),
-        )
-        .await?;
-        
+
+        let result = Runner::run(coordinator.clone(), input, RunConfig::default()).await?;
+
         if result.is_success() {
             println!("\n{}\n", result.final_output);
         } else {

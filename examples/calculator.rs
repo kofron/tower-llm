@@ -172,7 +172,9 @@ fn create_sqrt_tool() -> Arc<FunctionTool> {
             let number = args.get("number").and_then(|v| v.as_f64()).unwrap_or(0.0);
             if number < 0.0 {
                 println!("  [Tool] Error: Cannot take square root of negative number!");
-                return Ok(Value::String("Error: Cannot take square root of negative number".to_string()));
+                return Ok(Value::String(
+                    "Error: Cannot take square root of negative number".to_string(),
+                ));
             }
             let result = number.sqrt();
             println!("  [Tool] Calculating √{} = {}", number, result);
@@ -213,62 +215,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Problem {}: {}", i + 1, problem);
         println!("{}", "-".repeat(50));
 
-        let result = Runner::run(
-            agent.clone(),
-            problem.to_string(),
-            RunConfig::default(),
-        )
-        .await?;
+        let result = Runner::run(agent.clone(), problem.to_string(), RunConfig::default()).await?;
 
         if result.is_success() {
             println!("\nFinal Answer: {}\n", result.final_output);
-            
+
             // Count how many tool calls were made
-            let tool_calls = result.items.iter().filter(|item| {
-                matches!(item, openai_agents_rs::items::RunItem::ToolCall(_))
-            }).count();
-            
-            println!("(Used {} tool calls across {} turns)", 
-                tool_calls, 
-                result.items.iter().filter(|item| {
-                    matches!(item, openai_agents_rs::items::RunItem::Message(m) 
+            let tool_calls = result
+                .items
+                .iter()
+                .filter(|item| matches!(item, openai_agents_rs::items::RunItem::ToolCall(_)))
+                .count();
+
+            println!(
+                "(Used {} tool calls across {} turns)",
+                tool_calls,
+                result
+                    .items
+                    .iter()
+                    .filter(|item| {
+                        matches!(item, openai_agents_rs::items::RunItem::Message(m)
                         if m.role == openai_agents_rs::items::Role::Assistant)
-                }).count()
+                    })
+                    .count()
             );
         } else {
             println!("Error: {:?}", result.error());
         }
-        
+
         println!("\n{}\n", "=".repeat(60));
     }
 
     // Interactive mode
     println!("Now entering interactive mode. Type 'quit' to exit.\n");
-    
+
     use std::io::{self, Write};
-    
+
     loop {
         print!("Enter a math problem: ");
         io::stdout().flush()?;
-        
+
         let mut input = String::new();
         io::stdin().read_line(&mut input)?;
         let input = input.trim();
-        
+
         if input.eq_ignore_ascii_case("quit") || input.eq_ignore_ascii_case("exit") {
             println!("Goodbye!");
             break;
         }
-        
+
         println!("\nCalculating...\n");
-        
-        let result = Runner::run(
-            agent.clone(),
-            input,
-            RunConfig::default(),
-        )
-        .await?;
-        
+
+        let result = Runner::run(agent.clone(), input, RunConfig::default()).await?;
+
         if result.is_success() {
             println!("\nAnswer: {}\n", result.final_output);
         } else {
