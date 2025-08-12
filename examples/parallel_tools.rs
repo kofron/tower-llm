@@ -130,11 +130,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .with_tool(create_stats_tool());
 
     // Test queries that should trigger parallel tool usage
-    let queries = vec![
-        "Tell me everything about Tokyo - weather, news, and statistics",
+    let queries = ["Tell me everything about Tokyo - weather, news, and statistics",
         "Compare London and Paris - I need weather and population data for both",
-        "What's happening in New York? Get me weather, news, and economic stats",
-    ];
+        "What's happening in New York? Get me weather, news, and economic stats"];
 
     for (i, query) in queries.iter().enumerate() {
         println!("\n📝 Query {}: {}", i + 1, query);

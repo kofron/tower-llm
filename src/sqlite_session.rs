@@ -3,14 +3,12 @@
 //! Provides persistent storage for conversation sessions using SQLite.
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use sqlx::{Pool, Row, Sqlite, SqlitePool};
 use std::path::Path;
 
-use crate::error::{AgentsError, Result};
-use crate::items::{
-    HandoffItem, Message, MessageItem, Role, RunItem, ToolCallItem, ToolOutputItem,
-};
+use crate::error::Result;
+use crate::items::RunItem;
 use crate::memory::Session;
 
 /// SQLite-based session storage

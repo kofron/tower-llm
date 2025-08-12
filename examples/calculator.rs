@@ -203,13 +203,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .with_max_turns(15); // Allow more turns for complex calculations
 
     // Example problems that require multiple steps
-    let problems = vec![
-        "What is (15 + 25) * 3?",
+    let problems = ["What is (15 + 25) * 3?",
         "Calculate the area of a rectangle with length 12.5 and width 8.3, then add 15 to the result.",
         "If I have $100 and spend $35.50, then earn $20.75, how much do I have?",
         "What is 2^3 + sqrt(16) - 5?",
-        "Calculate: ((10 + 5) * 2) / 3",
-    ];
+        "Calculate: ((10 + 5) * 2) / 3"];
 
     for (i, problem) in problems.iter().enumerate() {
         println!("Problem {}: {}", i + 1, problem);

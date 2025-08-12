@@ -52,7 +52,7 @@ impl RetryPolicy {
             let mut rng = rand::thread_rng();
             let jitter = rng.gen_range(0.0..0.3);
             let jitter_ms = (delay.as_millis() as f64 * jitter) as u64;
-            delay = delay + Duration::from_millis(jitter_ms);
+            delay += Duration::from_millis(jitter_ms);
         }
 
         // Update for next iteration
@@ -179,6 +179,12 @@ where
 /// Builder for retry operations
 pub struct RetryBuilder {
     policy: RetryPolicy,
+}
+
+impl Default for RetryBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RetryBuilder {

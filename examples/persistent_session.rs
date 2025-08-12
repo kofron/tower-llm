@@ -51,11 +51,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Simulate multiple interactions
-    let queries = vec![
-        "Hello! My name is Alice and I love programming in Rust.",
+    let queries = ["Hello! My name is Alice and I love programming in Rust.",
         "What's my name and what do I like?",
-        "Can you recommend some Rust learning resources?",
-    ];
+        "Can you recommend some Rust learning resources?"];
 
     for (i, query) in queries.iter().enumerate() {
         println!("👤 User (Turn {}): {}", i + 1, query);
@@ -88,7 +86,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Total messages: {}", messages.len());
 
     // Show recent messages
-    if messages.len() > 0 {
+    if !messages.is_empty() {
         println!("\n  Recent messages:");
         for (i, msg) in messages.iter().rev().take(3).enumerate() {
             println!(

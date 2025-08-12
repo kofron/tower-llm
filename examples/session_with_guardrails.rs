@@ -188,15 +188,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Simulate a conversation with multiple turns
-    let conversations = vec![
-        "Hello! I'm planning a trip to Paris next month.",
+    let conversations = ["Hello! I'm planning a trip to Paris next month.",
         "Can you save a note that I need to book flights by next Friday?",
         "Set a reminder for tomorrow at 2pm to check hotel prices",
         "What did I tell you I was planning?",
-        "What investment opportunities should I consider?", // This will trigger disclaimer
-                                                            // "My password is 12345", // Uncomment to test sensitive info guardrail
-                                                            // "Tell me something inappropriate", // Uncomment to test profanity filter
-    ];
+        "What investment opportunities should I consider?"];
 
     for (turn, message) in conversations.iter().enumerate() {
         println!("Turn {} - User: {}", turn + 1, message);

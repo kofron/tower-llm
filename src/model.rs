@@ -96,7 +96,7 @@ impl OpenAIProvider {
             }
             Role::Tool => ChatCompletionRequestToolMessageArgs::default()
                 .content(msg.content.clone())
-                .tool_call_id(msg.tool_call_id.clone().unwrap_or_else(|| "".to_string()))
+                .tool_call_id(msg.tool_call_id.clone().unwrap_or_default())
                 .build()
                 .unwrap()
                 .into(),
