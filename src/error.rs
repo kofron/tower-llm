@@ -1,62 +1,111 @@
+//! # Error Handling for the Agents SDK
+//!
+//! This module defines the centralized error handling system for the SDK. It
+//! provides a unified `Result` type and a comprehensive `AgentsError` enum that
+//! covers all potential issues that can arise during an agent's execution.
+//!
+//! ## The `AgentsError` Enum
+//!
+//! The [`AgentsError`] enum is the primary error type used throughout the SDK. It
+//! encapsulates a wide range of possible failures, from API-level errors to
+//! internal logic issues like guardrail violations or tool execution failures.
+//! The use of `thiserror` allows for clean and descriptive error messages.
+//!
+//! ## The `Result` Type Alias
+//!
+//! For convenience, this module provides a `Result<T>` type alias, which is a
+//! shorthand for `std::result::Result<T, AgentsError>`. This simplifies function
+//! signatures throughout the codebase and ensures consistent error handling.
+//!
+//! ### Example: Using the Custom `Result` Type
+//!
+//! ```rust
+//! use openai_agents_rs::error::{Result, AgentsError};
+//!
+//! fn check_input(input: &str) -> Result<()> {
+//!     if input.is_empty() {
+//!         Err(AgentsError::UserError {
+//!             message: "Input cannot be empty.".to_string(),
+//!         })
+//!     } else {
+//!         Ok(())
+//!     }
+//! }
+//!
+//! assert!(check_input("Hello").is_ok());
+//! let error = check_input("").unwrap_err();
+//! assert_eq!(error.to_string(), "User error: Input cannot be empty.");
+//! ```
 //! Error types for the Agents SDK
 
 use thiserror::Error;
 
-/// Result type alias for the Agents SDK
+/// A specialized `Result` type for the Agents SDK.
+///
+/// This type alias simplifies function signatures by providing a default
+/// error type of [`AgentsError`].
 pub type Result<T> = std::result::Result<T, AgentsError>;
 
-/// Main error type for the Agents SDK
+/// The main error enum for the Agents SDK.
+///
+/// `AgentsError` consolidates all possible errors that can occur within the
+/// SDK into a single, comprehensive type. This allows for robust and centralized
+/// error handling.
 #[derive(Debug, Error)]
 pub enum AgentsError {
-    /// Error from the OpenAI API
+    /// An error originating from the underlying `async-openai` crate.
     #[error("OpenAI API error: {0}")]
     OpenAIError(#[from] async_openai::error::OpenAIError),
 
-    /// Maximum turns exceeded
+    /// Indicates that the maximum number of turns for an agent run has been
+    /// exceeded, preventing infinite loops.
     #[error("Maximum turns exceeded: {max_turns}")]
     MaxTurnsExceeded { max_turns: usize },
 
-    /// Input guardrail triggered
+    /// An input guardrail was triggered, indicating that the user's input
+    /// violated a predefined constraint.
     #[error("Input guardrail triggered: {message}")]
     InputGuardrailTriggered { message: String },
 
-    /// Output guardrail triggered
+    /// An output guardrail was triggered, indicating that the agent's response
+    /// violated a predefined constraint.
     #[error("Output guardrail triggered: {message}")]
     OutputGuardrailTriggered { message: String },
 
-    /// Tool execution error
+    /// An error occurred during the execution of a tool.
     #[error("Tool execution error: {message}")]
     ToolExecutionError { message: String },
 
-    /// Handoff error
+    /// An error occurred during a handoff between agents.
     #[error("Handoff error: {message}")]
     HandoffError { message: String },
 
-    /// Model behavior error
+    /// An error indicating unexpected or invalid behavior from the LLM.
     #[error("Model behavior error: {message}")]
     ModelBehaviorError { message: String },
 
-    /// User error
+    /// An error caused by invalid user input or configuration.
     #[error("User error: {message}")]
     UserError { message: String },
 
-    /// Session error
+    /// An error related to session management, such as a failure to read or
+    /// write to the session store.
     #[error("Session error: {0}")]
     SessionError(String),
 
-    /// Serialization/deserialization error
+    /// An error that occurred during JSON serialization or deserialization.
     #[error("Serialization error: {0}")]
     SerializationError(#[from] serde_json::Error),
 
-    /// IO error
+    /// An I/O error, typically related to file system operations.
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
 
-    /// Database error
+    /// An error from the database, used by persistent session stores.
     #[error("Database error: {0}")]
     DatabaseError(#[from] sqlx::Error),
 
-    /// Other errors
+    /// A catch-all for any other type of error.
     #[error("{0}")]
     Other(String),
 }

@@ -1,6 +1,56 @@
-//! Model abstraction for LLM interactions
+//! # Model Abstraction for LLM Interactions
 //!
-//! Wraps the async-openai crate to provide a clean interface for agent-LLM communication.
+//! This module provides a flexible abstraction layer for interacting with
+//! Language Models (LLMs). It is designed to decouple the core agent logic
+//! from the specifics of any particular LLM provider, making it easier to
+//! support different models in the future.
+//!
+//! The central component of this module is the [`ModelProvider`] trait, which
+//! defines a standard interface for completing chat-based interactions with an
+//! LLM.
+//!
+//! ## The `ModelProvider` Trait
+//!
+//! The [`ModelProvider`] trait requires implementors to provide a `complete`
+//! method that takes a sequence of messages and a list of available tools,
+//! and returns a [`ModelResponse`] and [`Usage`] statistics. This design
+//! allows for different LLM providers to be plugged into the system.
+//!
+//! ## `OpenAIProvider`
+//!
+//! The primary implementation provided is the [`OpenAIProvider`], which uses the
+//! `async-openai` crate to communicate with the OpenAI API. It handles the
+//! conversion of the SDK's internal data structures to the format expected by
+//! the OpenAI API.
+//!
+//! ### Example: Using `OpenAIProvider`
+//!
+//! ```rust,no_run
+//! use openai_agents_rs::model::{ModelProvider, OpenAIProvider};
+//! use openai_agents_rs::items::Message;
+//!
+//! # #[tokio::main]
+//! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let provider = OpenAIProvider::new("gpt-3.5-turbo");
+//!
+//! let messages = vec![
+//!     Message::system("You are a helpful assistant."),
+//!     Message::user("What is the capital of France?"),
+//! ];
+//!
+//! let (response, usage) = provider.complete(messages, vec![], None, None).await?;
+//!
+//! assert!(response.content.unwrap().contains("Paris"));
+//! println!("Total tokens used: {}", usage.total_tokens);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! For testing purposes, a [`MockProvider`] is also included, which allows you
+//! to simulate LLM responses without making actual API calls.
+//!
+//! [`Usage`]: crate::usage::Usage
+//! [`ModelResponse`]: crate::items::ModelResponse
 
 use async_openai::{
     config::OpenAIConfig,
@@ -21,10 +71,20 @@ use crate::items::{Message, ModelResponse, Role, ToolCall};
 use crate::tool::Tool;
 use crate::usage::Usage;
 
-/// Trait for model providers
+/// A trait that defines the interface for a Language Model (LLM) provider.
+///
+/// This abstraction allows the SDK to support various LLM backends by providing
+/// a consistent interface for generating chat completions.
 #[async_trait]
 pub trait ModelProvider: Send + Sync {
-    /// Generate a completion
+    /// Generates a model response for a given set of messages and tools.
+    ///
+    /// # Arguments
+    ///
+    /// * `messages` - The conversation history to be sent to the model.
+    /// * `tools` - A list of tools that the agent can use.
+    /// * `temperature` - The temperature for response generation.
+    /// * `max_tokens` - The maximum number of tokens to generate.
     async fn complete(
         &self,
         messages: Vec<Message>,
@@ -33,18 +93,19 @@ pub trait ModelProvider: Send + Sync {
         max_tokens: Option<u32>,
     ) -> Result<(ModelResponse, Usage)>;
 
-    /// Get the model name
+    /// Returns the name of the model being used by the provider.
     fn model_name(&self) -> &str;
 }
 
-/// OpenAI model provider using async-openai
+/// A [`ModelProvider`] implementation for OpenAI's API, using the `async-openai`
+/// crate.
 pub struct OpenAIProvider {
     client: Client<OpenAIConfig>,
     model: String,
 }
 
 impl OpenAIProvider {
-    /// Create a new OpenAI provider
+    /// Creates a new `OpenAIProvider` with the specified model.
     pub fn new(model: impl Into<String>) -> Self {
         Self {
             client: Client::new(),
@@ -52,7 +113,7 @@ impl OpenAIProvider {
         }
     }
 
-    /// Create with a custom client
+    /// Creates a new `OpenAIProvider` with a custom `async-openai` client.
     pub fn with_client(client: Client<OpenAIConfig>, model: impl Into<String>) -> Self {
         Self {
             client,
@@ -60,7 +121,7 @@ impl OpenAIProvider {
         }
     }
 
-    /// Convert our Message to OpenAI's format
+    /// Converts an SDK `Message` into the `async_openai` format.
     fn convert_message(&self, msg: &Message) -> ChatCompletionRequestMessage {
         match msg.role {
             Role::System => ChatCompletionRequestSystemMessageArgs::default()
@@ -104,7 +165,7 @@ impl OpenAIProvider {
         }
     }
 
-    /// Convert tools to OpenAI format
+    /// Converts SDK `Tool`s into the `async_openai` format.
     fn convert_tools(&self, tools: &[Arc<dyn Tool>]) -> Vec<ChatCompletionTool> {
         tools
             .iter()

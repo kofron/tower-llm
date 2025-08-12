@@ -1,26 +1,70 @@
-//! Usage tracking for token consumption and costs
+//! # Usage Tracking for Token Consumption and Costs
+//!
+//! This module provides the necessary data structures and logic for tracking
+//! the token usage of agents. This is crucial for monitoring costs, enforcing
+//! limits, and understanding the performance of different models and agents.
+//!
+//! ## Core Components
+//!
+//! - **[`Usage`]**: A struct that represents the token usage for a single API
+//!   call, including the number of prompt tokens, completion tokens, and total
+//!   tokens.
+//! - **[`UsageStats`]**: A struct that aggregates usage information across an
+//!   entire agent run, providing both a total summary and a breakdown by model
+//!   and by agent.
+//!
+//! ## Cost Estimation
+//!
+//! The `Usage` struct includes an `estimate_cost` method that provides a rough
+//! estimate of the cost of an API call based on hardcoded price points for
+//! different models.
+//!
+//! **Note**: These prices are for illustrative purposes and should be updated
+//! to reflect the latest pricing from the model provider.
+//!
+//! ### Example: Tracking and Summarizing Usage
+//!
+//! ```rust
+//! use openai_agents_rs::usage::{Usage, UsageStats};
+//!
+//! let mut stats = UsageStats::new();
+//!
+//! // Record usage from two different agent interactions.
+//! stats.record("gpt-4", "DataAnalyzer", Usage::new(1200, 300));
+//! stats.record("gpt-3.5-turbo", "ChatBot", Usage::new(500, 150));
+//!
+//! // Print a summary of the total usage and cost.
+//! println!("{}", stats.summary());
+//!
+//! assert_eq!(stats.total.total_tokens, 2150);
+//! assert!(stats.total_cost() > 0.0);
+//! ```
 
 use serde::{Deserialize, Serialize};
 use std::ops::Add;
 
-/// Token usage information
+/// Represents the token usage for a single LLM API call.
+///
+/// This struct tracks the number of tokens in the prompt and the generated
+/// completion, as well as the total.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Usage {
-    /// Number of prompt tokens used
+    /// The number of tokens in the input prompt.
     pub prompt_tokens: usize,
 
-    /// Number of completion tokens generated
+    /// The number of tokens in the generated completion.
     pub completion_tokens: usize,
 
-    /// Total tokens (prompt + completion)
+    /// The total number of tokens (prompt + completion).
     pub total_tokens: usize,
 
-    /// Number of requests made
+    /// The number of API requests made. This is typically 1 for a single `Usage`
+    /// instance.
     pub request_count: usize,
 }
 
 impl Usage {
-    /// Create a new usage instance
+    /// Creates a new `Usage` instance from the prompt and completion token counts.
     pub fn new(prompt_tokens: usize, completion_tokens: usize) -> Self {
         Self {
             prompt_tokens,
@@ -30,12 +74,12 @@ impl Usage {
         }
     }
 
-    /// Create an empty usage instance
+    /// Creates an empty `Usage` instance with all fields set to zero.
     pub fn empty() -> Self {
         Self::default()
     }
 
-    /// Add another usage to this one  
+    /// Adds the values from another `Usage` instance to this one.
     pub fn add_usage(&mut self, other: &Usage) {
         self.prompt_tokens += other.prompt_tokens;
         self.completion_tokens += other.completion_tokens;
@@ -43,8 +87,10 @@ impl Usage {
         self.request_count += other.request_count;
     }
 
-    /// Estimate cost based on model pricing (in USD)
-    /// Note: These are example prices and should be updated based on actual pricing
+    /// Estimates the cost of the API call based on the model's pricing.
+    ///
+    /// The prices are hardcoded and should be updated to reflect current rates.
+    /// Prices are typically quoted per 1,000 tokens.
     pub fn estimate_cost(&self, model: &str) -> f64 {
         let (prompt_price, completion_price) = match model {
             "gpt-4" | "gpt-4-0613" => (0.03, 0.06), // per 1K tokens
@@ -60,7 +106,7 @@ impl Usage {
         prompt_cost + completion_cost
     }
 
-    /// Check if usage exceeds limits
+    /// Checks if the current usage exceeds the specified limits.
     pub fn exceeds_limits(&self, max_tokens: Option<usize>, max_requests: Option<usize>) -> bool {
         if let Some(max) = max_tokens {
             if self.total_tokens > max {
@@ -89,26 +135,29 @@ impl Add for Usage {
     }
 }
 
-/// Aggregated usage statistics
+/// Aggregates `Usage` information across an entire agent run.
+///
+/// `UsageStats` provides a comprehensive overview of token consumption, with
+/// breakdowns by model and by agent.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UsageStats {
-    /// Total usage across all runs
+    /// The total usage across all models and agents.
     pub total: Usage,
 
-    /// Usage by model
+    /// A map of usage statistics broken down by model name.
     pub by_model: std::collections::HashMap<String, Usage>,
 
-    /// Usage by agent
+    /// A map of usage statistics broken down by agent name.
     pub by_agent: std::collections::HashMap<String, Usage>,
 }
 
 impl UsageStats {
-    /// Create new empty stats
+    /// Creates a new, empty `UsageStats` instance.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Record usage for a specific model and agent
+    /// Records a new `Usage` instance, updating the total and the breakdowns.
     pub fn record(&mut self, model: &str, agent: &str, usage: Usage) {
         // Update total
         self.total.add_usage(&usage);
@@ -126,7 +175,7 @@ impl UsageStats {
             .or_insert(usage);
     }
 
-    /// Get total estimated cost
+    /// Calculates the total estimated cost across all models.
     pub fn total_cost(&self) -> f64 {
         self.by_model
             .iter()
@@ -134,7 +183,7 @@ impl UsageStats {
             .sum()
     }
 
-    /// Get a summary report
+    /// Generates a human-readable summary report of the usage statistics.
     pub fn summary(&self) -> String {
         let mut report = format!(
             "Usage Summary:\n\

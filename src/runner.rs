@@ -1,6 +1,35 @@
-//! Runner for executing agents
+//! # Agent Execution Runner
 //!
-//! The runner implements the core agent loop, handling tool calls, handoffs, and guardrails.
+//! The [`Runner`] is the engine that drives the agent's execution. It orchestrates
+//! the entire lifecycle of an agent run, from receiving user input to generating
+//! a final response. The runner implements the core logic for the agent loop,
+//! handling tool calls, handoffs, and guardrails.
+//!
+//! ## The Agent Loop
+//!
+//! The runner's primary responsibility is to manage the interaction loop with the
+//! Language Model (LLM). This loop consists of the following steps:
+//!
+//! 1.  **Input Processing**: The user's input is processed, and any configured
+//!     [`InputGuardrail`]s are applied to validate the input.
+//! 2.  **Message History**: The conversation history is loaded from the
+//!     [`Session`], if one is provided.
+//! 3.  **LLM Interaction**: The agent's system message, along with the message
+//!     history, is sent to the LLM to get a response.
+//! 4.  **Response Handling**: The LLM's response is processed. If it contains
+//!     tool calls, the corresponding tools are executed. If it's a handoff,
+//!     control is transferred to another agent.
+//! 5.  **Output Validation**: Any configured [`OutputGuardrail`]s are applied to
+//!     validate the agent's final output.
+//! 6.  **State Management**: The new messages are saved to the session to
+//!     maintain the conversation's state.
+//!
+//! The loop continues until the agent produces a final response, a tool indicates
+//! the run is complete, or the maximum number of turns is reached.
+//!
+//! [`InputGuardrail`]: crate::guardrail::InputGuardrail
+//! [`OutputGuardrail`]: crate::guardrail::OutputGuardrail
+//! [`Session`]: crate::memory::Session
 
 use std::sync::{Arc, Mutex};
 use tracing::{debug, info, warn};
@@ -17,19 +46,53 @@ use crate::result::{RunResult, StreamEvent, StreamingRunResult};
 use crate::tracing::{AgentSpan, GenerationSpan, ToolSpan, TracingContext};
 use crate::usage::UsageStats;
 
-/// Configuration for a run
+/// Configuration for an agent run.
+///
+/// `RunConfig` provides the necessary settings to control the execution of an
+/// agent. It allows you to specify the maximum number of turns, enable or
+/// disable streaming, and provide a session for persistent conversation history.
+///
+/// ## Example
+///
+/// ```rust
+/// use openai_agents_rs::runner::RunConfig;
+/// use openai_agents_rs::sqlite_session::SqliteSession;
+/// use std::sync::Arc;
+///
+/// # async fn config() -> Result<(), Box<dyn std::error::Error>> {
+/// // Create a session to store conversation history.
+/// let session = Arc::new(SqliteSession::new("test_session", "test_session.db").await?);
+///
+/// // Configure the run to use the session and limit the conversation to 5 turns.
+/// let config = RunConfig {
+///     max_turns: Some(5),
+///     session: Some(session),
+///     ..Default::default()
+/// };
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Clone)]
 pub struct RunConfig {
-    /// Maximum number of turns (LLM calls) before stopping
+    /// The maximum number of turns (LLM calls) to execute before stopping the
+    /// run. This is a safeguard against infinite loops and excessive token usage.
+    /// If not set, the agent's default `max_turns` will be used, which defaults
+    /// to 10.
     pub max_turns: Option<usize>,
 
-    /// Whether to stream events
+    /// A boolean flag to determine whether to stream events during the run.
+    /// When `true`, the `run_stream` method should be used to receive real-time
+    /// updates as the agent executes.
     pub stream: bool,
 
-    /// Session for conversation history
+    /// An optional session to manage the conversation history. The session is
+    /// responsible for loading previous messages and saving new ones. If not
+    /// provided, the conversation will be stateless.
     pub session: Option<Arc<dyn Session>>,
 
-    /// Model provider to use
+    /// The model provider to use for generating responses. If not provided,
+    /// a default `OpenAIProvider` will be used in production, or a `MockProvider`
+    /// in test environments.
     pub model_provider: Option<Arc<dyn ModelProvider>>,
 }
 
@@ -55,11 +118,62 @@ impl Default for RunConfig {
     }
 }
 
-/// The main runner for executing agents
+/// The main runner for executing agents.
+///
+/// `Runner` provides a set of static methods to run an agent with different
+/// execution strategies:
+///
+/// - **[`run`]**: Executes the agent asynchronously and returns the final result
+///   once the run is complete.
+/// - **[`run_sync`]**: A blocking version of `run` that executes the agent
+///   synchronously and blocks until the run is finished.
+/// - **[`run_stream`]**: Executes the agent and returns a stream of events
+///   as the run progresses.
+///
+/// The runner is stateless and can be used to execute multiple agents concurrently.
+///
+/// ## Example: Running an Agent
+///
+/// ```rust,no_run
+/// use openai_agents_rs::{Agent, Runner, runner::RunConfig};
+///
+/// # async fn run_agent() -> Result<(), Box<dyn std::error::Error>> {
+/// let agent = Agent::simple(
+///     "EchoAgent",
+///     "You are an agent that echoes the user's input."
+/// );
+///
+/// let result = Runner::run(
+///     agent,
+///     "Hello, world!",
+///     RunConfig::default()
+/// ).await?;
+///
+/// if result.is_success() {
+///     assert!(result.final_output.as_str().unwrap().contains("Hello, world!"));
+/// }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// [`run`]: Self::run
+/// [`run_sync`]: Self::run_sync
+/// [`run_stream`]: Self::run_stream
 pub struct Runner;
 
 impl Runner {
-    /// Run an agent asynchronously
+    /// Executes an agent asynchronously and returns the result.
+    ///
+    /// This is the primary method for running an agent. It orchestrates the
+    /// entire agent loop, including handling tool calls, applying guardrails,
+    /// and managing state. The run will continue until the agent produces a
+    /// final response or an error occurs.
+    ///
+    /// # Arguments
+    ///
+    /// * `agent` - The [`Agent`] to be executed.
+    /// * `input` - The user's input to start the conversation.
+    /// * `config` - The [`RunConfig`] to control the execution.
     pub async fn run(
         agent: Agent,
         input: impl Into<String>,
@@ -97,7 +211,11 @@ impl Runner {
         Ok(result)
     }
 
-    /// Run an agent synchronously (blocking)
+    /// Executes an agent synchronously and blocks until the result is available.
+    ///
+    /// This method is a convenience wrapper around the `run` method, providing
+    /// a blocking alternative for use cases where an async runtime is not
+    /// readily available. It creates a new Tokio runtime to execute the agent.
     pub fn run_sync(
         agent: Agent,
         input: impl Into<String>,
@@ -107,7 +225,12 @@ impl Runner {
         runtime.block_on(Self::run(agent, input, config))
     }
 
-    /// Run an agent with streaming
+    /// Executes an agent and returns a stream of events.
+    ///
+    /// This method is designed for real-time applications where you want to
+    /// receive updates as the agent executes. It spawns a background task to
+    /// run the agent and returns a [`StreamingRunResult`] that provides a
+    /// stream of [`StreamEvent`]s.
     pub async fn run_stream(
         agent: Agent,
         input: impl Into<String>,
@@ -140,7 +263,11 @@ impl Runner {
         Ok(StreamingRunResult::new(stream, trace_id))
     }
 
-    /// The main agent loop
+    /// The core logic for the agent's execution loop.
+    ///
+    /// This private method manages the turn-by-turn interaction with the LLM,
+    /// handling tool calls, handoffs, and final responses. It is called by the
+    /// public `run` methods.
     async fn run_loop(
         mut agent: Agent,
         mut messages: Vec<Message>,

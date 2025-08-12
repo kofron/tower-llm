@@ -13,182 +13,102 @@ A Rust implementation of the OpenAI Agents SDK, providing a lightweight yet powe
 - ✅ **Async/Sync Support**: Both async and blocking execution modes
 - ✅ **Streaming**: Real-time event streaming for long-running operations
 
-## Installation
+## Getting Started
 
-Add to your `Cargo.toml`:
+### Installation
+
+Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
 openai-agents-rs = "0.1.0"
 ```
 
+### Environment Setup
+
+Before running the examples or your own code, you need to set your OpenAI API key as an environment variable:
+
+```bash
+export OPENAI_API_KEY="your-api-key"
+```
+
 ## Quick Start
 
-```rust
-use openai_agents_rs::{Agent, Runner, RunConfig};
+Here's a simple example of how to create and run an agent that writes haikus:
+
+````rust,no_run
+use openai_agents_rs::{Agent, Runner, runner::RunConfig};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Create an agent
+    // Create an agent with a name and instructions.
     let agent = Agent::simple(
-        "Assistant",
-        "You are a helpful assistant"
+        "HaikuBot",
+        "You are a helpful assistant that writes haikus about programming."
     );
 
-    // Run the agent
+    // Run the agent with a prompt.
     let result = Runner::run(
         agent,
-        "Write a haiku about recursion",
+        "Write a haiku about Rust",
         RunConfig::default(),
     ).await?;
 
-    println!("{}", result.final_output);
+    if result.is_success() {
+        println!("Haiku about Rust:");
+        println!("{}", result.final_output);
+    } else {
+        println!("Error: {:?}", result.error());
+    }
+
     Ok(())
 }
-```
 
 ## Core Concepts
 
-### Agents
+The SDK is built around a few core concepts that work together to create powerful agentic workflows. For more detailed information, please refer to the [crate documentation](https://docs.rs/openai-agents-rs).
 
-Agents are LLMs configured with specific instructions and capabilities:
+- **[`Agent`]**: The fundamental building block, representing an entity that can process input and generate a response. Agents are defined by their configuration, including their identity, instructions, and tools.
+- **[`Runner`]**: The engine that executes an agent's logic. It manages the interaction loop with the LLM, handles tool calls, and orchestrates the overall workflow.
+- **[`Tool`]**: A function or capability that an agent can use to interact with the outside world, such as calling an API or accessing a database.
+- **[`Session`]**: Manages the state of an interaction, including the history of messages. A [`SqliteSession`] is provided for persistent state.
+- **[`Guardrail`]**: A mechanism for validating and sanitizing the input and output of an agent, ensuring safety and reliability.
 
-```rust
-let agent = Agent::simple("MyAgent", "You are helpful")
-    .with_model("gpt-4")
-    .with_temperature(0.7)
-    .with_max_turns(10);
-```
-
-### Tools
-
-Tools allow agents to interact with external systems:
-
-```rust
-use openai_agents_rs::{FunctionTool, Tool};
-use std::sync::Arc;
-
-let tool = Arc::new(FunctionTool::simple(
-    "uppercase",
-    "Converts text to uppercase",
-    |text: String| text.to_uppercase(),
-));
-
-let agent = Agent::simple("Agent", "Use tools when needed")
-    .with_tool(tool);
-```
-
-### Handoffs
-
-Agents can transfer control to specialized agents:
-
-```rust
-use openai_agents_rs::Handoff;
-
-let specialist = Agent::simple("Specialist", "I handle special cases");
-let handoff = Handoff::new(specialist, "Handles complex queries");
-
-let main_agent = Agent::simple("Main", "I delegate when needed")
-    .with_handoff(handoff);
-```
-
-### Guardrails
-
-Validate input and output for safety:
-
-```rust
-use openai_agents_rs::guardrail::{MaxLengthGuardrail, InputGuardrail};
-use std::sync::Arc;
-
-let guard = Arc::new(MaxLengthGuardrail::new(1000));
-let agent = Agent::simple("Safe", "I'm safe")
-    .with_input_guardrail(guard);
-```
-
-### Sessions
-
-Maintain conversation history:
-
-```rust
-use openai_agents_rs::{SqliteSession, Session};
-use std::sync::Arc;
-
-let session = Arc::new(SqliteSession::new_default("user_123"));
-
-let config = RunConfig {
-    session: Some(session),
-    ..Default::default()
-};
-
-// First message
-let result1 = Runner::run(agent.clone(), "Hello", config.clone()).await?;
-
-// Second message - remembers context
-let result2 = Runner::run(agent, "What did I just say?", config).await?;
-```
+[`Agent`]: https://docs.rs/openai-agents-rs/latest/openai_agents_rs/agent/struct.Agent.html
+[`Runner`]: https://docs.rs/openai-agents-rs/latest/openai_agents_rs/runner/struct.Runner.html
+[`Tool`]: https://docs.rs/openai-agents-rs/latest/openai_agents_rs/tool/trait.Tool.html
+[`Session`]: https://docs.rs/openai-agents-rs/latest/openai_agents_rs/memory/trait.Session.html
+[`SqliteSession`]: https://docs.rs/openai-agents-rs/latest/openai_agents_rs/sqlite_session/struct.SqliteSession.html
+[`Guardrail`]: https://docs.rs/openai-agents-rs/latest/openai_agents_rs/guardrail/index.html
 
 ## Examples
 
-The `examples/` directory contains comprehensive demonstrations:
+The `examples/` directory contains a rich set of demonstrations that showcase the capabilities of the SDK.
 
 ### Basic Examples
 
-- **`hello_world.rs`** - Simple agent that writes haikus
-- **`tool_example.rs`** - Using tools to fetch weather information
+- **`hello_world.rs`**: A simple agent that writes haikus.
+- **`tool_example.rs`**: An agent that uses a tool to fetch weather information.
 
 ### Advanced Examples
 
-- **`calculator.rs`** - Multi-tool calculator that solves complex math problems step-by-step
+- **`calculator.rs`**: A multi-tool calculator that solves complex math problems step-by-step.
+- **`multi_agent_research.rs`**: A research system with specialized agents for coordination, research, analysis, and archiving.
+- **`session_with_guardrails.rs`**: A personal assistant with session memory and safety guardrails.
+- **`persistent_session.rs`**: Demonstrates the use of SQLite for persistent conversation history.
+- **`parallel_tools.rs`**: Shows how to execute multiple tools concurrently for improved performance.
 
-  - Demonstrates multiple tool calls across rounds
-  - Shows how agents break down complex problems
-  - Includes interactive mode for custom calculations
-
-- **`multi_agent_research.rs`** - Research system with specialized agents
-
-  - Coordinator agent that delegates to specialists
-  - Research agent for searching knowledge base
-  - Analyst agent for synthesizing information
-  - Archivist agent for storing new facts
-  - Demonstrates agent handoffs and collaboration
-
-- **`session_with_guardrails.rs`** - Personal assistant with safety features
-
-  - Session memory for conversation history
-  - Input guardrails blocking sensitive information
-  - Output guardrails adding disclaimers
-  - Custom guardrail implementations
-  - Note-taking and reminder tools
-
-- **`persistent_session.rs`** - SQLite-based persistent sessions
-
-  - Conversation history that survives application restarts
-  - Database-backed session storage with SQLite
-  - Demonstrates session continuity across runs
-  - Automatic session recovery
-
-- **`parallel_tools.rs`** - Concurrent tool execution
-  - Multiple tools working in parallel for efficiency
-  - Weather, news, and statistics gathering
-  - Performance optimization through parallelization
-  - Demonstrates time savings with concurrent execution
-
-Run examples with:
+To run the examples:
 
 ```bash
-# Basic examples
+cargo run --example <example_name>
+````
+
+For instance, to run the `hello_world` example:
+
+```bash
 cargo run --example hello_world
-cargo run --example tool_example
-
-# Advanced examples with interaction
-cargo run --example calculator
-cargo run --example multi_agent_research
-cargo run --example session_with_guardrails
-cargo run --example persistent_session
-cargo run --example parallel_tools
 ```
-
-Each example includes both pre-configured scenarios and interactive modes where you can experiment with the agents.
 
 ## Architecture
 

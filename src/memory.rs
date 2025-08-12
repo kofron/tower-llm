@@ -1,7 +1,26 @@
-//! Session memory management for maintaining conversation history
+//! # Session Memory Management
 //!
-//! Sessions allow agents to maintain context across multiple runs.
-
+//! The session management system is responsible for maintaining the state of
+//! conversations, allowing agents to retain context across multiple interactions.
+//! This is crucial for building conversational agents that can remember previous
+//! messages and actions.
+//!
+//! The core of this system is the [`Session`] trait, which defines a standard
+//! interface for session storage. This crate provides two implementations:
+//!
+//! - [`MemorySession`]: An in-memory session store suitable for testing and simple
+//!   use cases where persistence is not required.
+//! - [`SqliteSession`]: A persistent session store that uses SQLite to save
+//!   conversation history to a file.
+//!
+//! ## The `Session` Trait
+//!
+//! The [`Session`] trait provides methods for adding, retrieving, and clearing
+//! conversation items (`RunItem`). It ensures that different session storage
+//! implementations can be used interchangeably.
+//!
+//! Implementors of this trait are responsible for storing and retrieving the
+//! sequence of `RunItem`s that make up a conversation.
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -10,32 +29,50 @@ use std::sync::{Arc, Mutex};
 use crate::error::Result;
 use crate::items::{Message, RunItem};
 
-/// Trait for session storage implementations
+/// Defines the interface for session storage implementations.
 #[async_trait]
 pub trait Session: Send + Sync + Debug {
-    /// Get the session ID
+    /// Returns the unique identifier for the session.
     fn session_id(&self) -> &str;
 
-    /// Retrieve conversation history
+    /// Retrieves a list of `RunItem`s from the session.
+    ///
+    /// # Arguments
+    ///
+    /// * `limit` - An optional `usize` to limit the number of items returned.
+    ///   If `None`, all items are retrieved.
     async fn get_items(&self, limit: Option<usize>) -> Result<Vec<RunItem>>;
 
-    /// Add new items to the session
+    /// Adds a vector of `RunItem`s to the session.
+    ///
+    /// This method is used to persist new events in the conversation, such as
+    /// user messages, agent responses, and tool calls.
     async fn add_items(&self, items: Vec<RunItem>) -> Result<()>;
 
-    /// Remove and return the most recent item
+    /// Removes and returns the most recent `RunItem` from the session.
+    ///
+    /// This can be useful for implementing "undo" functionality or for
+    /// correcting the last action in a conversation.
     async fn pop_item(&self) -> Result<Option<RunItem>>;
 
-    /// Clear all items in the session
+    /// Clears all items from the session, effectively resetting the conversation.
     async fn clear_session(&self) -> Result<()>;
 
-    /// Get messages formatted for the conversation
+    /// Retrieves the conversation history as a vector of `Message`s.
+    ///
+    /// This method converts the stored `RunItem`s into the `Message` format
+    /// that is expected by the LLM for generating the next response.
     async fn get_messages(&self, limit: Option<usize>) -> Result<Vec<Message>> {
         let items = self.get_items(limit).await?;
         Ok(crate::items::ItemHelpers::to_messages(&items))
     }
 }
 
-/// In-memory session storage (for testing and simple use cases)
+/// An in-memory session storage implementation, useful for testing and simple
+/// applications where persistence is not required.
+///
+/// `MemorySession` stores the entire conversation history in a `Vec<RunItem>`
+/// protected by a `Mutex`, ensuring thread-safe access.
 #[derive(Debug, Clone)]
 pub struct MemorySession {
     session_id: String,
@@ -43,6 +80,7 @@ pub struct MemorySession {
 }
 
 impl MemorySession {
+    /// Creates a new `MemorySession` with the given session ID.
     pub fn new(session_id: impl Into<String>) -> Self {
         Self {
             session_id: session_id.into(),
@@ -86,38 +124,76 @@ impl Session for MemorySession {
     }
 }
 
-/// Session manager for handling multiple sessions
+/// Manages multiple, isolated sessions in a thread-safe manner.
+///
+/// `SessionManager` acts as a registry for different sessions, allowing you to
+/// store, retrieve, and manage them by their unique session IDs. This is
+/// essential for applications that need to handle multiple concurrent
+/// conversations, such as a web server.
+///
+/// ## Example: Managing Multiple User Sessions
+///
+/// ```rust
+/// use openai_agents_rs::memory::{SessionManager, MemorySession};
+/// use std::sync::Arc;
+///
+/// let manager = SessionManager::new();
+///
+/// // Create and register sessions for two different users.
+/// let user1_session = Arc::new(MemorySession::new("user1"));
+/// let user2_session = Arc::new(MemorySession::new("user2"));
+///
+/// manager.register(user1_session);
+/// manager.register(user2_session);
+///
+/// // Retrieve a specific session.
+/// let session = manager.get("user1").unwrap();
+/// assert_eq!(session.session_id(), "user1");
+///
+/// // List all active sessions.
+/// let session_ids = manager.list_sessions();
+/// assert_eq!(session_ids.len(), 2);
+/// assert!(session_ids.contains(&"user1".to_string()));
+/// ```
 #[derive(Debug)]
 pub struct SessionManager {
     sessions: Arc<Mutex<HashMap<String, Arc<dyn Session>>>>,
 }
 
 impl SessionManager {
+    /// Creates a new, empty `SessionManager`.
     pub fn new() -> Self {
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    /// Register a session
+    /// Registers a session with the manager.
+    ///
+    /// The session is stored in a `HashMap` with its session ID as the key.
     pub fn register(&self, session: Arc<dyn Session>) {
         let mut sessions = self.sessions.lock().unwrap();
         sessions.insert(session.session_id().to_string(), session);
     }
 
-    /// Get a session by ID
+    /// Retrieves a session by its ID.
+    ///
+    /// Returns an `Option<Arc<dyn Session>>`, with `None` if no session with
+    /// the given ID is found.
     pub fn get(&self, session_id: &str) -> Option<Arc<dyn Session>> {
         let sessions = self.sessions.lock().unwrap();
         sessions.get(session_id).cloned()
     }
 
-    /// Remove a session
+    /// Removes a session from the manager by its ID.
+    ///
+    /// Returns the removed session if it existed.
     pub fn remove(&self, session_id: &str) -> Option<Arc<dyn Session>> {
         let mut sessions = self.sessions.lock().unwrap();
         sessions.remove(session_id)
     }
 
-    /// List all session IDs
+    /// Returns a list of all registered session IDs.
     pub fn list_sessions(&self) -> Vec<String> {
         let sessions = self.sessions.lock().unwrap();
         sessions.keys().cloned().collect()

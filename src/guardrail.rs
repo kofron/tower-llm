@@ -1,6 +1,140 @@
-//! Guardrails for input and output validation
+//! # Agent Guardrails for Input and Output Validation
 //!
-//! Guardrails provide safety checks to validate user input and agent output.
+//! Guardrails are a critical component for building safe and reliable agents.
+//! They provide a mechanism to validate and sanitize the data that flows into
+//! and out of an agent. This module introduces two types of guardrails:
+//!
+//! - **[`InputGuardrail`]**: Checks user input before it is processed by the agent.
+//!   This can be used to prevent prompt injection, enforce content policies, or
+//!   block malicious inputs.
+//! - **[`OutputGuardrail`]**: Validates the agent's response before it is sent
+//!   to the user. This can be used for content moderation, ensuring the output
+//!   conforms to a specific format, or redacting sensitive information.
+//!
+//! ## How Guardrails Work
+//!
+//! Guardrails are implemented as traits and are executed by the [`GuardrailRunner`].
+//! They are executed in order of their `priority`, with higher priority guardrails
+//! running first. If a guardrail check fails, the agent run is immediately
+//! halted, and an error is returned.
+//!
+//! Output guardrails also have the ability to modify the content before passing
+//! it along to the next guardrail or back to the user.
+//!
+//! ### Example: Using a `MaxLengthGuardrail`
+//!
+//! ```rust
+//! use openai_agents_rs::guardrail::{InputGuardrail, MaxLengthGuardrail};
+//!
+//! # #[tokio::main]
+//! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let guard = MaxLengthGuardrail::new(50);
+//!
+//! // This input is valid.
+//! let result = guard.check("This is a reasonable length input.").await?;
+//! assert!(result.passed);
+//!
+//! // This input will fail the check.
+//! let long_input = "This input is definitely way too long and will not be \
+//!                     allowed to pass through the guardrail.";
+//! let result = guard.check(long_input).await?;
+//! assert!(!result.passed);
+//! assert!(result.reason.unwrap().contains("exceeds maximum length"));
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ### Example: Using a `PatternBlockGuardrail`
+//!
+//! ```rust
+//! use openai_agents_rs::guardrail::{InputGuardrail, PatternBlockGuardrail};
+//!
+//! # #[tokio::main]
+//! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let profanity_filter = PatternBlockGuardrail::new(
+//!     "ProfanityFilter",
+//!     vec!["darn".to_string(), "heck".to_string()],
+//! );
+//!
+//! // This input is clean.
+//! let result = profanity_filter.check("What a wonderful day!").await?;
+//! assert!(result.passed);
+//!
+//! // This input contains a blocked pattern.
+//! let result = profanity_filter.check("Oh, darn it!").await?;
+//! assert!(!result.passed);
+//! assert!(result.reason.unwrap().contains("darn"));
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## Custom Guardrails
+//!
+//! You can implement your own guardrails by implementing the [`InputGuardrail`]
+//! and [`OutputGuardrail`] traits. This allows you to add specific validation
+//! logic based on your requirements.
+//!
+//! ## Priority Ordering
+//!
+//! Guardrails are executed in descending order of priority. This means that
+//! guardrails with a higher priority value will run before those with a lower
+//! priority. This allows you to control the order in which checks are performed.
+//!
+//! ```rust
+//! use openai_agents_rs::guardrail::{InputGuardrail, GuardrailResult, GuardrailRunner};
+//! use openai_agents_rs::error::{Result, AgentsError};
+//! use async_trait::async_trait;
+//!
+//! # #[derive(Debug)]
+//! # struct AlwaysFailGuard {
+//! #     name: String,
+//! #     priority: i32,
+//! # }
+//!
+//! # #[async_trait]
+//! # impl InputGuardrail for AlwaysFailGuard {
+//! #     fn name(&self) -> &str {
+//! #         &self.name
+//! #     }
+//! #
+//! #     async fn check(&self, _: &str) -> Result<GuardrailResult> {
+//! #         Ok(GuardrailResult::fail(self.name.clone()))
+//! #     }
+//! #
+//! #     fn priority(&self) -> i32 {
+//! #         self.priority
+//! #     }
+//! # }
+//!
+//! # #[tokio::main]
+//! # async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+//! #     let guards: Vec<std::sync::Arc<dyn InputGuardrail>> = vec![
+//! #         std::sync::Arc::new(AlwaysFailGuard {
+//! #             name: "LowPriority".to_string(),
+//! #             priority: 1,
+//! #         }),
+//! #         std::sync::Arc::new(AlwaysFailGuard {
+//! #             name: "HighPriority".to_string(),
+//! #             priority: 10,
+//! #         }),
+//! #     ];
+//! #
+//! #     let result = GuardrailRunner::check_input(&guards, "test").await;
+//! #     assert!(result.is_err());
+//! #
+//! #     // Should fail with high priority guard first
+//! #     if let Err(AgentsError::InputGuardrailTriggered { message }) = result {
+//! #         assert_eq!(message, "HighPriority");
+//! #     } else {
+//! #         panic!("Expected InputGuardrailTriggered error");
+//! #     }
+//! #     Ok(())
+//! # }
+//! ```
+//!
+//! ```
+//!
+//! ```
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -8,21 +142,27 @@ use std::fmt::Debug;
 
 use crate::error::{AgentsError, Result};
 
-/// Result of a guardrail check
+/// Represents the result of a single guardrail check.
+///
+/// A `GuardrailResult` indicates whether the check passed and, if not, provides
+/// a reason for the failure. For output guardrails, it can also include a
+/// modified version of the content.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GuardrailResult {
-    /// Whether the check passed
+    /// A boolean indicating whether the content passed the guardrail check.
     pub passed: bool,
 
-    /// Reason if the check failed
+    /// An optional string providing a reason for the failure. This is `None` if
+    /// the check passed.
     pub reason: Option<String>,
 
-    /// Optional modified content (for output guardrails)
+    /// For output guardrails, this field can contain a modified version of the
+    /// content. If `None`, the original content is used.
     pub modified_content: Option<String>,
 }
 
 impl GuardrailResult {
-    /// Create a passing result
+    /// Creates a `GuardrailResult` indicating that the check passed.
     pub fn pass() -> Self {
         Self {
             passed: true,
@@ -31,7 +171,8 @@ impl GuardrailResult {
         }
     }
 
-    /// Create a failing result with a reason
+    /// Creates a `GuardrailResult` indicating that the check failed, with a
+    /// provided reason.
     pub fn fail(reason: impl Into<String>) -> Self {
         Self {
             passed: false,
@@ -40,7 +181,9 @@ impl GuardrailResult {
         }
     }
 
-    /// Create a passing result with modified content
+    /// Creates a `GuardrailResult` indicating that the check passed, but with
+    /// modified content. This is typically used by output guardrails that
+    /// sanitize or reformat the agent's response.
     pub fn pass_with_modification(content: impl Into<String>) -> Self {
         Self {
             passed: true,
@@ -50,37 +193,54 @@ impl GuardrailResult {
     }
 }
 
-/// Trait for input guardrails
+/// A trait for implementing input guardrails.
+///
+/// Input guardrails are used to validate user input before it is sent to the
+/// agent. This is a crucial step for preventing security vulnerabilities and
+/// ensuring the agent behaves as expected.
 #[async_trait]
 pub trait InputGuardrail: Send + Sync + Debug {
-    /// Name of the guardrail
+    /// Returns the name of the guardrail, used for logging and identification.
     fn name(&self) -> &str;
 
-    /// Check if the input is valid
+    /// Performs the validation check on the input string.
+    ///
+    /// The method returns a [`GuardrailResult`] indicating whether the input
+    /// is valid.
     async fn check(&self, input: &str) -> Result<GuardrailResult>;
 
-    /// Priority of this guardrail (higher = checked first)
+    /// Defines the execution priority of the guardrail.
+    ///
+    /// Guardrails are executed in descending order of priority. Higher values
+    /// are executed first.
     fn priority(&self) -> i32 {
         0
     }
 }
 
-/// Trait for output guardrails
+/// A trait for implementing output guardrails.
+///
+/// Output guardrails are used to validate the agent's response before it is
+/// sent to the user. They can also be used to modify the output, for example,
+/// to redact sensitive information.
 #[async_trait]
 pub trait OutputGuardrail: Send + Sync + Debug {
-    /// Name of the guardrail
+    /// Returns the name of the guardrail.
     fn name(&self) -> &str;
 
-    /// Check if the output is valid, optionally modifying it
+    /// Performs the validation check on the output string.
+    ///
+    /// This method can either approve, reject, or modify the output. The
+    /// result is returned as a [`GuardrailResult`].
     async fn check(&self, output: &str) -> Result<GuardrailResult>;
 
-    /// Priority of this guardrail (higher = checked first)
+    /// Defines the execution priority of the guardrail.
     fn priority(&self) -> i32 {
         0
     }
 }
 
-/// Simple length-based input guardrail
+/// An [`InputGuardrail`] that checks if the input length exceeds a maximum value.
 #[derive(Debug, Clone)]
 pub struct MaxLengthGuardrail {
     name: String,
@@ -88,6 +248,7 @@ pub struct MaxLengthGuardrail {
 }
 
 impl MaxLengthGuardrail {
+    /// Creates a new `MaxLengthGuardrail` with the specified maximum length.
     pub fn new(max_length: usize) -> Self {
         Self {
             name: format!("MaxLength_{}", max_length),
@@ -114,7 +275,35 @@ impl InputGuardrail for MaxLengthGuardrail {
     }
 }
 
-/// Pattern-based content filter
+/// An [`InputGuardrail`] and [`OutputGuardrail`] that blocks content containing
+/// specific patterns.
+///
+/// This guardrail is useful for filtering out inappropriate language, sensitive
+/// information, or other undesirable content. The pattern matching is case-insensitive.
+///
+/// ### Example: Filtering Profanity
+///
+/// ```rust
+/// use openai_agents_rs::guardrail::{InputGuardrail, PatternBlockGuardrail};
+///
+/// # #[tokio::main]
+/// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let profanity_filter = PatternBlockGuardrail::new(
+///     "ProfanityFilter",
+///     vec!["darn".to_string(), "heck".to_string()],
+/// );
+///
+/// // This input is clean.
+/// let result = profanity_filter.check("What a wonderful day!").await?;
+/// assert!(result.passed);
+///
+/// // This input contains a blocked pattern.
+/// let result = profanity_filter.check("Oh, darn it!").await?;
+/// assert!(!result.passed);
+/// assert!(result.reason.unwrap().contains("darn"));
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct PatternBlockGuardrail {
     name: String,
@@ -122,6 +311,7 @@ pub struct PatternBlockGuardrail {
 }
 
 impl PatternBlockGuardrail {
+    /// Creates a new `PatternBlockGuardrail` with a list of patterns to block.
     pub fn new(name: impl Into<String>, patterns: Vec<String>) -> Self {
         Self {
             name: name.into(),
@@ -170,11 +360,17 @@ impl OutputGuardrail for PatternBlockGuardrail {
     }
 }
 
-/// Helper to run multiple guardrails
+/// A helper struct for executing a sequence of guardrails.
+///
+/// The `GuardrailRunner` is responsible for sorting guardrails by priority and
+/// executing them in the correct order.
 pub struct GuardrailRunner;
 
 impl GuardrailRunner {
-    /// Run input guardrails, returning error if any fail
+    /// Executes a sequence of input guardrails.
+    ///
+    /// If any guardrail fails, the method returns an `Err` with a
+    /// [`AgentsError::InputGuardrailTriggered`] error.
     pub async fn check_input(
         guardrails: &[std::sync::Arc<dyn InputGuardrail>],
         input: &str,
@@ -196,7 +392,11 @@ impl GuardrailRunner {
         Ok(())
     }
 
-    /// Run output guardrails, returning the (possibly modified) output
+    /// Executes a sequence of output guardrails.
+    ///
+    /// This method processes the output through each guardrail, allowing for
+    /// modifications. If a guardrail fails, it returns an `Err` with an
+    /// [`AgentsError::OutputGuardrailTriggered`] error.
     pub async fn check_output(
         guardrails: &[std::sync::Arc<dyn OutputGuardrail>],
         output: &str,

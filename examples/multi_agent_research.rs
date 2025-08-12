@@ -1,15 +1,41 @@
-//! Multi-agent research assistant example
+//! # Advanced Example: Multi-Agent Research System
 //!
-//! This example demonstrates how multiple specialized agents can work together
-//! through handoffs to complete complex research tasks.
+//! This example demonstrates a sophisticated multi-agent system designed for
+//! research tasks. It showcases how a "coordinator" agent can delegate sub-tasks
+//! to a team of specialized agents, each with its own unique tools and purpose.
 //!
-//! Run with: cargo run --example multi_agent_research
+//! ## Key Concepts Demonstrated
+//!
+//! - **Agent Handoffs**: The core of this example is the handoff mechanism,
+//!   which allows the `CoordinatorAgent` to transfer control to the appropriate
+//!   specialist based on the user's request.
+//! - **Specialized Agents**: The system includes four distinct agents:
+//!   - `CoordinatorAgent`: The entry point that analyzes user requests and
+//!     delegates to other agents.
+//!   - `ResearchAgent`: Responsible for searching a simulated knowledge base.
+//!   - `AnalystAgent`: Summarizes and analyzes information.
+//!   - `ArchivistAgent`: Stores new information in the knowledge base.
+//! - **Shared State**: The `KnowledgeBase` is shared among the agents, allowing
+//!   them to collaborate and build on each other's work.
+//! - **Complex Workflows**: The example runs through a series of predefined
+//!   queries that require collaboration between multiple agents to complete.
+//!
+//! To run this example, you first need to set your `OPENAI_API_KEY` environment
+//! variable.
+//!
+//! ```bash
+//! export OPENAI_API_KEY="your-api-key"
+//! cargo run --example multi_agent_research
+//! ```
 
 use openai_agents_rs::{handoff::Handoff, runner::RunConfig, Agent, FunctionTool, Runner};
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
 
-/// Simulated database of information
+/// A simulated knowledge base to store and retrieve information.
+///
+/// In a real-world application, this could be a connection to a database,
+/// a vector store, or an external API.
 #[derive(Clone)]
 struct KnowledgeBase {
     data: Arc<Mutex<Vec<(String, String)>>>,
@@ -48,6 +74,7 @@ impl KnowledgeBase {
         }
     }
 
+    /// Searches the knowledge base for a given query.
     fn search(&self, query: &str) -> Vec<(String, String)> {
         let data = self.data.lock().unwrap();
         let query_lower = query.to_lowercase();
@@ -61,6 +88,7 @@ impl KnowledgeBase {
             .collect()
     }
 
+    /// Adds a new fact to the knowledge base.
     fn add_fact(&self, topic: String, content: String) {
         let mut data = self.data.lock().unwrap();
         println!("  [KnowledgeBase] Added fact about: {}", topic);
@@ -68,7 +96,7 @@ impl KnowledgeBase {
     }
 }
 
-/// Create a search tool for the knowledge base
+/// Creates a tool for searching the knowledge base.
 fn create_search_tool(kb: KnowledgeBase) -> Arc<FunctionTool> {
     Arc::new(FunctionTool::new(
         "search_knowledge".to_string(),
@@ -106,7 +134,7 @@ fn create_search_tool(kb: KnowledgeBase) -> Arc<FunctionTool> {
     ))
 }
 
-/// Create a fact storage tool
+/// Creates a tool for storing a new fact in the knowledge base.
 fn create_store_tool(kb: KnowledgeBase) -> Arc<FunctionTool> {
     Arc::new(FunctionTool::new(
         "store_fact".to_string(),
@@ -146,14 +174,14 @@ fn create_store_tool(kb: KnowledgeBase) -> Arc<FunctionTool> {
     ))
 }
 
-/// Create a summarization tool
+/// Creates a tool for summarizing text.
 fn create_summarize_tool() -> Arc<FunctionTool> {
     Arc::new(FunctionTool::simple(
         "summarize",
         "Create a brief summary of the provided text",
         |text: String| {
             println!("  [Summarize Tool] Creating summary...");
-            // In a real implementation, this might use an NLP model
+            // In a real implementation, this might use an NLP model.
             let sentences: Vec<&str> = text.split(". ").collect();
             if sentences.len() <= 2 {
                 text
@@ -164,6 +192,7 @@ fn create_summarize_tool() -> Arc<FunctionTool> {
     ))
 }
 
+/// Creates the `ResearchAgent`, which is responsible for searching the knowledge base.
 fn create_research_agent(kb: KnowledgeBase) -> Agent {
     Agent::simple(
         "ResearchAgent",
@@ -175,6 +204,7 @@ fn create_research_agent(kb: KnowledgeBase) -> Agent {
     .with_tool(create_search_tool(kb))
 }
 
+/// Creates the `AnalystAgent`, which is responsible for summarizing and analyzing text.
 fn create_analyst_agent() -> Agent {
     Agent::simple(
         "AnalystAgent",
@@ -185,6 +215,7 @@ fn create_analyst_agent() -> Agent {
     .with_tool(create_summarize_tool())
 }
 
+/// Creates the `ArchivistAgent`, which is responsible for storing new information.
 fn create_archivist_agent(kb: KnowledgeBase) -> Agent {
     Agent::simple(
         "ArchivistAgent",
@@ -199,15 +230,18 @@ fn create_archivist_agent(kb: KnowledgeBase) -> Agent {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Multi-Agent Research System ===\n");
 
-    // Create shared knowledge base
+    // 1. Set up the shared KnowledgeBase and specialized agents.
     let kb = KnowledgeBase::new();
 
-    // Create specialized agents
+    // Create the specialized agents that will perform the actual work.
     let research_agent = create_research_agent(kb.clone());
     let analyst_agent = create_analyst_agent();
     let archivist_agent = create_archivist_agent(kb.clone());
 
-    // Create handoffs
+    // 2. Define the handoffs between the coordinator and the specialists.
+    //
+    // A handoff tells the coordinator that another agent is available and
+    // describes what it's capable of.
     let research_handoff = Handoff::new(
         research_agent,
         "Searches the knowledge base for specific information",
@@ -223,7 +257,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Stores new information in the knowledge base",
     );
 
-    // Create the coordinator agent that delegates to specialists
+    // 3. Create the coordinator agent.
+    //
+    // The coordinator's instructions are to delegate tasks to the appropriate
+    // specialist. It is given the handoffs, which it will treat like tools.
     let coordinator = Agent::simple(
         "CoordinatorAgent",
         "You are a research coordinator. You delegate tasks to specialized agents:
@@ -237,7 +274,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .with_handoffs(vec![research_handoff, analyst_handoff, archivist_handoff])
     .with_max_turns(10);
 
-    // Test queries that require different agents
+    // 4. Run a series of predefined queries.
+    //
+    // These queries are designed to trigger different multi-agent workflows.
     let queries = vec![
         "What can you tell me about Rust programming?",
         "Search for information about machine learning and then analyze its key concepts.",
@@ -254,7 +293,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if result.is_success() {
             println!("\nResponse: {}\n", result.final_output);
 
-            // Show which agents were involved
+            // Show which agents were involved in the process.
             let handoffs: Vec<_> = result
                 .items
                 .iter()
@@ -277,7 +316,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("\n{}\n", "=".repeat(70));
     }
 
-    // Interactive mode
+    // 5. Enter interactive mode.
+    //
+    // This allows you to experiment with the multi-agent system by providing
+    // your own queries.
     println!("Interactive mode - you can:");
     println!("  - Ask questions about topics in the knowledge base");
     println!("  - Request analysis of information");

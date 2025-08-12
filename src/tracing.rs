@@ -1,3 +1,62 @@
+//! # Tracing System for Agent Execution
+//!
+//! This module provides a structured tracing system for monitoring and debugging
+//! agent execution. It is built on the concepts of traces and spans, which are
+//! common in distributed tracing systems. This allows for detailed observability
+//! into the agent's behavior, including LLM interactions, tool calls, and
+//! guardrail evaluations.
+//!
+//! ## Core Concepts
+//!
+//! - **Trace**: A trace represents the entire lifecycle of a single agent run,
+//!   from the initial user input to the final response. Each trace is identified
+//!   by a unique `TraceId`.
+//! - **Span**: A span represents a single unit of work within a trace, such as
+//!   an LLM call or a tool execution. Spans can be nested to create a causal
+//!   chain of events. Each span has a unique `SpanId`.
+//!
+//! ## Tracing Components
+//!
+//! - **[`TracingContext`]**: Manages the state of a trace, including the creation
+//!   and completion of spans.
+//! - **[`Span`]**: The data structure that holds all the information about a
+//!   single span, including its type, start and end times, and any associated
+//!   errors or metadata. The `SpanType` enum defines the different kinds of
+//!   operations that can be traced.
+//! - **Span Builders**: Helper structs like [`AgentSpan`], [`ToolSpan`], and
+//!   [`GenerationSpan`] provide a convenient, RAII-style interface for creating
+//!   and managing spans.
+//! - **[`TraceExporter`]**: A trait for exporting completed traces to external
+//!   systems, such as logging platforms or observability tools. A simple
+//!   [`ConsoleExporter`] is provided for debugging.
+//!
+//! ### Example: Manually Creating Spans
+//!
+//! ```rust
+//! use openai_agents_rs::tracing::{TracingContext, SpanType};
+//!
+//! let mut context = TracingContext::new();
+//!
+//! // Start the parent span.
+//! let agent_span_id = context.start_span(SpanType::Agent {
+//!     agent_name: "MyAgent".to_string(),
+//!     instructions: "Be helpful.".to_string(),
+//! });
+//!
+//! // Start a nested span for a tool call.
+//! let tool_span_id = context.start_span(SpanType::Tool {
+//!     tool_name: "get_weather".to_string(),
+//!     arguments: serde_json::json!({"location": "San Francisco"}),
+//! });
+//!
+//! // Complete the spans.
+//! context.end_span(&tool_span_id);
+//! context.end_span(&agent_span_id);
+//!
+//! let spans = context.spans();
+//! assert_eq!(spans.len(), 2);
+//! assert_eq!(spans[1].parent_id, Some(agent_span_id));
+//! ```
 //! Tracing system for agent execution using the `tracing` crate
 //!
 //! Provides structured logging and observability for agent runs.
@@ -11,70 +70,84 @@ use uuid::Uuid;
 use crate::error::Result;
 use crate::usage::Usage;
 
-/// Unique identifier for a trace
+/// A unique identifier for a trace, representing a single end-to-end agent run.
 pub type TraceId = String;
 
-/// Unique identifier for a span
+/// A unique identifier for a span, representing a single unit of work.
 pub type SpanId = String;
 
-/// Generate a new trace ID
+/// Generates a new, unique trace ID using UUIDv4.
 pub fn gen_trace_id() -> TraceId {
     Uuid::new_v4().to_string()
 }
 
-/// Generate a new span ID
+/// Generates a new, unique span ID using UUIDv4.
 pub fn gen_span_id() -> SpanId {
     Uuid::new_v4().to_string()
 }
 
-/// Different types of spans in the agent execution
+/// An enum representing the different types of operations that can be traced as spans.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum SpanType {
+    /// A span representing the execution of a single agent turn.
     Agent {
         agent_name: String,
         instructions: String,
     },
+    /// A span for a call to the LLM to generate a response.
     Generation {
         model: String,
         prompt_tokens: usize,
         completion_tokens: usize,
     },
+    /// A span for the execution of a tool.
     Tool {
         tool_name: String,
         arguments: serde_json::Value,
     },
+    /// A span for a guardrail check.
     Guardrail {
         guardrail_name: String,
         guardrail_type: String,
         passed: bool,
     },
+    /// A span representing a handoff between agents.
     Handoff {
         from_agent: String,
         to_agent: String,
         reason: Option<String>,
     },
+    /// A custom span for application-specific tracing.
     Custom {
         name: String,
         metadata: serde_json::Value,
     },
 }
 
-/// A span representing a unit of work
+/// Represents a single span in a trace, capturing a unit of work.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Span {
+    /// The unique identifier for this span.
     pub id: SpanId,
+    /// The ID of the trace this span belongs to.
     pub trace_id: TraceId,
+    /// The ID of the parent span, if this is a nested span.
     pub parent_id: Option<SpanId>,
+    /// The type of operation this span represents.
     pub span_type: SpanType,
+    /// The time when the span started.
     pub start_time: DateTime<Utc>,
+    /// The time when the span ended. `None` if the span is still in progress.
     pub end_time: Option<DateTime<Utc>>,
+    /// An error message if the operation failed.
     pub error: Option<String>,
+    /// Additional, unstructured metadata associated with the span.
     pub metadata: serde_json::Value,
 }
 
 impl Span {
-    /// Create a new span
+    /// Creates a new `Span`.
     pub fn new(trace_id: TraceId, parent_id: Option<SpanId>, span_type: SpanType) -> Self {
         Self {
             id: gen_span_id(),
@@ -88,25 +161,28 @@ impl Span {
         }
     }
 
-    /// Complete the span
+    /// Marks the span as completed, setting its end time.
     pub fn complete(&mut self) {
         self.end_time = Some(Utc::now());
     }
 
-    /// Mark the span as failed
+    /// Marks the span as failed, setting an error message and the end time.
     pub fn fail(&mut self, error: String) {
         self.error = Some(error);
         self.complete();
     }
 
-    /// Get the duration of the span in milliseconds
+    /// Calculates and returns the duration of the span in milliseconds.
     pub fn duration_ms(&self) -> Option<i64> {
         self.end_time
             .map(|end| (end - self.start_time).num_milliseconds())
     }
 }
 
-/// Context for tracing agent execution
+/// Manages the context for a single trace, including its spans.
+///
+/// `TracingContext` is responsible for creating new spans, tracking the current
+/// active span, and collecting all spans for a given trace.
 pub struct TracingContext {
     trace_id: TraceId,
     current_span_id: Option<SpanId>,
@@ -114,7 +190,7 @@ pub struct TracingContext {
 }
 
 impl TracingContext {
-    /// Create a new tracing context
+    /// Creates a new `TracingContext` with a new, unique trace ID.
     pub fn new() -> Self {
         let trace_id = gen_trace_id();
         info!(trace_id = %trace_id, "Starting new trace");
@@ -126,7 +202,9 @@ impl TracingContext {
         }
     }
 
-    /// Start a new span
+    /// Starts a new span within the current trace.
+    ///
+    /// The new span will be a child of the current active span.
     pub fn start_span(&mut self, span_type: SpanType) -> SpanId {
         let span = Span::new(
             self.trace_id.clone(),
@@ -156,7 +234,7 @@ impl TracingContext {
         span_id
     }
 
-    /// End a span
+    /// Ends the specified span, marking it as complete.
     pub fn end_span(&mut self, span_id: &str) {
         if let Some(span) = self.spans.iter_mut().find(|s| s.id == span_id) {
             span.complete();
@@ -172,7 +250,7 @@ impl TracingContext {
         }
     }
 
-    /// Record an error in a span
+    /// Records an error for the specified span.
     pub fn record_error(&mut self, span_id: &str, error: String) {
         if let Some(span) = self.spans.iter_mut().find(|s| s.id == span_id) {
             error!(span_id = %span_id, error = %error, "Span failed");
@@ -180,12 +258,12 @@ impl TracingContext {
         }
     }
 
-    /// Get all spans in the trace
+    /// Returns a slice of all spans recorded in this context.
     pub fn spans(&self) -> &[Span] {
         &self.spans
     }
 
-    /// Get the trace ID
+    /// Returns the trace ID for this context.
     pub fn trace_id(&self) -> &str {
         &self.trace_id
     }
@@ -197,14 +275,17 @@ impl Default for TracingContext {
     }
 }
 
-/// Builder for agent spans with tracing instrumentation
+/// An RAII-style builder for creating and managing agent spans.
+///
+/// When an `AgentSpan` is created, it starts a new span in the tracing context.
+/// When it is dropped (or `complete` is called), the span is automatically ended.
 pub struct AgentSpan {
     context: Arc<std::sync::Mutex<TracingContext>>,
     span_id: SpanId,
 }
 
 impl AgentSpan {
-    /// Create a new agent span
+    /// Creates a new `AgentSpan`.
     #[instrument(skip(context))]
     pub fn new(
         context: Arc<std::sync::Mutex<TracingContext>>,
@@ -222,27 +303,27 @@ impl AgentSpan {
         Self { context, span_id }
     }
 
-    /// Complete the span
+    /// Explicitly completes the span before it is dropped.
     pub fn complete(self) {
         let mut ctx = self.context.lock().unwrap();
         ctx.end_span(&self.span_id);
     }
 
-    /// Record an error
+    /// Records an error for the span before it is completed.
     pub fn error(self, error: String) {
         let mut ctx = self.context.lock().unwrap();
         ctx.record_error(&self.span_id, error);
     }
 }
 
-/// Builder for tool spans
+/// An RAII-style builder for creating and managing tool spans.
 pub struct ToolSpan {
     context: Arc<std::sync::Mutex<TracingContext>>,
     span_id: SpanId,
 }
 
 impl ToolSpan {
-    /// Create a new tool span
+    /// Creates a new `ToolSpan`.
     #[instrument(skip(context, arguments))]
     pub fn new(
         context: Arc<std::sync::Mutex<TracingContext>>,
@@ -262,27 +343,27 @@ impl ToolSpan {
         Self { context, span_id }
     }
 
-    /// Complete with success
+    /// Marks the tool execution as successful and completes the span.
     pub fn success(self) {
         let mut ctx = self.context.lock().unwrap();
         ctx.end_span(&self.span_id);
     }
 
-    /// Complete with error
+    /// Records an error for the tool execution and completes the span.
     pub fn error(self, error: String) {
         let mut ctx = self.context.lock().unwrap();
         ctx.record_error(&self.span_id, error);
     }
 }
 
-/// Builder for generation spans
+/// An RAII-style builder for creating and managing LLM generation spans.
 pub struct GenerationSpan {
     context: Arc<std::sync::Mutex<TracingContext>>,
     span_id: SpanId,
 }
 
 impl GenerationSpan {
-    /// Create a new generation span
+    /// Creates a new `GenerationSpan`.
     #[instrument(skip(context))]
     pub fn new(context: Arc<std::sync::Mutex<TracingContext>>, model: String) -> Self {
         let span_id = {
@@ -299,7 +380,7 @@ impl GenerationSpan {
         Self { context, span_id }
     }
 
-    /// Complete with usage information
+    /// Completes the span and records the token usage.
     pub fn complete_with_usage(self, usage: Usage) {
         let mut ctx = self.context.lock().unwrap();
 
@@ -325,20 +406,20 @@ impl GenerationSpan {
         ctx.end_span(&self.span_id);
     }
 
-    /// Complete with error
+    /// Records an error for the generation and completes the span.
     pub fn error(self, error: String) {
         let mut ctx = self.context.lock().unwrap();
         ctx.record_error(&self.span_id, error);
     }
 }
 
-/// Export traces to external systems (simplified for now)
+/// A trait for exporting completed traces to an external system.
 pub trait TraceExporter: Send + Sync {
-    /// Export a completed trace
+    /// Exports a collection of spans for a given trace.
     fn export(&self, trace_id: &str, spans: Vec<Span>) -> Result<()>;
 }
 
-/// Console exporter for debugging
+/// A simple `TraceExporter` that prints the trace to the console.
 pub struct ConsoleExporter;
 
 impl TraceExporter for ConsoleExporter {

@@ -1,15 +1,39 @@
-//! Calculator example demonstrating multiple tool calls and rounds
+//! # Advanced Example: Multi-Tool Calculator Agent
 //!
-//! This example shows how an agent can use multiple calculator tools
-//! to solve complex mathematical problems step by step.
+//! This example showcases an agent that can solve complex mathematical problems
+//! by using a suite of calculator tools. It demonstrates how an agent can be
+//! instructed to break down a problem into smaller steps and use different tools
+//! in sequence to arrive at a final answer.
 //!
-//! Run with: cargo run --example calculator
+//! ## Key Concepts Demonstrated
+//!
+//! - **Multiple Tools**: The agent is equipped with a variety of tools for
+//!   basic arithmetic operations (add, subtract, multiply, divide), as well as
+//!   more advanced functions like powers and square roots.
+//! - **Complex Problem Solving**: The agent's instructions guide it to decompose
+//!   complex problems and solve them step-by-step, showing its work.
+//! - **Multi-Turn Tool Use**: The agent can perform multiple tool calls across
+//!   several turns to solve a single problem.
+//! - **Interactive Mode**: After running through a set of predefined problems,
+//!   the example enters an interactive mode where you can input your own math
+//!   problems for the agent to solve.
+//!
+//! To run this example, you first need to set your `OPENAI_API_KEY` environment
+//! variable.
+//!
+//! ```bash
+//! export OPENAI_API_KEY="your-api-key"
+//! cargo run --example calculator
+//! ```
 
 use openai_agents_rs::{runner::RunConfig, Agent, FunctionTool, Runner};
 use serde_json::Value;
 use std::sync::Arc;
 
-/// Create a calculator tool for basic arithmetic
+/// Creates a tool for adding two numbers.
+///
+/// This function demonstrates the use of `FunctionTool::new` to create a tool
+/// with a custom parameter schema, allowing for multiple, named arguments.
 fn create_add_tool() -> Arc<FunctionTool> {
     Arc::new(FunctionTool::new(
         "add".to_string(),
@@ -38,6 +62,7 @@ fn create_add_tool() -> Arc<FunctionTool> {
     ))
 }
 
+/// Creates a tool for subtracting one number from another.
 fn create_subtract_tool() -> Arc<FunctionTool> {
     Arc::new(FunctionTool::new(
         "subtract".to_string(),
@@ -66,6 +91,7 @@ fn create_subtract_tool() -> Arc<FunctionTool> {
     ))
 }
 
+/// Creates a tool for multiplying two numbers.
 fn create_multiply_tool() -> Arc<FunctionTool> {
     Arc::new(FunctionTool::new(
         "multiply".to_string(),
@@ -94,6 +120,7 @@ fn create_multiply_tool() -> Arc<FunctionTool> {
     ))
 }
 
+/// Creates a tool for dividing one number by another.
 fn create_divide_tool() -> Arc<FunctionTool> {
     Arc::new(FunctionTool::new(
         "divide".to_string(),
@@ -126,6 +153,7 @@ fn create_divide_tool() -> Arc<FunctionTool> {
     ))
 }
 
+/// Creates a tool for raising a number to a power.
 fn create_power_tool() -> Arc<FunctionTool> {
     Arc::new(FunctionTool::new(
         "power".to_string(),
@@ -154,6 +182,7 @@ fn create_power_tool() -> Arc<FunctionTool> {
     ))
 }
 
+/// Creates a tool for calculating the square root of a number.
 fn create_sqrt_tool() -> Arc<FunctionTool> {
     Arc::new(FunctionTool::new(
         "sqrt".to_string(),
@@ -187,7 +216,11 @@ fn create_sqrt_tool() -> Arc<FunctionTool> {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Calculator Agent Example ===\n");
 
-    // Create an agent with calculator tools
+    // 1. Create the agent with a suite of calculator tools.
+    //
+    // The agent's instructions are crucial here. They guide the agent to
+    // break down problems and use the tools in a step-by-step manner.
+    // We also increase `max_turns` to allow for more complex calculations.
     let agent = Agent::simple(
         "MathBot",
         "You are a helpful mathematics assistant. Use the calculator tools to solve mathematical problems step by step. 
@@ -204,7 +237,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ])
     .with_max_turns(15); // Allow more turns for complex calculations
 
-    // Example problems that require multiple steps
+    // 2. Run the agent with a set of predefined problems.
+    //
+    // These problems are designed to test the agent's ability to use multiple
+    // tools in sequence to arrive at a solution.
     let problems = ["What is (15 + 25) * 3?",
         "Calculate the area of a rectangle with length 12.5 and width 8.3, then add 15 to the result.",
         "If I have $100 and spend $35.50, then earn $20.75, how much do I have?",
@@ -220,7 +256,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if result.is_success() {
             println!("\nFinal Answer: {}\n", result.final_output);
 
-            // Count how many tool calls were made
+            // Count how many tool calls were made to show the agent's work.
             let tool_calls = result
                 .items
                 .iter()
@@ -246,7 +282,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("\n{}\n", "=".repeat(60));
     }
 
-    // Interactive mode
+    // 3. Enter interactive mode.
+    //
+    // After the predefined problems, the example enters a loop where you can
+    // provide your own math problems for the agent to solve.
     println!("Now entering interactive mode. Type 'quit' to exit.\n");
 
     use std::io::{self, Write};

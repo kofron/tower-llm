@@ -1,3 +1,41 @@
+//! # Core Data Structures for Agent Communication
+//!
+//! This module defines the fundamental data structures that represent the
+//! various components of an agent's conversation and execution trace. These
+//! "items" are used to construct the conversation history sent to the LLM,
+//! to represent tool calls and their outputs, and to log the agent's actions.
+//!
+//! ## Key Data Structures
+//!
+//! - **[`Role`]**: An enum representing the speaker in a conversation (e.g.,
+//!   `System`, `User`, `Assistant`).
+//! - **[`Message`]**: The primary unit of conversation, containing the content
+//!   of a message and the role of the speaker.
+//! - **[`ToolCall`]**: Represents a request from the agent to execute a tool,
+//!   including the tool's name and arguments.
+//! - **[`ModelResponse`]**: Encapsulates the raw response from the LLM, which
+//!   can include both text content and tool calls.
+//! - **[`RunItem`]**: A comprehensive enum that represents a single step in the
+//!   agent's execution trace. It can be a message, a tool call, a tool output,
+//!   or a handoff.
+//!
+//! These structures are designed to be serializable, allowing them to be easily
+//! stored for session management and logging.
+//!
+//! ### Example: Creating Different Message Types
+//!
+//! ```rust
+//! use openai_agents_rs::items::{Message, Role};
+//!
+//! let system_message = Message::system("You are a helpful assistant.");
+//! assert_eq!(system_message.role, Role::System);
+//!
+//! let user_message = Message::user("What is the weather like today?");
+//! assert_eq!(user_message.role, Role::User);
+//!
+//! let assistant_message = Message::assistant("I can help with that.");
+//! assert_eq!(assistant_message.role, Role::Assistant);
+//! ```
 //! Items representing messages, tool calls, and model responses
 //!
 //! This module defines the core data structures for agent communication.
@@ -7,30 +45,41 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-/// Role in a conversation
+/// Represents the role of a message's author in a conversation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
+    /// The system message, which sets the context and instructions for the agent.
     System,
+    /// A message from the end-user.
     User,
+    /// A message from the AI assistant.
     Assistant,
+    /// A message containing the output of a tool.
     Tool,
 }
 
-/// A message in the conversation
+/// A single message in a conversation, forming the basis of interaction with
+/// the LLM.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
+    /// The role of the message author.
     pub role: Role,
+    /// The text content of the message.
     pub content: String,
+    /// The name of the author, used in some multi-agent contexts.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// A unique identifier for the tool call this message is a response to.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// A list of tool calls requested by the assistant.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
 }
 
 impl Message {
+    /// Creates a new `Message` with the `System` role.
     pub fn system(content: impl Into<String>) -> Self {
         Self {
             role: Role::System,
@@ -41,6 +90,7 @@ impl Message {
         }
     }
 
+    /// Creates a new `Message` with the `User` role.
     pub fn user(content: impl Into<String>) -> Self {
         Self {
             role: Role::User,
@@ -51,6 +101,7 @@ impl Message {
         }
     }
 
+    /// Creates a new `Message` with the `Assistant` role.
     pub fn assistant(content: impl Into<String>) -> Self {
         Self {
             role: Role::Assistant,
@@ -61,6 +112,7 @@ impl Message {
         }
     }
 
+    /// Creates a new `Message` from the assistant that includes tool calls.
     pub fn assistant_with_tool_calls(
         content: impl Into<String>,
         tool_calls: Vec<ToolCall>,
@@ -74,6 +126,7 @@ impl Message {
         }
     }
 
+    /// Creates a new `Message` with the `Tool` role, representing a tool's output.
     pub fn tool(content: impl Into<String>, tool_call_id: impl Into<String>) -> Self {
         Self {
             role: Role::Tool,
@@ -85,25 +138,35 @@ impl Message {
     }
 }
 
-/// A tool call made by the model
+/// Represents a request from the LLM to call a specific tool.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
+    /// A unique identifier for this tool call.
     pub id: String,
+    /// The name of the tool to be executed.
     pub name: String,
+    /// The arguments to be passed to the tool, as a JSON value.
     pub arguments: Value,
 }
 
-/// Response from the model
+/// Encapsulates a response from the LLM, which may include text content and
+/// tool calls.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelResponse {
+    /// A unique identifier for the response.
     pub id: String,
+    /// The text content of the response, if any.
     pub content: Option<String>,
+    /// A list of tool calls requested by the model.
     pub tool_calls: Vec<ToolCall>,
+    /// The reason why the model stopped generating the response.
     pub finish_reason: Option<String>,
+    /// The timestamp of when the response was created.
     pub created_at: DateTime<Utc>,
 }
 
 impl ModelResponse {
+    /// Creates a new `ModelResponse` that contains only a text message.
     pub fn new_message(content: impl Into<String>) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
@@ -114,6 +177,7 @@ impl ModelResponse {
         }
     }
 
+    /// Creates a new `ModelResponse` that contains one or more tool calls.
     pub fn new_tool_calls(tool_calls: Vec<ToolCall>) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
@@ -124,25 +188,35 @@ impl ModelResponse {
         }
     }
 
+    /// Returns `true` if the response contains any tool calls.
     pub fn has_tool_calls(&self) -> bool {
         !self.tool_calls.is_empty()
     }
 
+    /// Returns `true` if the response has non-empty text content.
     pub fn has_content(&self) -> bool {
         self.content.is_some() && !self.content.as_ref().unwrap().is_empty()
     }
 }
 
-/// A run item representing a single step in the agent execution
+/// An enum representing a single, discrete step in an agent's execution trace.
+///
+/// `RunItem` is used to log the history of a conversation, which can then be
+/// stored in a session for maintaining context.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum RunItem {
+    /// A message from the user or the assistant.
     Message(MessageItem),
+    /// A request from the agent to call a tool.
     ToolCall(ToolCallItem),
+    /// The output of a tool execution.
     ToolOutput(ToolOutputItem),
+    /// A handoff of control from one agent to another.
     Handoff(HandoffItem),
 }
 
+/// A structured representation of a message within a `RunItem`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageItem {
     pub id: String,
@@ -151,6 +225,7 @@ pub struct MessageItem {
     pub created_at: DateTime<Utc>,
 }
 
+/// A structured representation of a tool call within a `RunItem`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallItem {
     pub id: String,
@@ -159,6 +234,7 @@ pub struct ToolCallItem {
     pub created_at: DateTime<Utc>,
 }
 
+/// A structured representation of a tool's output within a `RunItem`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolOutputItem {
     pub id: String,
@@ -168,6 +244,7 @@ pub struct ToolOutputItem {
     pub created_at: DateTime<Utc>,
 }
 
+/// A structured representation of a handoff within a `RunItem`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HandoffItem {
     pub id: String,
@@ -177,11 +254,12 @@ pub struct HandoffItem {
     pub created_at: DateTime<Utc>,
 }
 
-/// Helper functions for working with items
+/// A collection of helper functions for working with `RunItem`s.
 pub struct ItemHelpers;
 
 impl ItemHelpers {
-    /// Convert run items to messages for the conversation history
+    /// Converts a slice of `RunItem`s into a `Vec<Message>` suitable for use as
+    /// conversation history.
     pub fn to_messages(items: &[RunItem]) -> Vec<Message> {
         let mut messages = Vec::new();
         let mut pending_tool_calls: Vec<ToolCall> = Vec::new();
@@ -262,7 +340,7 @@ impl ItemHelpers {
         messages
     }
 
-    /// Filter items by type
+    /// Filters a slice of `RunItem`s by their type.
     pub fn filter_by_type<T>(
         items: &[RunItem],
         filter_fn: impl Fn(&RunItem) -> Option<&T>,

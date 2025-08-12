@@ -2,31 +2,44 @@
 name = "openai-agents-rs"
 version = "0.1.0"
 edition = "2021"
+description = "A lightweight yet powerful framework for building multi-agent workflows with LLMs."
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/your-username/openai-agents-rs"
+keywords = ["openai", "agents", "llm", "ai", "multi-agent"]
+categories = ["api-bindings", "science::ai"]
 
+# Basic hello-world example
 [[example]]
 name = "hello_world"
 path = "examples/hello_world.rs"
 
+# Example of an agent using a tool
 [[example]]
 name = "tool_example"
 path = "examples/tool_example.rs"
 
+# Advanced multi-tool calculator agent
 [[example]]
 name = "calculator"
 path = "examples/calculator.rs"
 
+# Advanced multi-agent research system with handoffs
 [[example]]
 name = "multi_agent_research"
 path = "examples/multi_agent_research.rs"
 
+# Example of using session memory and guardrails
 [[example]]
 name = "session_with_guardrails"
 path = "examples/session_with_guardrails.rs"
 
+# Example of persistent sessions with SQLite
 [[example]]
 name = "persistent_session"
 path = "examples/persistent_session.rs"
 
+# Example of parallel tool execution
 [[example]]
 name = "parallel_tools"
 path = "examples/parallel_tools.rs"
@@ -58,3 +71,4 @@ mockall = "0.13"
 tokio-test = "0.4"
 pretty_assertions = "1.4"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tempfile = "3.20.0"

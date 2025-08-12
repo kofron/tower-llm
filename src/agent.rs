@@ -1,6 +1,34 @@
-//! Agent definition and configuration
+//! # Agent Definition and Configuration
 //!
-//! Agents are the core abstraction - LLMs configured with instructions, tools, and handoffs.
+//! At the heart of the framework is the [`Agent`], the fundamental building block
+//! that represents an entity capable of processing input and generating responses.
+//! Each agent is configured with a set of instructions, a specific [`model`], and
+//! a collection of [`tools`] and [`handoffs`] that define its capabilities.
+//!
+//! Agents are designed to be composable, allowing you to build sophisticated,
+//! multi-agent workflows where each agent has a specialized role.
+//!
+//! The [`AgentConfig`] struct holds all the configuration details for an agent,
+//! making it easy to define and reuse agent specifications.
+//!
+//! ## Example: Creating a Simple Agent
+//!
+//! ```rust
+//! use openai_agents_rs::Agent;
+//!
+//! // Create an agent with a name and instructions.
+//! let haiku_agent = Agent::simple(
+//!     "HaikuBot",
+//!     "You are a helpful assistant that writes haikus.",
+//! );
+//!
+//! assert_eq!(haiku_agent.name(), "HaikuBot");
+//! assert!(haiku_agent.instructions().contains("writes haikus"));
+//! ```
+//!
+//! [`model`]: crate::model
+//! [`tools`]: crate::tool
+//! [`handoffs`]: crate::handoff
 
 use std::sync::Arc;
 
@@ -9,43 +37,65 @@ use crate::handoff::Handoff;
 use crate::items::Message;
 use crate::tool::Tool;
 
-/// Configuration for an agent
+/// Defines the complete configuration for an [`Agent`].
+///
+/// This struct holds all the parameters that control an agent's behavior,
+/// including its identity, instructions, tools, and handoff targets. It also
+/// configures the underlying LLM settings, such as the model, temperature,
+/// and maximum tokens.
+///
+/// `AgentConfig` provides a [`Default`] implementation, which can be used
+/// as a baseline for creating custom configurations.
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
-    /// Name of the agent
+    /// The name of the agent, used for identification and in logs.
     pub name: String,
 
-    /// System instructions for the agent
+    /// The system instructions that guide the agent's behavior. These are
+    /// typically used to set the context and define the agent's persona.
     pub instructions: String,
 
-    /// Description used when this agent is a handoff target
+    /// A description of the agent's capabilities, used when this agent is a
+    /// potential handoff target for another agent.
     pub handoff_description: Option<String>,
 
-    /// Tools available to this agent
+    /// A list of tools that the agent can use to perform actions. Tools are
+    /// functions that can be called to interact with external systems.
     pub tools: Vec<Arc<dyn Tool>>,
 
-    /// Other agents this agent can hand off to
+    /// A list of other agents that this agent can hand off control to. This
+    /// enables the creation of multi-agent workflows.
     pub handoffs: Vec<Handoff>,
 
-    /// Input guardrails to validate user input
+    /// A set of guardrails to validate user input before it is processed by
+    /// the agent. Guardrails can enforce constraints or prevent malicious input.
     pub input_guardrails: Vec<Arc<dyn InputGuardrail>>,
 
-    /// Output guardrails to validate agent output
+    /// A set of guardrails to validate the agent's output before it is sent
+    /// to the user. This can be used for content moderation or to ensure
+    /// the output follows a specific format.
     pub output_guardrails: Vec<Arc<dyn OutputGuardrail>>,
 
-    /// Model to use (e.g., "gpt-4", "gpt-3.5-turbo")
+    /// The name of the LLM model to use for generating responses (e.g., "gpt-4",
+    /// "gpt-3.5-turbo"). The availability of models depends on the LLM provider.
     pub model: String,
 
-    /// Maximum number of turns before stopping
+    /// The maximum number of turns (user messages and agent responses) in a
+    /// conversation before the run is stopped. This prevents infinite loops.
     pub max_turns: Option<usize>,
 
-    /// Temperature for generation (0.0 to 2.0)
+    /// The temperature for the LLM's response generation, controlling the
+    /// randomness of the output. Higher values (e.g., 0.8) make the output
+    /// more random, while lower values (e.g., 0.2) make it more deterministic.
     pub temperature: Option<f32>,
 
-    /// Maximum tokens to generate
+    /// The maximum number of tokens to generate in a single response from the
+    /// LLM. If `None`, the model's default limit will be used.
     pub max_tokens: Option<u32>,
 
-    /// Output schema if structured output is needed
+    /// An optional JSON schema to enforce structured output from the agent.
+    /// When provided, the agent will attempt to generate a response that
+    /// conforms to this schema.
     pub output_schema: Option<serde_json::Value>,
 }
 
@@ -68,19 +118,70 @@ impl Default for AgentConfig {
     }
 }
 
-/// An agent that can process messages and use tools
+/// Represents an AI agent that can process messages, use tools, and interact
+/// in a multi-agent workflow.
+///
+/// The `Agent` struct is the central component of the SDK. It encapsulates the
+/// agent's configuration and provides a builder-style interface for easy
+/// construction. Agents are designed to be cloned and shared across tasks.
+///
+/// ## Example: Using the Builder Pattern
+///
+/// ```rust
+/// use openai_agents_rs::{Agent, tool::FunctionTool};
+/// use std::sync::Arc;
+///
+/// // A simple function to be used as a tool.
+/// fn get_weather(location: String) -> String {
+///     if location.to_lowercase().contains("san francisco") {
+///         "The weather in San Francisco is 70°F and sunny.".to_string()
+///     } else {
+///         format!("I don't have the weather for {}.", location)
+///     }
+/// }
+///
+/// // Create a tool from the function.
+/// let weather_tool = Arc::new(FunctionTool::simple(
+///     "get_weather",
+///     "Gets the current weather for a specified location.",
+///     get_weather,
+/// ));
+///
+/// // Build an agent with specific configurations.
+/// let weather_agent = Agent::simple("WeatherBot", "I provide weather updates.")
+///     .with_model("gpt-3.5-turbo")
+///     .with_tool(weather_tool)
+///     .with_temperature(0.5);
+///
+/// assert_eq!(weather_agent.config.model, "gpt-3.5-turbo");
+/// assert_eq!(weather_agent.config.temperature, Some(0.5));
+/// assert_eq!(weather_agent.tools().len(), 1);
+/// ```
 #[derive(Clone)]
 pub struct Agent {
+    /// The configuration that defines the agent's behavior and capabilities.
     pub config: AgentConfig,
 }
 
 impl Agent {
-    /// Create a new agent with the given configuration
+    /// Creates a new agent with the given configuration.
+    ///
+    /// This is the primary constructor for creating an `Agent`. It takes an
+    /// [`AgentConfig`] struct that specifies all the necessary parameters.
     pub fn new(config: AgentConfig) -> Self {
         Self { config }
     }
 
-    /// Create a simple agent with just a name and instructions
+    /// Creates a simple agent with just a name and instructions.
+    ///
+    /// This is a convenience method for creating a basic agent without needing to
+    /// configure all the options in [`AgentConfig`]. The other settings will use
+    /// their default values.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The name of the agent.
+    /// * `instructions` - The system instructions for the agent.
     pub fn simple(name: impl Into<String>, instructions: impl Into<String>) -> Self {
         Self::new(AgentConfig {
             name: name.into(),
@@ -89,103 +190,140 @@ impl Agent {
         })
     }
 
-    /// Builder pattern: set the model
+    /// Sets the model for the agent.
+    ///
+    /// This method is part of the builder pattern and allows you to chain calls
+    /// to configure the agent.
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.config.model = model.into();
         self
     }
 
-    /// Builder pattern: add a tool
+    /// Adds a tool to the agent.
+    ///
+    /// This method is part of the builder pattern. Tools are capabilities that
+    /// the agent can use to interact with the outside world.
     pub fn with_tool(mut self, tool: Arc<dyn Tool>) -> Self {
         self.config.tools.push(tool);
         self
     }
 
-    /// Builder pattern: add multiple tools
+    /// Adds multiple tools to the agent.
+    ///
+    /// This method is part of the builder pattern and is a convenient way to
+    /// add a list of tools at once.
     pub fn with_tools(mut self, tools: Vec<Arc<dyn Tool>>) -> Self {
         self.config.tools.extend(tools);
         self
     }
 
-    /// Builder pattern: add a handoff
+    /// Adds a handoff target to the agent.
+    ///
+    /// This method is part of the builder pattern. Handoffs allow the agent to
+    /// delegate tasks to other specialized agents.
     pub fn with_handoff(mut self, handoff: Handoff) -> Self {
         self.config.handoffs.push(handoff);
         self
     }
 
-    /// Builder pattern: add multiple handoffs
+    /// Adds multiple handoff targets to the agent.
+    ///
+    /// This method is part of the builder pattern, allowing for the addition of
+    /// a list of handoff targets.
     pub fn with_handoffs(mut self, handoffs: Vec<Handoff>) -> Self {
         self.config.handoffs.extend(handoffs);
         self
     }
 
-    /// Builder pattern: set temperature
+    /// Sets the temperature for the agent's LLM.
+    ///
+    /// This method is part of the builder pattern. The temperature controls the
+    /// randomness of the generated responses.
     pub fn with_temperature(mut self, temperature: f32) -> Self {
         self.config.temperature = Some(temperature);
         self
     }
 
-    /// Builder pattern: set max turns
+    /// Sets the maximum number of turns for a conversation.
+    ///
+    /// This method is part of the builder pattern and helps prevent excessively
+    /// long or looping conversations.
     pub fn with_max_turns(mut self, max_turns: usize) -> Self {
         self.config.max_turns = Some(max_turns);
         self
     }
 
-    /// Builder pattern: set max tokens
+    /// Sets the maximum number of tokens for a single response.
+    ///
+    /// This method is part of the builder pattern. It limits the length of the
+    /// generated text to control costs and response time.
     pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
         self.config.max_tokens = Some(max_tokens);
         self
     }
 
-    /// Builder pattern: add input guardrail
+    /// Adds an input guardrail to the agent.
+    ///
+    /// This method is part of the builder pattern. Input guardrails validate
+    /// user input before it is processed.
     pub fn with_input_guardrail(mut self, guardrail: Arc<dyn InputGuardrail>) -> Self {
         self.config.input_guardrails.push(guardrail);
         self
     }
 
-    /// Builder pattern: add output guardrail
+    /// Adds an output guardrail to the agent.
+    ///
+    /// This method is part of the builder pattern. Output guardrails validate
+    /// the agent's response before it is sent to the user.
     pub fn with_output_guardrail(mut self, guardrail: Arc<dyn OutputGuardrail>) -> Self {
         self.config.output_guardrails.push(guardrail);
         self
     }
 
-    /// Builder pattern: set output schema for structured outputs
+    /// Sets the output schema for the agent to enforce structured output.
+    ///
+    /// This method is part of the builder pattern. When a schema is provided,
+    /// the agent will try to produce a JSON object that conforms to it.
     pub fn with_output_schema(mut self, schema: serde_json::Value) -> Self {
         self.config.output_schema = Some(schema);
         self
     }
 
-    /// Get the agent's name
+    /// Returns the agent's name.
     pub fn name(&self) -> &str {
         &self.config.name
     }
 
-    /// Get the agent's instructions
+    /// Returns the agent's instructions.
     pub fn instructions(&self) -> &str {
         &self.config.instructions
     }
 
-    /// Get available tools
+    /// Returns a slice of the tools available to the agent.
     pub fn tools(&self) -> &[Arc<dyn Tool>] {
         &self.config.tools
     }
 
-    /// Get available handoffs
+    /// Returns a slice of the handoff targets available to the agent.
     pub fn handoffs(&self) -> &[Handoff] {
         &self.config.handoffs
     }
 
-    /// Check if the agent has any tools
+    /// Checks if the agent has any tools.
     pub fn has_tools(&self) -> bool {
         !self.config.tools.is_empty()
     }
 
-    /// Check if the agent has any handoffs
+    /// Checks if the agent has any handoff targets.
     pub fn has_handoffs(&self) -> bool {
         !self.config.handoffs.is_empty()
     }
 
-    /// Build the system message for this agent
+    /// Constructs the system message for the agent based on its configuration.
+    ///
+    /// The system message includes the agent's instructions, as well as the
+    /// descriptions of its available tools and handoff targets. This message
+    /// is used to prime the LLM with the agent's context and capabilities.
     pub fn build_system_message(&self) -> Message {
         let mut content = self.config.instructions.clone();
 

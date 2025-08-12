@@ -1,16 +1,40 @@
-//! Parallel tools example demonstrating concurrent tool execution
+//! # Advanced Example: Parallel Tool Execution
 //!
-//! This example shows how an agent can use multiple tools in parallel
-//! to gather information more efficiently.
+//! This example demonstrates how an agent can be prompted to use multiple tools
+//! concurrently to gather information more efficiently. When the LLM determines
+//! that multiple independent pieces of information are needed, it can issue
+//! multiple tool calls in a single response. The SDK's `Runner` will then execute
+//! these tool calls in parallel.
 //!
-//! Run with: cargo run --example parallel_tools
+//! ## Key Concepts Demonstrated
+//!
+//! - **Concurrent Tool Calls**: The agent is given a task that requires
+//!   information from multiple sources (weather, news, statistics).
+//! - **Performance Improvement**: The example measures the time taken for the
+//!   agent to complete the task and estimates the time saved by running the
+//!   tools in parallel versus sequentially.
+//! - **Simulated API Latency**: The tools in this example include an artificial
+//!   delay to simulate the latency of real-world API calls, making the benefits
+//!   of parallelization more apparent.
+//!
+//! **Note**: The decision to call multiple tools in parallel is made by the LLM.
+//! This example encourages this behavior through the agent's instructions, but
+//! the actual execution plan is determined by the model at runtime.
+//!
+//! To run this example, you first need to set your `OPENAI_API_KEY` environment
+//! variable.
+//!
+//! ```bash
+//! export OPENAI_API_KEY="your-api-key"
+//! cargo run --example parallel_tools
+//! ```
 
 use openai_agents_rs::{Agent, FunctionTool, Runner};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
 
-/// Create a weather tool that simulates API delay
+/// Creates a weather tool that simulates a 500ms API delay.
 fn create_weather_tool() -> Arc<FunctionTool> {
     Arc::new(FunctionTool::new(
         "get_weather".to_string(),
@@ -28,10 +52,10 @@ fn create_weather_tool() -> Arc<FunctionTool> {
         Box::new(move |args: serde_json::Value| {
             let city = args["city"].as_str().unwrap_or("Unknown");
 
-            // Simulate API delay
+            // Simulate the latency of an external API call.
             std::thread::sleep(Duration::from_millis(500));
 
-            // Return mock weather data
+            // Return mock weather data.
             Ok(serde_json::json!({
                 "city": city,
                 "temperature": 22 + (city.len() % 10) as i32,
@@ -43,7 +67,7 @@ fn create_weather_tool() -> Arc<FunctionTool> {
     ))
 }
 
-/// Create a news tool that simulates API delay
+/// Creates a news tool that simulates a 700ms API delay.
 fn create_news_tool() -> Arc<FunctionTool> {
     Arc::new(FunctionTool::new(
         "get_news".to_string(),
@@ -61,10 +85,10 @@ fn create_news_tool() -> Arc<FunctionTool> {
         Box::new(move |args: serde_json::Value| {
             let topic = args["topic"].as_str().unwrap_or("general");
 
-            // Simulate API delay
+            // Simulate the latency of an external API call.
             std::thread::sleep(Duration::from_millis(700));
 
-            // Return mock news data
+            // Return mock news data.
             Ok(serde_json::json!({
                 "topic": topic,
                 "headlines": [
@@ -79,7 +103,7 @@ fn create_news_tool() -> Arc<FunctionTool> {
     ))
 }
 
-/// Create a statistics tool that simulates database query
+/// Creates a statistics tool that simulates a 300ms database query.
 fn create_stats_tool() -> Arc<FunctionTool> {
     Arc::new(FunctionTool::new(
         "get_statistics".to_string(),
@@ -97,10 +121,10 @@ fn create_stats_tool() -> Arc<FunctionTool> {
         Box::new(move |args: serde_json::Value| {
             let city = args["city"].as_str().unwrap_or("Unknown");
 
-            // Simulate database query delay
+            // Simulate the latency of a database query.
             std::thread::sleep(Duration::from_millis(300));
 
-            // Return mock statistics
+            // Return mock statistics.
             Ok(serde_json::json!({
                 "city": city,
                 "population": 100000 + (city.len() * 50000),
@@ -118,7 +142,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("This example demonstrates how agents can use multiple tools");
     println!("in parallel to gather information more efficiently.\n");
 
-    // Create an agent with multiple tools
+    // 1. Create an agent with multiple tools.
+    //
+    // The agent's instructions are key here. They explicitly tell the agent
+    // to use all available tools to gather comprehensive information. This
+    // encourages the LLM to issue multiple tool calls in a single response.
     let agent = Agent::simple(
         "CityInfoAgent",
         "You are a helpful city information assistant. When asked about cities, \
@@ -129,7 +157,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .with_tool(create_news_tool())
     .with_tool(create_stats_tool());
 
-    // Test queries that should trigger parallel tool usage
+    // 2. Define a set of queries that should trigger parallel tool use.
     let queries = [
         "Tell me everything about Tokyo - weather, news, and statistics",
         "Compare London and Paris - I need weather and population data for both",
@@ -142,8 +170,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let start = Instant::now();
 
-        // Note: The actual parallelization depends on the LLM's decision
-        // to call multiple tools in a single response
+        // 3. Run the agent.
+        //
+        // The `Runner` will automatically detect if the LLM's response contains
+        // multiple tool calls and will execute them concurrently.
         let result = Runner::run(agent.clone(), query.to_string(), Default::default()).await?;
 
         let elapsed = start.elapsed();
@@ -152,7 +182,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("\n✅ Response:");
             println!("{}", result.final_output);
 
-            // Count tool calls
+            // 4. Analyze the execution to see the benefits of parallelization.
             let tool_calls = result
                 .items
                 .iter()
@@ -164,8 +194,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("  Tool calls made: {}", tool_calls);
             println!("  Total tokens: {}", result.usage.total.total_tokens);
 
-            // Estimate time saved by parallel execution
-            // (assuming tools were called in parallel vs sequential)
+            // Estimate the time that would have been saved by running the tools
+            // in parallel compared to running them sequentially.
             if tool_calls > 1 {
                 let estimated_sequential = Duration::from_millis(500 * tool_calls as u64);
                 let time_saved = estimated_sequential.saturating_sub(elapsed);

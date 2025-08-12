@@ -1,9 +1,36 @@
-//! Example demonstrating sessions and guardrails
+//! # Advanced Example: Personal Assistant with Sessions and Guardrails
 //!
-//! This shows how to maintain conversation history across multiple interactions
-//! and use guardrails to ensure safe input/output.
+//! This example demonstrates a more complex agent that acts as a personal
+//! assistant. It showcases the integration of several key features:
 //!
-//! Run with: cargo run --example session_with_guardrails
+//! - **Session Memory**: The agent maintains conversation history using a
+//!   `MemorySession`, allowing it to remember information from previous turns.
+//! - **Multiple Tools**: The assistant is equipped with tools for saving notes
+//!   and setting reminders.
+//! - **Input Guardrails**: A combination of built-in and custom guardrails are
+//!   used to validate user input for length, sensitive information, and profanity.
+//! - **Output Guardrails**: A custom guardrail is used to add a disclaimer to
+//!   the agent's responses when it discusses financial or medical topics.
+//!
+//! ## Key Concepts Demonstrated
+//!
+//! - **Stateful Conversation**: The agent can recall information provided by the
+//!   user in previous turns.
+//! - **Custom Guardrails**: The example shows how to implement the `InputGuardrail`
+//!   and `OutputGuardrail` traits to create custom validation logic.
+//! - **Guardrail Priority**: The `SensitiveInfoGuardrail` is given a high priority
+//!   to ensure it runs before other checks.
+//! - **Interactive Session**: The example includes an interactive mode where you
+//!   can have a conversation with the assistant, and the session memory will be
+//!   retained.
+//!
+//! To run this example, you first need to set your `OPENAI_API_KEY` environment
+//! variable.
+//!
+//! ```bash
+//! export OPENAI_API_KEY="your-api-key"
+//! cargo run --example session_with_guardrails
+//! ```
 
 use async_trait::async_trait;
 use openai_agents_rs::{
@@ -16,7 +43,7 @@ use openai_agents_rs::{
 };
 use std::sync::Arc;
 
-/// Custom guardrail that checks for sensitive information
+/// A custom input guardrail to detect and block potentially sensitive information.
 #[derive(Debug)]
 struct SensitiveInfoGuardrail {
     name: String,
@@ -62,11 +89,12 @@ impl InputGuardrail for SensitiveInfoGuardrail {
     }
 
     fn priority(&self) -> i32 {
-        100 // High priority
+        100 // High priority to run before other checks.
     }
 }
 
-/// Custom output guardrail that adds a disclaimer
+/// A custom output guardrail that adds a disclaimer to responses containing
+/// financial or medical advice.
 #[derive(Debug)]
 struct DisclaimerGuardrail;
 
@@ -77,7 +105,7 @@ impl OutputGuardrail for DisclaimerGuardrail {
     }
 
     async fn check(&self, output: &str) -> openai_agents_rs::error::Result<GuardrailResult> {
-        // Check if output mentions financial or medical advice
+        // Check if the output contains keywords related to financial or medical advice.
         let output_lower = output.to_lowercase();
 
         if output_lower.contains("invest")
@@ -98,7 +126,7 @@ impl OutputGuardrail for DisclaimerGuardrail {
     }
 }
 
-/// Create a note-taking tool that remembers information
+/// Creates a tool for saving notes.
 fn create_note_tool() -> Arc<FunctionTool> {
     Arc::new(FunctionTool::simple(
         "save_note",
@@ -110,7 +138,7 @@ fn create_note_tool() -> Arc<FunctionTool> {
     ))
 }
 
-/// Create a reminder tool
+/// Creates a tool for setting reminders.
 fn create_reminder_tool() -> Arc<FunctionTool> {
     Arc::new(FunctionTool::new(
         "set_reminder".to_string(),
@@ -158,7 +186,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  • Tools for note-taking and reminders\n");
     println!("{}\n", "=".repeat(60));
 
-    // Create the agent with guardrails and tools
+    // 1. Create the personal assistant agent.
+    //
+    // This agent is equipped with multiple tools and a comprehensive set of
+    // both built-in and custom guardrails.
     let agent = Agent::simple(
         "PersonalAssistant",
         "You are a helpful personal assistant. You can help with various tasks including:
@@ -179,7 +210,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .with_output_guardrail(Arc::new(DisclaimerGuardrail))
     .with_max_turns(5);
 
-    // Create a session to maintain conversation history
+    // 2. Create a session to maintain conversation history.
+    //
+    // `MemorySession` is used here for simplicity, but `SqliteSession` could be
+    // used for a persistent assistant.
     let session = Arc::new(MemorySession::new("user_session_001"));
 
     let config = RunConfig {
@@ -187,7 +221,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     };
 
-    // Simulate a conversation with multiple turns
+    // 3. Simulate a multi-turn conversation.
+    //
+    // This conversation is designed to showcase the agent's memory, tool use,
+    // and the triggering of the output guardrail.
     let conversations = [
         "Hello! I'm planning a trip to Paris next month.",
         "Can you save a note that I need to book flights by next Friday?",
@@ -206,7 +243,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(res) if res.is_success() => {
                 println!("Assistant: {}\n", res.final_output);
 
-                // Show if any tools were used
+                // Show if any tools were used during the turn.
                 let tool_calls: Vec<_> = res
                     .items
                     .iter()
@@ -237,14 +274,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("\n{}\n", "=".repeat(60));
     }
 
-    // Show session summary
+    // 4. Show a summary of the session.
     println!("Session Summary");
     println!("{}", "-".repeat(40));
 
     let history = session.get_messages(None).await?;
     println!("Total messages in session: {}", history.len());
 
-    // Interactive mode with session
+    // 5. Enter interactive mode.
+    //
+    // This allows you to continue the conversation with the assistant, which
+    // will retain the context from the previous turns.
     println!("\nInteractive mode with session memory");
     println!("The assistant will remember your conversation.");
     println!("Type 'quit' to exit, 'clear' to clear session memory.\n");

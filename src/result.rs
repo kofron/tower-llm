@@ -1,3 +1,67 @@
+//! # Agent Execution Results
+//!
+//! This module defines the data structures that encapsulate the results of an
+//! agent's execution. It provides support for both fully completed runs and
+//! real-time streaming of events.
+//!
+//! - [`RunResult`]: A comprehensive summary of a completed agent run, including
+//!   the final output, all generated items, and usage statistics.
+//! - [`StreamingRunResult`]: A handle for an in-progress agent run that provides
+//!   a stream of [`StreamEvent`]s, allowing for real-time processing of the
+//!   agent's activities.
+//! - [`StreamEvent`]: An enumeration of all possible events that can occur
+//!   during an agent's execution, such as content generation, tool calls, and
+//!   guardrail checks.
+//!
+//! ## Working with `RunResult`
+//!
+//! A `RunResult` is returned by the `Runner::run` and `Runner::run_sync` methods.
+//! It contains all the information about the completed run.
+//!
+//! ```rust
+//! use openai_agents_rs::result::RunResult;
+//! use openai_agents_rs::items::RunItem;
+//! use openai_agents_rs::usage::UsageStats;
+//! use serde_json::json;
+//!
+//! // Create a successful result.
+//! let result = RunResult::success(
+//!     json!("This is the final output."),
+//!     vec![], // A list of all items generated during the run.
+//!     "EchoAgent".to_string(),
+//!     UsageStats::new(),
+//!     "trace_123".to_string(),
+//! );
+//!
+//! assert!(result.is_success());
+//! assert_eq!(result.final_agent, "EchoAgent");
+//! println!("Summary: {}", result.summary());
+//! ```
+//!
+//! ## Handling Streaming Results
+//!
+//! For real-time applications, `run_stream` returns a [`StreamingRunResult`],
+//! which you can use to `collect` the final result.
+//!
+//! ```rust,no_run
+//! use openai_agents_rs::{Agent, Runner, runner::RunConfig};
+//! use futures::StreamExt;
+//!
+//! # async fn run_agent_stream() -> Result<(), Box<dyn std::error::Error>> {
+//! let agent = Agent::simple("Streamer", "You stream responses.");
+//! let mut streaming_result = Runner::run_stream(
+//!     agent,
+//!     "Tell me a story.",
+//!     RunConfig::default(),
+//! ).await?;
+//!
+//! // You can process events as they come in.
+//! while let Some(event) = streaming_result.stream.next().await {
+//!     // Process each event...
+//! }
+//! # Ok(())
+//! # }
+//! ```
 //! Results from agent execution
 //!
 //! Provides both synchronous and streaming result types.
@@ -10,36 +74,46 @@ use crate::error::Result;
 use crate::items::{Message, RunItem};
 use crate::usage::{Usage, UsageStats};
 
-/// Result from a completed agent run
+/// Represents the final result of a completed agent run.
+///
+/// This struct provides a comprehensive summary of the agent's execution,
+/// including the final output, a complete history of all generated items,
+/// usage statistics, and status information.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunResult {
-    /// The final output from the agent
+    /// The final output produced by the agent, as a `serde_json::Value`. This
+    /// could be a simple string or a more complex JSON object.
     pub final_output: serde_json::Value,
 
-    /// All items generated during the run
+    /// A vector containing all the `RunItem`s that were generated during the
+    /// execution, in the order they occurred. This provides a detailed trace
+    /// of the agent's actions.
     pub items: Vec<RunItem>,
 
-    /// Messages that can be used for conversation history
+    /// The sequence of messages that constitute the conversation history,
+    /// suitable for being passed to the next run to maintain context.
     pub messages: Vec<Message>,
 
-    /// The agent that produced the final output
+    /// The name of the agent that produced the final output. This is particularly
+    /// relevant in multi-agent workflows where handoffs can occur.
     pub final_agent: String,
 
-    /// Total usage statistics
+    /// A detailed breakdown of the token usage for the entire run, including
+    /// both prompt and completion tokens.
     pub usage: UsageStats,
 
-    /// Trace ID for debugging
+    /// A unique identifier for the run, useful for tracing and debugging.
     pub trace_id: String,
 
-    /// Whether the run completed successfully
+    /// A boolean flag indicating whether the run completed successfully.
     pub success: bool,
 
-    /// Error message if the run failed
+    /// If the run failed, this field contains a string describing the error.
     pub error: Option<String>,
 }
 
 impl RunResult {
-    /// Create a successful result
+    /// Creates a new `RunResult` for a successful run.
     pub fn success(
         final_output: serde_json::Value,
         items: Vec<RunItem>,
@@ -61,7 +135,7 @@ impl RunResult {
         }
     }
 
-    /// Create a failed result
+    /// Creates a new `RunResult` for a failed run.
     pub fn failure(error: String, trace_id: String) -> Self {
         Self {
             final_output: serde_json::Value::Null,
@@ -75,22 +149,22 @@ impl RunResult {
         }
     }
 
-    /// Check if the run was successful
+    /// Returns `true` if the run completed successfully.
     pub fn is_success(&self) -> bool {
         self.success
     }
 
-    /// Get the error message if the run failed
+    /// Returns the error message if the run failed.
     pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
     }
 
-    /// Convert to input messages for the next run
+    /// Returns the conversation history as a vector of `Message`s.
     pub fn to_input_messages(&self) -> Vec<Message> {
         self.messages.clone()
     }
 
-    /// Get a summary of the run
+    /// Provides a human-readable summary of the run.
     pub fn summary(&self) -> String {
         if self.success {
             format!(
@@ -116,76 +190,87 @@ impl RunResult {
     }
 }
 
-/// Event emitted during streaming execution
+/// An enumeration of all possible events that can be emitted during a
+/// streaming agent run.
+///
+/// These events provide a real-time view into the agent's execution, allowing
+/// for dynamic and responsive user interfaces.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum StreamEvent {
-    /// Agent has been selected/changed
+    /// Indicates that a new agent has been selected, either at the start of
+    /// a run or due to a handoff.
     AgentSelected {
         agent_name: String,
         reason: Option<String>,
     },
 
-    /// Model started generating
+    /// Fired when the model begins generating a response.
     GenerationStarted { model: String },
 
-    /// Partial content from the model
+    /// A chunk of content has been generated by the model.
     ContentDelta { delta: String },
 
-    /// Complete content from the model
+    /// The full content of the model's response has been generated.
     ContentComplete { content: String },
 
-    /// Tool call initiated
+    /// A tool call has been initiated by the agent.
     ToolCallStarted {
         tool_name: String,
         tool_call_id: String,
     },
 
-    /// Tool call completed
+    /// A tool call has finished execution.
     ToolCallCompleted {
         tool_call_id: String,
         result: serde_json::Value,
     },
 
-    /// Guardrail check
+    /// A guardrail has been checked.
     GuardrailCheck {
         guardrail_name: String,
         passed: bool,
         reason: Option<String>,
     },
 
-    /// Run item generated
+    /// A new `RunItem` has been generated and added to the history.
     ItemGenerated { item: RunItem },
 
-    /// Usage update
+    /// An update on the token usage.
     UsageUpdate { usage: Usage },
 
-    /// Run completed
+    /// The entire run has completed successfully. This is the final event.
     RunCompleted { result: RunResult },
 
-    /// Error occurred
+    /// An error occurred during the run. This is a terminal event.
     Error { error: String },
 }
 
-/// Stream of events from a running agent
+/// A type alias for a pinned, boxed, dynamic stream of `StreamEvent`s.
 pub type EventStream = Pin<Box<dyn Stream<Item = StreamEvent> + Send>>;
 
-/// Result from a streaming agent run
+/// Represents the result of an agent run that is currently in progress.
+///
+/// This struct provides access to the `EventStream`, allowing you to process
+/// events as they occur. It also contains the `trace_id` for the run.
 pub struct StreamingRunResult {
-    /// Stream of events
+    /// The stream of `StreamEvent`s from the agent's execution.
     pub stream: EventStream,
 
-    /// Trace ID for this run
+    /// The unique trace ID for this run.
     pub trace_id: String,
 }
 
 impl StreamingRunResult {
-    /// Create a new streaming result
+    /// Creates a new `StreamingRunResult`.
     pub fn new(stream: EventStream, trace_id: String) -> Self {
         Self { stream, trace_id }
     }
 
-    /// Collect all events and return the final result
+    /// Consumes the stream and collects all events into a final `RunResult`.
+    ///
+    /// This method is useful when you want to use the streaming API but only
+    /// need the final result.
     pub async fn collect(mut self) -> Result<RunResult> {
         use futures::StreamExt;
 

@@ -1,36 +1,84 @@
-//! Configuration system for the Agents SDK
+//! # SDK Configuration System
 //!
-//! Provides flexible configuration options for agents, runners, and tools.
+//! This module provides a flexible and comprehensive configuration system for
+//! the OpenAI Agents SDK. It allows you to fine-tune the behavior of agents,
+//! runners, and other components through a unified interface.
+//!
+//! The configuration is managed through a set of structs:
+//!
+//! - [`SdkConfig`]: The main configuration struct that holds global settings
+//!   for the SDK, such as default model parameters, API timeouts, and retry
+//!   strategies.
+//! - [`RetryConfig`]: Defines the parameters for handling transient network
+//!   errors, including the number of retries and backoff delays.
+//! - [`RateLimitConfig`]: Configures how the SDK should handle rate limiting
+//!   from the API.
+//! - [`AgentConfigOptions`]: Provides agent-specific overrides for model
+//!   parameters, allowing for fine-grained control over individual agents.
+//!
+//! ## Configuration Methods
+//!
+//! There are multiple ways to create and manage configurations:
+//!
+//! 1.  **Builder Pattern**: The [`ConfigBuilder`] provides a fluent interface for
+//!     constructing an `SdkConfig` programmatically.
+//! 2.  **Environment Variables**: The `from_env` function loads configuration
+//!     settings from environment variables, such as `OPENAI_MODEL` and
+//!     `AGENTS_DEBUG`.
+//! 3.  **TOML File**: The `from_file` function allows you to load a complete
+//!     configuration from a TOML file, which is ideal for production environments.
+//!
+//! ### Example: Using the `ConfigBuilder`
+//!
+//! ```rust
+//! use openai_agents_rs::config::ConfigBuilder;
+//! use std::time::Duration;
+//!
+//! let config = ConfigBuilder::new()
+//!     .model("gpt-3.5-turbo")
+//!     .temperature(0.8)
+//!     .timeout(Duration::from_secs(60))
+//!     .debug(true)
+//!     .build();
+//!
+//! assert_eq!(config.default_model, "gpt-3.5-turbo");
+//! assert_eq!(config.api_timeout, Duration::from_secs(60));
+//! assert!(config.debug_mode);
+//! ```
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
 
-/// Global SDK configuration
+/// The main configuration struct for the entire SDK.
+///
+/// `SdkConfig` holds all the global settings that control the behavior of the
+/// agents and the underlying API client. It provides default values that can be
+/// customized as needed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SdkConfig {
-    /// Default model to use
+    /// The default model to be used by agents if not otherwise specified.
     pub default_model: String,
 
-    /// Default temperature for generation
+    /// The default temperature for the LLM's response generation.
     pub default_temperature: f32,
 
-    /// Default max tokens
+    /// The default maximum number of tokens to generate in a response.
     pub default_max_tokens: Option<usize>,
 
-    /// Timeout for API calls
+    /// The timeout for API calls to the LLM provider.
     pub api_timeout: Duration,
 
-    /// Retry configuration
+    /// Configuration for handling retries on network errors.
     pub retry_config: RetryConfig,
 
-    /// Rate limiting configuration
+    /// Configuration for managing API rate limits.
     pub rate_limit_config: RateLimitConfig,
 
-    /// Default session storage path
+    /// The default path for storing persistent session data.
     pub session_storage_path: PathBuf,
 
-    /// Enable debug logging
+    /// A flag to enable or disable debug logging throughout the SDK.
     pub debug_mode: bool,
 }
 
@@ -49,22 +97,27 @@ impl Default for SdkConfig {
     }
 }
 
-/// Retry configuration
+/// Defines the retry strategy for handling transient network errors.
+///
+/// This struct allows you to configure an exponential backoff strategy with
+/// optional jitter to prevent thundering herd problems.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetryConfig {
-    /// Maximum number of retries
+    /// The maximum number of times to retry a failed API request.
     pub max_retries: usize,
 
-    /// Initial retry delay
+    /// The initial delay to wait before the first retry.
     pub initial_delay: Duration,
 
-    /// Maximum retry delay
+    /// The maximum delay to wait between retries.
     pub max_delay: Duration,
 
-    /// Exponential backoff multiplier
+    /// The multiplier for increasing the delay between retries. A value of 2.0
+    /// means the delay will double with each retry.
     pub backoff_multiplier: f32,
 
-    /// Jitter to add randomness to retries
+    /// A flag to enable or disable jitter, which adds a small amount of
+    /// randomness to the delay to avoid synchronized retries.
     pub jitter: bool,
 }
 
@@ -80,16 +133,17 @@ impl Default for RetryConfig {
     }
 }
 
-/// Rate limiting configuration
+/// Configuration for handling API rate limits.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RateLimitConfig {
-    /// Requests per minute
+    /// The maximum number of requests allowed per minute.
     pub requests_per_minute: Option<usize>,
 
-    /// Tokens per minute
+    /// The maximum number of tokens that can be processed per minute.
     pub tokens_per_minute: Option<usize>,
 
-    /// Enable automatic rate limit handling
+    /// A flag to enable or disable automatic throttling. When enabled, the SDK
+    /// will automatically pause to stay within the specified rate limits.
     pub auto_throttle: bool,
 }
 
@@ -103,34 +157,41 @@ impl Default for RateLimitConfig {
     }
 }
 
-/// Agent-specific configuration
+/// Provides agent-specific overrides for model parameters.
+///
+/// This struct allows you to fine-tune the behavior of individual agents,
+/// overriding the global settings in `SdkConfig`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfigOptions {
-    /// Model to use for this agent
+    /// The specific model to be used for this agent.
     pub model: Option<String>,
 
-    /// Temperature for generation
+    /// The temperature for this agent's response generation.
     pub temperature: Option<f32>,
 
-    /// Maximum tokens to generate
+    /// The maximum number of tokens to generate for this agent.
     pub max_tokens: Option<usize>,
 
-    /// Top-p sampling
+    /// The nucleus sampling parameter, which controls the diversity of the
+    /// generated text.
     pub top_p: Option<f32>,
 
-    /// Frequency penalty
+    /// A penalty for repeating tokens, discouraging the model from generating
+    /// repetitive text.
     pub frequency_penalty: Option<f32>,
 
-    /// Presence penalty
+    /// A penalty for introducing new tokens, encouraging the model to stay on
+    /// topic.
     pub presence_penalty: Option<f32>,
 
-    /// Stop sequences
+    /// A list of sequences that, when generated, will cause the model to stop.
     pub stop_sequences: Vec<String>,
 
-    /// Enable function calling
+    /// A flag to enable or disable the use of function calling (tools) for this
+    /// agent.
     pub enable_functions: bool,
 
-    /// Maximum parallel tool calls
+    /// The maximum number of tools that the agent can call in parallel.
     pub max_parallel_tools: usize,
 }
 
@@ -150,7 +211,10 @@ impl Default for AgentConfigOptions {
     }
 }
 
-/// Configuration builder
+/// A builder for constructing an `SdkConfig` instance.
+///
+/// The `ConfigBuilder` provides a fluent API for creating a custom configuration,
+/// allowing you to chain method calls to set the desired parameters.
 pub struct ConfigBuilder {
     config: SdkConfig,
 }
@@ -162,53 +226,65 @@ impl Default for ConfigBuilder {
 }
 
 impl ConfigBuilder {
+    /// Creates a new `ConfigBuilder` with default settings.
     pub fn new() -> Self {
         Self {
             config: SdkConfig::default(),
         }
     }
 
+    /// Sets the default model for the configuration.
     pub fn model(mut self, model: impl Into<String>) -> Self {
         self.config.default_model = model.into();
         self
     }
 
+    /// Sets the default temperature for the configuration.
     pub fn temperature(mut self, temp: f32) -> Self {
         self.config.default_temperature = temp;
         self
     }
 
+    /// Sets the default maximum number of tokens for the configuration.
     pub fn max_tokens(mut self, tokens: usize) -> Self {
         self.config.default_max_tokens = Some(tokens);
         self
     }
 
+    /// Sets the API timeout for the configuration.
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.config.api_timeout = timeout;
         self
     }
 
+    /// Sets the maximum number of retries for the configuration.
     pub fn max_retries(mut self, retries: usize) -> Self {
         self.config.retry_config.max_retries = retries;
         self
     }
 
+    /// Enables or disables debug mode for the configuration.
     pub fn debug(mut self, enabled: bool) -> Self {
         self.config.debug_mode = enabled;
         self
     }
 
+    /// Sets the session storage path for the configuration.
     pub fn session_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.config.session_storage_path = path.into();
         self
     }
 
+    /// Builds and returns the final `SdkConfig`.
     pub fn build(self) -> SdkConfig {
         self.config
     }
 }
 
-/// Load configuration from environment variables
+/// Loads the SDK configuration from environment variables.
+///
+/// This function looks for specific environment variables, such as `OPENAI_MODEL`
+/// and `AGENTS_DEBUG`, to populate the `SdkConfig`.
 pub fn from_env() -> SdkConfig {
     let mut config = SdkConfig::default();
 
@@ -235,7 +311,10 @@ pub fn from_env() -> SdkConfig {
     config
 }
 
-/// Load configuration from a TOML file
+/// Loads the SDK configuration from a TOML file.
+///
+/// This function reads the specified TOML file and deserializes it into an
+/// `SdkConfig` struct, allowing for file-based configuration management.
 pub fn from_file(
     path: impl AsRef<std::path::Path>,
 ) -> Result<SdkConfig, Box<dyn std::error::Error>> {
