@@ -4,6 +4,7 @@
 //! wrapping the async-openai crate for LLM interactions.
 
 pub mod agent;
+pub mod config;
 pub mod error;
 pub mod guardrail;
 pub mod handoff;
@@ -11,6 +12,7 @@ pub mod items;
 pub mod memory;
 pub mod model;
 pub mod result;
+pub mod retry;
 pub mod runner;
 pub mod sqlite_session;
 pub mod tool;

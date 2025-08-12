@@ -423,7 +423,7 @@ mod tests {
         // Use an in-memory database with a shared cache for testing multiple sessions
         // Note: For real file-based multi-session testing, you'd need proper temp directory handling
         // For now, we'll test the concept with separate in-memory databases
-        
+
         let session1 = SqliteSession::new_in_memory("user1").await.unwrap();
         let session2 = SqliteSession::new_in_memory("user2").await.unwrap();
 

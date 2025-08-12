@@ -27,10 +27,10 @@ fn create_weather_tool() -> Arc<FunctionTool> {
         }),
         Box::new(move |args: serde_json::Value| {
             let city = args["city"].as_str().unwrap_or("Unknown");
-            
+
             // Simulate API delay
             std::thread::sleep(Duration::from_millis(500));
-            
+
             // Return mock weather data
             Ok(serde_json::json!({
                 "city": city,
@@ -60,10 +60,10 @@ fn create_news_tool() -> Arc<FunctionTool> {
         }),
         Box::new(move |args: serde_json::Value| {
             let topic = args["topic"].as_str().unwrap_or("general");
-            
+
             // Simulate API delay
             std::thread::sleep(Duration::from_millis(700));
-            
+
             // Return mock news data
             Ok(serde_json::json!({
                 "topic": topic,
@@ -96,10 +96,10 @@ fn create_stats_tool() -> Arc<FunctionTool> {
         }),
         Box::new(move |args: serde_json::Value| {
             let city = args["city"].as_str().unwrap_or("Unknown");
-            
+
             // Simulate database query delay
             std::thread::sleep(Duration::from_millis(300));
-            
+
             // Return mock statistics
             Ok(serde_json::json!({
                 "city": city,
@@ -117,79 +117,78 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Parallel Tools Example ===\n");
     println!("This example demonstrates how agents can use multiple tools");
     println!("in parallel to gather information more efficiently.\n");
-    
+
     // Create an agent with multiple tools
     let agent = Agent::simple(
         "CityInfoAgent",
         "You are a helpful city information assistant. When asked about cities, \
          gather comprehensive information using all available tools: weather, news, \
-         and statistics. Present the information in a well-organized format."
+         and statistics. Present the information in a well-organized format.",
     )
     .with_tool(create_weather_tool())
     .with_tool(create_news_tool())
     .with_tool(create_stats_tool());
-    
+
     // Test queries that should trigger parallel tool usage
     let queries = vec![
         "Tell me everything about Tokyo - weather, news, and statistics",
         "Compare London and Paris - I need weather and population data for both",
         "What's happening in New York? Get me weather, news, and economic stats",
     ];
-    
+
     for (i, query) in queries.iter().enumerate() {
         println!("\n📝 Query {}: {}", i + 1, query);
         println!("{}", "=".repeat(60));
-        
+
         let start = Instant::now();
-        
+
         // Note: The actual parallelization depends on the LLM's decision
         // to call multiple tools in a single response
-        let result = Runner::run(
-            agent.clone(),
-            query.to_string(),
-            Default::default(),
-        ).await?;
-        
+        let result = Runner::run(agent.clone(), query.to_string(), Default::default()).await?;
+
         let elapsed = start.elapsed();
-        
+
         if result.is_success() {
             println!("\n✅ Response:");
             println!("{}", result.final_output);
-            
+
             // Count tool calls
-            let tool_calls = result.items.iter()
-                .filter(|item| {
-                    matches!(item, openai_agents_rs::items::RunItem::ToolCall(_))
-                })
+            let tool_calls = result
+                .items
+                .iter()
+                .filter(|item| matches!(item, openai_agents_rs::items::RunItem::ToolCall(_)))
                 .count();
-            
+
             println!("\n📊 Execution Statistics:");
             println!("  Time taken: {:.2?}", elapsed);
             println!("  Tool calls made: {}", tool_calls);
             println!("  Total tokens: {}", result.usage.total.total_tokens);
-            
+
             // Estimate time saved by parallel execution
             // (assuming tools were called in parallel vs sequential)
             if tool_calls > 1 {
                 let estimated_sequential = Duration::from_millis(500 * tool_calls as u64);
                 let time_saved = estimated_sequential.saturating_sub(elapsed);
                 if time_saved > Duration::ZERO {
-                    println!("  Estimated time saved by parallel execution: {:.2?}", time_saved);
+                    println!(
+                        "  Estimated time saved by parallel execution: {:.2?}",
+                        time_saved
+                    );
                 }
             }
         } else {
             println!("\n❌ Error: {:?}", result.error);
         }
-        
+
         if i < queries.len() - 1 {
             println!("\n{}", "-".repeat(60));
             println!("Waiting before next query...");
             sleep(Duration::from_secs(2)).await;
         }
     }
-    
+
     println!("\n{}", "=".repeat(60));
     println!("✨ Example completed!");
-    
+
     Ok(())
 }

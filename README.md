@@ -153,11 +153,25 @@ The `examples/` directory contains comprehensive demonstrations:
   - Demonstrates agent handoffs and collaboration
 
 - **`session_with_guardrails.rs`** - Personal assistant with safety features
+
   - Session memory for conversation history
   - Input guardrails blocking sensitive information
   - Output guardrails adding disclaimers
   - Custom guardrail implementations
   - Note-taking and reminder tools
+
+- **`persistent_session.rs`** - SQLite-based persistent sessions
+
+  - Conversation history that survives application restarts
+  - Database-backed session storage with SQLite
+  - Demonstrates session continuity across runs
+  - Automatic session recovery
+
+- **`parallel_tools.rs`** - Concurrent tool execution
+  - Multiple tools working in parallel for efficiency
+  - Weather, news, and statistics gathering
+  - Performance optimization through parallelization
+  - Demonstrates time savings with concurrent execution
 
 Run examples with:
 
@@ -170,6 +184,8 @@ cargo run --example tool_example
 cargo run --example calculator
 cargo run --example multi_agent_research
 cargo run --example session_with_guardrails
+cargo run --example persistent_session
+cargo run --example parallel_tools
 ```
 
 Each example includes both pre-configured scenarios and interactive modes where you can experiment with the agents.
