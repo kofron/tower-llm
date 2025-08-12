@@ -1,5 +1,5 @@
 //! Session memory management for maintaining conversation history
-//! 
+//!
 //! Sessions allow agents to maintain context across multiple runs.
 
 use async_trait::async_trait;
@@ -86,72 +86,7 @@ impl Session for MemorySession {
     }
 }
 
-/// SQLite-based session storage
-/// Note: This is a simplified mock implementation. 
-/// In production, you'd use actual SQLite with sqlx or rusqlite.
-#[derive(Debug)]
-pub struct SqliteSession {
-    session_id: String,
-    db_path: String,
-    // In a real implementation, this would be a connection pool
-    storage: Arc<Mutex<HashMap<String, Vec<RunItem>>>>,
-}
 
-impl SqliteSession {
-    pub fn new(session_id: impl Into<String>, db_path: impl Into<String>) -> Self {
-        Self {
-            session_id: session_id.into(),
-            db_path: db_path.into(),
-            storage: Arc::new(Mutex::new(HashMap::new())),
-        }
-    }
-
-    pub fn new_default(session_id: impl Into<String>) -> Self {
-        Self::new(session_id, "sessions.db")
-    }
-}
-
-#[async_trait]
-impl Session for SqliteSession {
-    fn session_id(&self) -> &str {
-        &self.session_id
-    }
-
-    async fn get_items(&self, limit: Option<usize>) -> Result<Vec<RunItem>> {
-        let storage = self.storage.lock().unwrap();
-        let items = storage.get(&self.session_id).cloned().unwrap_or_default();
-        
-        let result = if let Some(limit) = limit {
-            let start = items.len().saturating_sub(limit);
-            items[start..].to_vec()
-        } else {
-            items
-        };
-        Ok(result)
-    }
-
-    async fn add_items(&self, new_items: Vec<RunItem>) -> Result<()> {
-        let mut storage = self.storage.lock().unwrap();
-        let items = storage.entry(self.session_id.clone()).or_insert_with(Vec::new);
-        items.extend(new_items);
-        Ok(())
-    }
-
-    async fn pop_item(&self) -> Result<Option<RunItem>> {
-        let mut storage = self.storage.lock().unwrap();
-        if let Some(items) = storage.get_mut(&self.session_id) {
-            Ok(items.pop())
-        } else {
-            Ok(None)
-        }
-    }
-
-    async fn clear_session(&self) -> Result<()> {
-        let mut storage = self.storage.lock().unwrap();
-        storage.remove(&self.session_id);
-        Ok(())
-    }
-}
 
 /// Session manager for handling multiple sessions
 #[derive(Debug)]
@@ -249,17 +184,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_sqlite_session() {
-        let session = SqliteSession::new_default("user_123");
+        // Test moved to sqlite_session.rs with real implementation
+        // This test now uses the real SqliteSession from sqlite_session module
+        use crate::sqlite_session::SqliteSession;
+        
+        let session = SqliteSession::new_in_memory("user_123").await.unwrap();
         assert_eq!(session.session_id(), "user_123");
 
-        let items = vec![
-            RunItem::Message(MessageItem {
-                id: "1".to_string(),
-                role: Role::User,
-                content: "Test message".to_string(),
-                created_at: Utc::now(),
-            }),
-        ];
+        let items = vec![RunItem::Message(MessageItem {
+            id: "1".to_string(),
+            role: Role::User,
+            content: "Test message".to_string(),
+            created_at: Utc::now(),
+        })];
 
         session.add_items(items).await.unwrap();
         let retrieved = session.get_items(None).await.unwrap();
@@ -287,7 +224,7 @@ mod tests {
 
         session.add_items(items).await.unwrap();
         let messages = session.get_messages(None).await.unwrap();
-        
+
         // Only Message items should be converted
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].role, Role::User);
@@ -329,23 +266,19 @@ mod tests {
         let session1 = MemorySession::new("user1");
         let session2 = MemorySession::new("user2");
 
-        let items1 = vec![
-            RunItem::Message(MessageItem {
-                id: "1".to_string(),
-                role: Role::User,
-                content: "Session 1 message".to_string(),
-                created_at: Utc::now(),
-            }),
-        ];
+        let items1 = vec![RunItem::Message(MessageItem {
+            id: "1".to_string(),
+            role: Role::User,
+            content: "Session 1 message".to_string(),
+            created_at: Utc::now(),
+        })];
 
-        let items2 = vec![
-            RunItem::Message(MessageItem {
-                id: "2".to_string(),
-                role: Role::User,
-                content: "Session 2 message".to_string(),
-                created_at: Utc::now(),
-            }),
-        ];
+        let items2 = vec![RunItem::Message(MessageItem {
+            id: "2".to_string(),
+            role: Role::User,
+            content: "Session 2 message".to_string(),
+            created_at: Utc::now(),
+        })];
 
         session1.add_items(items1).await.unwrap();
         session2.add_items(items2).await.unwrap();

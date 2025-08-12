@@ -52,6 +52,10 @@ pub enum AgentsError {
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
 
+    /// Database error
+    #[error("Database error: {0}")]
+    DatabaseError(#[from] sqlx::Error),
+
     /// Other errors
     #[error("{0}")]
     Other(String),
@@ -69,7 +73,10 @@ mod tests {
         let err = AgentsError::InputGuardrailTriggered {
             message: "Inappropriate content".to_string(),
         };
-        assert_eq!(err.to_string(), "Input guardrail triggered: Inappropriate content");
+        assert_eq!(
+            err.to_string(),
+            "Input guardrail triggered: Inappropriate content"
+        );
     }
 
     #[test]
@@ -101,7 +108,7 @@ mod tests {
 
         let result = might_fail();
         assert!(result.is_err());
-        
+
         if let Err(e) = result {
             assert!(matches!(e, AgentsError::UserError { .. }));
         }

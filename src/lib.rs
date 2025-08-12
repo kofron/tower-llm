@@ -12,6 +12,7 @@ pub mod memory;
 pub mod model;
 pub mod result;
 pub mod runner;
+pub mod sqlite_session;
 pub mod tool;
 pub mod tracing;
 pub mod usage;
@@ -21,9 +22,10 @@ pub use agent::{Agent, AgentConfig};
 pub use error::{AgentsError, Result};
 pub use guardrail::{InputGuardrail, OutputGuardrail};
 pub use handoff::Handoff;
-pub use memory::{Session, SqliteSession};
+pub use memory::Session;
 pub use result::{RunResult, StreamingRunResult};
 pub use runner::Runner;
+pub use sqlite_session::SqliteSession;
 pub use tool::{FunctionTool, Tool};
 
 #[cfg(test)]

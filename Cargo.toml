@@ -23,6 +23,14 @@ path = "examples/multi_agent_research.rs"
 name = "session_with_guardrails"
 path = "examples/session_with_guardrails.rs"
 
+[[example]]
+name = "persistent_session"
+path = "examples/persistent_session.rs"
+
+[[example]]
+name = "parallel_tools"
+path = "examples/parallel_tools.rs"
+
 [dependencies]
 async-openai = "0.29.0"
 async-trait = "0.1"
@@ -35,6 +43,12 @@ tracing = "0.1"
 futures = "0.3"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.11", features = ["v4", "serde"] }
+sqlx = { version = "0.8", features = [
+    "runtime-tokio",
+    "sqlite",
+    "chrono",
+    "uuid",
+] }
 
 [dev-dependencies]
 mockall = "0.13"
