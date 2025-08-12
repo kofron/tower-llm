@@ -247,8 +247,16 @@ impl Runner {
                 // Add assistant message with tool calls
                 messages.push(Message::assistant_with_tool_calls(
                     response.content.clone().unwrap_or_default(),
-                    message_tool_calls,
+                    message_tool_calls.clone(),
                 ));
+
+                // Also save as an assistant message item for session history
+                items.push(RunItem::Message(MessageItem {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    role: Role::Assistant,
+                    content: response.content.clone().unwrap_or_default(),
+                    created_at: chrono::Utc::now(),
+                }));
             }
 
             // Process tool calls

@@ -225,10 +225,13 @@ mod tests {
         session.add_items(items).await.unwrap();
         let messages = session.get_messages(None).await.unwrap();
 
-        // Only Message items should be converted
-        assert_eq!(messages.len(), 1);
+        // Message items and tool calls should be converted
+        assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].role, Role::User);
         assert_eq!(messages[0].content, "What's the weather?");
+        // Tool calls create an assistant message with tool_calls
+        assert_eq!(messages[1].role, Role::Assistant);
+        assert!(messages[1].tool_calls.is_some());
     }
 
     #[tokio::test]

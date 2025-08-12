@@ -184,17 +184,57 @@ impl ItemHelpers {
     /// Convert run items to messages for the conversation history
     pub fn to_messages(items: &[RunItem]) -> Vec<Message> {
         let mut messages = Vec::new();
+        let mut pending_tool_calls: Vec<ToolCall> = Vec::new();
 
-        for item in items {
+        for (i, item) in items.iter().enumerate() {
             match item {
                 RunItem::Message(msg) => {
-                    messages.push(Message {
-                        role: msg.role,
-                        content: msg.content.clone(),
-                        name: None,
-                        tool_call_id: None,
-                        tool_calls: None,
+                    // If we have pending tool calls from before this message,
+                    // and this is an assistant message, attach them
+                    if msg.role == Role::Assistant && !pending_tool_calls.is_empty() {
+                        messages.push(Message {
+                            role: msg.role,
+                            content: msg.content.clone(),
+                            name: None,
+                            tool_call_id: None,
+                            tool_calls: Some(pending_tool_calls.clone()),
+                        });
+                        pending_tool_calls.clear();
+                    } else {
+                        messages.push(Message {
+                            role: msg.role,
+                            content: msg.content.clone(),
+                            name: None,
+                            tool_call_id: None,
+                            tool_calls: None,
+                        });
+                    }
+                }
+                RunItem::ToolCall(tool_call) => {
+                    // Collect tool calls that should be attached to the previous assistant message
+                    pending_tool_calls.push(ToolCall {
+                        id: tool_call.id.clone(),
+                        name: tool_call.tool_name.clone(),
+                        arguments: tool_call.arguments.clone(),
                     });
+
+                    // Check if this is the last tool call before tool outputs
+                    // If the next item is a ToolOutput, we should create an assistant message now
+                    if i + 1 < items.len() {
+                        if let RunItem::ToolOutput(_) = &items[i + 1] {
+                            // Create an assistant message with the tool calls
+                            if !pending_tool_calls.is_empty() {
+                                messages.push(Message {
+                                    role: Role::Assistant,
+                                    content: String::new(),
+                                    name: None,
+                                    tool_call_id: None,
+                                    tool_calls: Some(pending_tool_calls.clone()),
+                                });
+                                pending_tool_calls.clear();
+                            }
+                        }
+                    }
                 }
                 RunItem::ToolOutput(output) => {
                     let content = if let Some(error) = &output.error {
@@ -206,6 +246,17 @@ impl ItemHelpers {
                 }
                 _ => {}
             }
+        }
+
+        // If we still have pending tool calls at the end, create an assistant message for them
+        if !pending_tool_calls.is_empty() {
+            messages.push(Message {
+                role: Role::Assistant,
+                content: String::new(),
+                name: None,
+                tool_call_id: None,
+                tool_calls: Some(pending_tool_calls),
+            });
         }
 
         messages
@@ -309,9 +360,11 @@ mod tests {
         ];
 
         let messages = ItemHelpers::to_messages(&items);
-        assert_eq!(messages.len(), 2); // Message and ToolOutput
+        assert_eq!(messages.len(), 3); // User Message, Assistant with tool_calls, and ToolOutput
         assert_eq!(messages[0].role, Role::User);
-        assert_eq!(messages[1].role, Role::Tool);
+        assert_eq!(messages[1].role, Role::Assistant); // Assistant message with tool_calls
+        assert!(messages[1].tool_calls.is_some());
+        assert_eq!(messages[2].role, Role::Tool);
     }
 
     #[test]

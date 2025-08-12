@@ -256,11 +256,13 @@ mod tests {
         assert_eq!(policy.attempt(), 1);
 
         let delay2 = policy.next_delay();
-        assert_eq!(delay2, Duration::from_millis(200));
+        // Use approximate comparison due to floating point precision
+        assert!((delay2.as_millis() as i64 - 200).abs() <= 1);
         assert_eq!(policy.attempt(), 2);
 
         let delay3 = policy.next_delay();
-        assert_eq!(delay3, Duration::from_millis(400));
+        // Use approximate comparison due to floating point precision
+        assert!((delay3.as_millis() as i64 - 400).abs() <= 1);
         assert_eq!(policy.attempt(), 3);
 
         assert!(!policy.should_retry());
