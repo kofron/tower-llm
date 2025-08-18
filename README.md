@@ -162,6 +162,51 @@ let agent = Agent::simple("Ctx", "...")
     .with_context_factory(|| MyCtx::default(), MyHandler);
 ```
 
+### Run-scoped Context (spans handoffs)
+
+Attach context at run time so it applies across all agents (including handoffs). The run-scoped handler is applied before any per-agent handler, and its rewrite/final decisions take precedence.
+
+```rust,no_run
+use openai_agents_rs::{Agent, Runner, runner::RunConfig, ContextStep, ToolContext, RunResultWithContext};
+use serde_json::Value;
+
+#[derive(Clone, Default)]
+struct RunCtx { calls: usize }
+struct RunHandler;
+
+impl ToolContext<RunCtx> for RunHandler {
+    fn on_tool_output(
+        &self,
+        mut ctx: RunCtx,
+        _tool: &str,
+        _args: &Value,
+        result: Result<Value, String>,
+    ) -> openai_agents_rs::Result<ContextStep<RunCtx>> {
+        ctx.calls += 1;
+        // Shape the value the model sees; can also return ContextStep::final_output
+        Ok(ContextStep::rewrite(ctx, result.unwrap_or(Value::Null)))
+    }
+}
+
+let agent = Agent::simple("Planner", "Use tools and possibly hand off …");
+let config = RunConfig::default();
+let out: RunResultWithContext<RunCtx> = Runner::run_with_run_context(
+    agent,
+    "Do the thing",
+    config,
+    || RunCtx::default(),
+    RunHandler,
+).await?;
+assert!(out.result.is_success());
+println!("run-scoped calls: {}", out.context.calls);
+```
+
+Notes:
+
+- Run-scoped context spans handoffs automatically.
+- Ordering: run-scoped handler runs first, then any per-agent handler.
+- Finalization: either handler can return `Final` to stop the run immediately.
+
 ## Testing
 
 The SDK includes comprehensive tests. Run them with:

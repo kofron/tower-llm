@@ -84,6 +84,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         stream: false,
         session: Some(session.clone()),
         model_provider: None, // Use default OpenAI provider
+        run_context: None,
     };
 
     // 5. Simulate a multi-turn conversation.

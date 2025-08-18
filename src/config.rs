@@ -85,8 +85,8 @@ pub struct SdkConfig {
 impl Default for SdkConfig {
     fn default() -> Self {
         Self {
-            default_model: "gpt-4".to_string(),
-            default_temperature: 0.7,
+            default_model: "gpt-5".to_string(),
+            default_temperature: 1.0,
             default_max_tokens: None,
             api_timeout: Duration::from_secs(30),
             retry_config: RetryConfig::default(),
@@ -330,8 +330,8 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = SdkConfig::default();
-        assert_eq!(config.default_model, "gpt-4");
-        assert_eq!(config.default_temperature, 0.7);
+        assert_eq!(config.default_model, "gpt-5");
+        assert_eq!(config.default_temperature, 1.0);
         assert!(config.rate_limit_config.auto_throttle);
     }
 
@@ -361,13 +361,13 @@ mod tests {
     #[test]
     fn test_agent_config_options() {
         let options = AgentConfigOptions {
-            model: Some("gpt-4".to_string()),
+            model: Some("gpt-5".to_string()),
             temperature: Some(0.9),
             max_parallel_tools: 10,
             ..Default::default()
         };
 
-        assert_eq!(options.model, Some("gpt-4".to_string()));
+        assert_eq!(options.model, Some("gpt-5".to_string()));
         assert_eq!(options.temperature, Some(0.9));
         assert_eq!(options.max_parallel_tools, 10);
         assert!(options.enable_functions);

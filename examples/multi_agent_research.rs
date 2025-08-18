@@ -27,6 +27,11 @@
 //! export OPENAI_API_KEY="your-api-key"
 //! cargo run --example multi_agent_research
 //! ```
+//!
+//! Expected: For the predefined queries, the system should coordinate handoffs
+//! between agents (Coordinator → Specialists) and produce comprehensive
+//! responses. Logs should show agent handoffs and tool activity. The interactive
+//! section may be skipped by the example runner.
 
 use openai_agents_rs::{handoff::Handoff, runner::RunConfig, Agent, FunctionTool, Runner};
 use serde_json::Value;

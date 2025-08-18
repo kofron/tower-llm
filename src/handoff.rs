@@ -55,6 +55,10 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::agent::Agent;
+use crate::error::Result;
+use crate::tool::{Tool, ToolResult};
+use async_trait::async_trait;
+use serde_json::Value;
 
 /// Represents a potential handoff target, allowing one agent to transfer
 /// control to another.
@@ -117,6 +121,43 @@ impl std::fmt::Debug for Handoff {
             .field("name", &self.name)
             .field("description", &self.description)
             .finish()
+    }
+}
+
+/// Adapter to expose a handoff as a Tool to the model provider.
+#[derive(Clone, Debug)]
+pub struct HandoffTool {
+    handoff: Handoff,
+}
+
+impl From<Handoff> for HandoffTool {
+    fn from(h: Handoff) -> Self {
+        Self { handoff: h }
+    }
+}
+
+#[async_trait]
+impl Tool for HandoffTool {
+    fn name(&self) -> &str {
+        &self.handoff.name
+    }
+
+    fn description(&self) -> &str {
+        &self.handoff.description
+    }
+
+    fn parameters_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "reason": {"type": "string", "description": "Reason for handoff"}
+            }
+        })
+    }
+
+    async fn execute(&self, _arguments: Value) -> Result<ToolResult> {
+        // This tool should never be executed directly; the runner intercepts handoffs.
+        Ok(ToolResult::success(serde_json::json!({"handoff": true})))
     }
 }
 

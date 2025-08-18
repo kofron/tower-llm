@@ -97,7 +97,8 @@ impl Usage {
             "gpt-4-32k" => (0.06, 0.12),
             "gpt-3.5-turbo" | "gpt-3.5-turbo-0613" => (0.0015, 0.002),
             "gpt-3.5-turbo-16k" => (0.003, 0.004),
-            _ => (0.002, 0.002), // Default pricing
+            "gpt-5" => (0.0015, 0.002), // TODO: Update this to the actual price
+            _ => (0.002, 0.002),        // Default pricing
         };
 
         let prompt_cost = (self.prompt_tokens as f64 / 1000.0) * prompt_price;

@@ -151,6 +151,21 @@ impl fmt::Debug for ToolContextSpec {
     }
 }
 
+/// Run-scoped context specification (owned by the runner for the entire run).
+#[derive(Clone)]
+pub struct RunContextSpec {
+    /// Factory to construct a fresh per-run context (erased).
+    pub factory: Arc<dyn Fn() -> Box<dyn Any + Send> + Send + Sync>,
+    /// The erased context handler.
+    pub handler: Arc<dyn ErasedToolContextHandler>,
+}
+
+impl fmt::Debug for RunContextSpec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RunContextSpec").finish()
+    }
+}
+
 /// A typed agent wrapper that carries the compile-time context type.
 ///
 /// Use the typed builders on [`Agent`](crate::agent::Agent) to create one,

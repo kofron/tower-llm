@@ -67,6 +67,7 @@ pub mod agent;
 pub mod config;
 pub mod context;
 pub mod error;
+pub mod group;
 pub mod guardrail;
 pub mod handoff;
 pub mod items;
@@ -82,16 +83,17 @@ pub mod usage;
 
 // Re-export core types for convenience
 pub use agent::{Agent, AgentConfig};
+pub use context::ContextualAgent;
 pub use context::{ContextDecision, ContextStep, ToolContext};
 pub use error::{AgentsError, Result};
+pub use group::{AgentGroup, AgentGroupBuilder};
 pub use guardrail::{InputGuardrail, OutputGuardrail};
 pub use handoff::Handoff;
 pub use memory::Session;
-pub use result::{RunResult, StreamingRunResult, RunResultWithContext};
+pub use result::{RunResult, RunResultWithContext, StreamingRunResult};
 pub use runner::Runner;
 pub use sqlite_session::SqliteSession;
 pub use tool::{FunctionTool, Tool};
-pub use context::ContextualAgent;
 
 #[cfg(test)]
 mod tests {

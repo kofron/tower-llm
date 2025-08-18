@@ -31,6 +31,11 @@
 //! export OPENAI_API_KEY="your-api-key"
 //! cargo run --example session_with_guardrails
 //! ```
+//!
+//! Expected: The assistant should maintain session memory across turns, use
+//! tools to save a note and set a reminder, and add a disclaimer when content
+//! resembles financial or medical advice. The interactive section may be
+//! skipped by the example runner.
 
 use async_trait::async_trait;
 use openai_agents_rs::{
@@ -218,6 +223,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = RunConfig {
         session: Some(session.clone()),
+        run_context: None,
         ..Default::default()
     };
 

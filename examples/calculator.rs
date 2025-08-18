@@ -25,6 +25,11 @@
 //! export OPENAI_API_KEY="your-api-key"
 //! cargo run --example calculator
 //! ```
+//!
+//! Expected: This example should solve each predefined problem and print a
+//! "Final Answer" containing the computed numeric result, showing that tools
+//! were used (tool call logs). The interactive section at the end may be
+//! skipped by the example runner.
 
 use openai_agents_rs::{runner::RunConfig, Agent, FunctionTool, Runner};
 use serde_json::Value;
