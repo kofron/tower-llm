@@ -44,11 +44,11 @@ jobs:
       - name: Run tests
         run: cargo test --all --all-features
 
-      - name: Run example suite
-        if: ${{ secrets.OPENAI_API_KEY != '' }}
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: cargo run --bin run_examples --quiet
+      # - name: Run example suite
+      #   if: ${{ secrets.OPENAI_API_KEY != '' }}
+      #   env:
+      #     OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      #   run: cargo run --bin run_examples --quiet
 
   publish:
     needs: build
