@@ -17,6 +17,9 @@
 //!   with the outside world, such as calling an API or accessing a database.
 //! - **[`Session`]**: Manages the state of an interaction, including the history
 //!   of messages. A [`SqliteSession`] is provided for persistent state.
+//! - **Contextual Runs**: An optional per-run context hook that can observe and
+//!   shape tool outputs. See [`ToolContext`](crate::context::ToolContext) and
+//!   `examples/contextual.rs`.
 //!
 //! ## Getting Started
 //!
@@ -62,6 +65,7 @@
 
 pub mod agent;
 pub mod config;
+pub mod context;
 pub mod error;
 pub mod guardrail;
 pub mod handoff;
@@ -78,14 +82,16 @@ pub mod usage;
 
 // Re-export core types for convenience
 pub use agent::{Agent, AgentConfig};
+pub use context::{ContextDecision, ContextStep, ToolContext};
 pub use error::{AgentsError, Result};
 pub use guardrail::{InputGuardrail, OutputGuardrail};
 pub use handoff::Handoff;
 pub use memory::Session;
-pub use result::{RunResult, StreamingRunResult};
+pub use result::{RunResult, StreamingRunResult, RunResultWithContext};
 pub use runner::Runner;
 pub use sqlite_session::SqliteSession;
 pub use tool::{FunctionTool, Tool};
+pub use context::ContextualAgent;
 
 #[cfg(test)]
 mod tests {

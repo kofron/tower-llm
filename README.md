@@ -12,6 +12,7 @@ A Rust implementation of the OpenAI Agents SDK, providing a lightweight yet powe
 - ✅ **Tracing**: Built-in observability using the `tracing` crate
 - ✅ **Async/Sync Support**: Both async and blocking execution modes
 - ✅ **Streaming**: Real-time event streaming for long-running operations
+- ✅ **Contextual Runs**: Per-run context that can rewrite tool outputs or finalize early
 
 ## Getting Started
 
@@ -97,6 +98,8 @@ The `examples/` directory contains a rich set of demonstrations that showcase th
 - **`session_with_guardrails.rs`**: A personal assistant with session memory and safety guardrails.
 - **`persistent_session.rs`**: Demonstrates the use of SQLite for persistent conversation history.
 - **`parallel_tools.rs`**: Shows how to execute multiple tools concurrently for improved performance.
+ - **`contextual.rs`**: Demonstrates contextual handling of tool outputs (rewrite/finalize)
+ - **`rpn_calculator.rs`**: RPN calculator where the handler maintains the execution stack and the final stack is extracted after the run
 
 To run the examples:
 
@@ -118,6 +121,45 @@ The SDK follows these design principles:
 2. **Type Safety**: Leverages Rust's type system for correctness
 3. **Async-First**: Built on Tokio for efficient async operations
 4. **Extensible**: Easy to add custom tools, guardrails, and model providers
+5. **Context-aware**: Optional per-run context hook for tool output shaping
+
+### Contextual Runs
+
+You can attach a contextual handler that observes tool outputs and decides to:
+
+- Forward the output unchanged
+- Rewrite the output fed back to the model
+- Finalize the run immediately with a value
+
+Builder API:
+
+```rust
+use openai_agents_rs::{Agent, ToolContext, ContextStep};
+use serde_json::Value;
+
+#[derive(Clone, Default)]
+struct MyCtx;
+struct MyHandler;
+
+impl ToolContext<MyCtx> for MyHandler {
+    fn on_tool_output(
+        &self,
+        ctx: MyCtx,
+        tool_name: &str,
+        arguments: &Value,
+        result: Result<Value, String>,
+    ) -> openai_agents_rs::Result<ContextStep<MyCtx>> {
+        let _ = (tool_name, arguments);
+        match result {
+            Ok(v) => Ok(ContextStep::rewrite(ctx, v)),
+            Err(_e) => Ok(ContextStep::final_output(ctx, serde_json::json!("stopped"))),
+        }
+    }
+}
+
+let agent = Agent::simple("Ctx", "...")
+    .with_context_factory(|| MyCtx::default(), MyHandler);
+```
 
 ## Testing
 
@@ -126,6 +168,10 @@ The SDK includes comprehensive tests. Run them with:
 ```bash
 cargo test
 ```
+
+## Roadmap
+
+- [ ] Context DI, it's one of the best things
 
 ## License
 
