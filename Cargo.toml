@@ -1,6 +1,6 @@
 [package]
 name = "openai-agents-rs"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "A port of the openai agents SDK to Rust."
 license = "MIT"
