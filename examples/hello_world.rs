@@ -10,6 +10,8 @@
 //! export OPENAI_API_KEY="your-api-key"
 //! cargo run --example hello_world
 //! ```
+//!
+//! Expected: The agent should return a haiku about recursion in programming.  It might also contain other filler text, but as long as the haiku is present, this example has succeeded.
 
 use openai_agents_rs::{runner::RunConfig, Agent, Runner};
 

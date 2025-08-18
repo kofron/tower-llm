@@ -28,6 +28,9 @@
 //! export OPENAI_API_KEY="your-api-key"
 //! cargo run --example parallel_tools
 //! ```
+//!
+//! Expected: The agent should call all three tools, and the final output should contain the information from all three tools.  
+//! It might also contain other filler text, but as long as the information from all three tools is present, this example has succeeded.
 
 use openai_agents_rs::{Agent, FunctionTool, Runner};
 use std::sync::Arc;

@@ -43,6 +43,14 @@ path = "examples/persistent_session.rs"
 name = "parallel_tools"
 path = "examples/parallel_tools.rs"
 
+[[example]]
+name = "rpn_calculator"
+path = "examples/rpn_calculator.rs"
+
+[[example]]
+name = "db_migrator"
+path = "examples/db_migrator.rs"
+
 
 [dependencies]
 async-openai = "0.29.0"
@@ -64,6 +72,7 @@ sqlx = { version = "0.8", features = [
     "chrono",
     "uuid",
 ] }
+rusqlite = "0.31"
 
 [dev-dependencies]
 mockall = "0.13"

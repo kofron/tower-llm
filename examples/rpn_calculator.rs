@@ -11,6 +11,9 @@
 //! export OPENAI_API_KEY="your-api-key"
 //! cargo run --example rpn_calculator
 //! ```
+//!
+//! Expected: The agent should be able to compute the RPN expression and return the result.
+//! The answer should be 16.
 
 use openai_agents_rs::{
     runner::RunConfig, Agent, ContextStep, ContextualAgent, FunctionTool, RunResultWithContext,

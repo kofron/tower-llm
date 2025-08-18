@@ -99,6 +99,7 @@ The `examples/` directory contains a rich set of demonstrations that showcase th
 - **`persistent_session.rs`**: Demonstrates the use of SQLite for persistent conversation history.
 - **`parallel_tools.rs`**: Shows how to execute multiple tools concurrently for improved performance.
  - **`contextual.rs`**: Demonstrates contextual handling of tool outputs (rewrite/finalize)
+ - **`db_migrator.rs`**: Transactional DB migrator where the handler manages a live transaction and commits/rolls back at the end
  - **`rpn_calculator.rs`**: RPN calculator where the handler maintains the execution stack and the final stack is extracted after the run
 
 To run the examples:

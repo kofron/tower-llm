@@ -9,6 +9,8 @@
 //! export OPENAI_API_KEY="your-api-key"
 //! cargo run --example contextual
 //! ```
+//!
+//! Expected: The tool should be called twice, and the final output should contain 'HELLO WORLD'.  Because AI, it might not be exactly that, but it should at the very least contain it.
 
 use openai_agents_rs::{runner::RunConfig, Agent, ContextStep, FunctionTool, Runner, ToolContext};
 use serde_json::Value;
