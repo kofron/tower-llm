@@ -60,12 +60,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_handoff(specialist.into_inner(), "Do work")
         .build();
 
-    let config = RunConfig::default().with_run_context(|| RunCtx::default(), RunCount);
+    let config = RunConfig::default().with_run_context(RunCtx::default, RunCount);
     let out = Runner::run_with_run_context(
         group.into_agent(),
         "Perform a task using tools",
         config,
-        || RunCtx::default(),
+        RunCtx::default,
         RunCount,
     )
     .await?;

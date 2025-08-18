@@ -73,7 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "You are helpful. Use the uppercase tool when asked to transform text.",
     )
     .with_tool(uppercase)
-    .with_context_factory(|| MyContext::default(), MyHandler);
+    .with_context_factory(MyContext::default, MyHandler);
 
     // Run with a prompt that should encourage a tool call
     let result = Runner::run(

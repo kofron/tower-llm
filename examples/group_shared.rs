@@ -51,13 +51,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_handoff(analyst, "Analyze info")
         .build();
 
-    let config = RunConfig::default().with_run_context(|| Ctx::default(), Count);
+    let config = RunConfig::default().with_run_context(Ctx::default, Count);
 
     let out = Runner::run_with_run_context(
         group.into_agent(),
         "Find information about Rust (the programming language) and summarize it",
         config,
-        || Ctx::default(),
+        Ctx::default,
         Count,
     )
     .await?;

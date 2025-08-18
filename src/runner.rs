@@ -52,7 +52,7 @@ use crate::usage::UsageStats;
 fn truncate_for_log(s: &str, max: usize) -> String {
     if s.len() > max {
         let mut out = s[..max].to_string();
-        out.push_str("…");
+        out.push('…');
         out
     } else {
         s.to_string()
@@ -375,7 +375,7 @@ impl Runner {
         input: impl Into<String>,
         mut config: RunConfig,
         factory: impl Fn() -> C + Send + Sync + 'static,
-        handler: impl crate::context::ToolContext<C> + Send + Sync + 'static,
+        handler: impl crate::context::ToolContext<C> + 'static,
     ) -> Result<crate::result::RunResultWithContext<C>>
     where
         C: Send + Sync + 'static,
@@ -1171,7 +1171,7 @@ mod tests {
 
         let agent = Agent::simple("CtxAgent", "Use tools")
             .with_tool(tool)
-            .with_context_factory(|| Ctx::default(), ForwardHandler);
+            .with_context_factory(Ctx::default, ForwardHandler);
 
         let provider = Arc::new(
             MockProvider::new("test-model")
@@ -1202,7 +1202,7 @@ mod tests {
 
         let agent = Agent::simple("CtxRewrite", "Use tools")
             .with_tool(tool)
-            .with_context_factory(|| Ctx::default(), RewriteHandler);
+            .with_context_factory(Ctx::default, RewriteHandler);
 
         let provider = Arc::new(
             MockProvider::new("test-model")
@@ -1233,7 +1233,7 @@ mod tests {
 
         let agent = Agent::simple("CtxFinal", "Use tools")
             .with_tool(tool)
-            .with_context_factory(|| Ctx::default(), FinalHandler);
+            .with_context_factory(Ctx::default, FinalHandler);
 
         let provider = Arc::new(
             MockProvider::new("test-model")
@@ -1265,7 +1265,7 @@ mod tests {
 
         let agent = Agent::simple("CtxErr", "Use tools")
             .with_tool(tool)
-            .with_context_factory(|| Ctx::default(), RewriteOnErrorHandler);
+            .with_context_factory(Ctx::default, RewriteOnErrorHandler);
 
         let provider = Arc::new(
             MockProvider::new("test-model").with_tool_call("failing", serde_json::json!({})),
@@ -1349,7 +1349,7 @@ mod tests {
 
         let agent = Agent::simple("CtxFail", "Use tools")
             .with_tool(tool)
-            .with_context_factory(|| Ctx::default(), ErrOnceCountingHandler::new());
+            .with_context_factory(Ctx::default, ErrOnceCountingHandler::new());
 
         // Two consecutive tool calls, then a final message
         let tc1 = MsgToolCall {
@@ -1400,7 +1400,7 @@ mod tests {
 
         let agent = Agent::simple("CtxMulti", "Use tools")
             .with_tool(tool)
-            .with_context_factory(|| Ctx::default(), CountingHandler);
+            .with_context_factory(Ctx::default, CountingHandler);
 
         let tc1 = MsgToolCall {
             id: uuid::Uuid::new_v4().to_string(),
@@ -1450,7 +1450,7 @@ mod tests {
 
         let agent = Agent::simple("CtxStream", "Use tools")
             .with_tool(tool)
-            .with_context_factory(|| Ctx::default(), CountingHandler);
+            .with_context_factory(Ctx::default, CountingHandler);
 
         let provider = Arc::new(
             MockProvider::new("test-model")
@@ -1516,7 +1516,7 @@ mod tests {
 
         let config = RunConfig::default()
             .with_model_provider(Some(provider))
-            .with_run_context(|| RC::default(), RH);
+            .with_run_context(RC::default, RH);
         let streaming = Runner::run_stream(agent, "Run", config).await.unwrap();
         let result = streaming.collect().await.unwrap();
 
@@ -1571,7 +1571,7 @@ mod tests {
         );
 
         let config = RunConfig::default().with_model_provider(Some(provider));
-        let out = Runner::run_with_run_context(agent, "Run", config, || RC::default(), Inc)
+        let out = Runner::run_with_run_context(agent, "Run", config, RC::default, Inc)
             .await
             .unwrap();
 
@@ -1639,7 +1639,7 @@ mod tests {
         );
 
         let config = RunConfig::default()
-            .with_run_context(|| RunCtx::default(), RunScopedErrOnce::new())
+            .with_run_context(RunCtx::default, RunScopedErrOnce::new())
             .with_model_provider(Some(provider));
         let result = Runner::run(agent, "Run", config).await.unwrap();
 
@@ -1683,7 +1683,7 @@ mod tests {
                 .with_tool_call("uppercase", serde_json::json!({"input":"x"})),
         );
         let config = RunConfig::default()
-            .with_run_context(|| RunCtx::default(), RunScopedFinal)
+            .with_run_context(RunCtx::default, RunScopedFinal)
             .with_model_provider(Some(provider));
         let result = Runner::run(agent, "Run", config).await.unwrap();
         assert!(result.is_success());
@@ -1765,7 +1765,7 @@ mod tests {
 
         let config = RunConfig::default()
             .with_model_provider(Some(provider))
-            .with_run_context(|| RC::default(), RH);
+            .with_run_context(RC::default, RH);
         let result = Runner::run(group.into_agent(), "Run", config)
             .await
             .unwrap();
@@ -1965,7 +1965,7 @@ mod tests {
         );
 
         let config = RunConfig::default()
-            .with_run_context(|| RunCtx::default(), RunScopedRewrite)
+            .with_run_context(RunCtx::default, RunScopedRewrite)
             .with_model_provider(Some(provider));
 
         let result = Runner::run(agent, "Run", config).await.unwrap();
@@ -2011,7 +2011,7 @@ mod tests {
 
         let agent = Agent::simple("Order", "Use tools")
             .with_tool(tool)
-            .with_context_factory(|| Ctx::default(), AgentRewrite);
+            .with_context_factory(Ctx::default, AgentRewrite);
 
         let provider = Arc::new(
             MockProvider::new("test-model")
@@ -2020,7 +2020,7 @@ mod tests {
         );
 
         let config = RunConfig::default()
-            .with_run_context(|| RunCtx::default(), RunScopedRewrite)
+            .with_run_context(RunCtx::default, RunScopedRewrite)
             .with_model_provider(Some(provider));
         let result = Runner::run(agent, "Run", config).await.unwrap();
 
