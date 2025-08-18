@@ -26,6 +26,9 @@
 //! export OPENAI_API_KEY="your-api-key"
 //! cargo run --example persistent_session
 //! ```
+//!
+//! Expected: The agent should be able to continue the conversation from where it left off.  
+//! It might also contain other filler text, but as long as the conversation is continued, this example has succeeded.
 
 use openai_agents_rs::{
     memory::Session, runner::RunConfig, sqlite_session::SqliteSession, Agent, Runner,

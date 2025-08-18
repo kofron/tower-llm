@@ -261,6 +261,14 @@ pub struct StreamingRunResult {
     pub trace_id: String,
 }
 
+/// A completed run result bundled with the final typed context value.
+///
+/// Returned by `Runner::run_with_context` when using a typed contextual agent.
+pub struct RunResultWithContext<C> {
+    pub result: RunResult,
+    pub context: C,
+}
+
 impl StreamingRunResult {
     /// Creates a new `StreamingRunResult`.
     pub fn new(stream: EventStream, trace_id: String) -> Self {

@@ -1,13 +1,12 @@
 [package]
 name = "openai-agents-rs"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
-description = "A lightweight yet powerful framework for building multi-agent workflows with LLMs."
+description = "A port of the openai agents SDK to Rust."
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/your-username/openai-agents-rs"
+repository = "https://github.com/kofron/openai-agents-rs"
 keywords = ["openai", "agents", "llm", "ai", "multi-agent"]
-categories = ["api-bindings", "science::ai"]
 
 # Basic hello-world example
 [[example]]
@@ -44,6 +43,14 @@ path = "examples/persistent_session.rs"
 name = "parallel_tools"
 path = "examples/parallel_tools.rs"
 
+[[example]]
+name = "rpn_calculator"
+path = "examples/rpn_calculator.rs"
+
+[[example]]
+name = "db_migrator"
+path = "examples/db_migrator.rs"
+
 
 [dependencies]
 async-openai = "0.29.0"
@@ -65,6 +72,7 @@ sqlx = { version = "0.8", features = [
     "chrono",
     "uuid",
 ] }
+rusqlite = "0.31"
 
 [dev-dependencies]
 mockall = "0.13"

@@ -10,6 +10,8 @@
 //! export OPENAI_API_KEY="your-api-key"
 //! cargo run --example tool_example
 //! ```
+//!
+//! Expected: The agent should call the tool and return the weather for San Francisco.  
 
 use openai_agents_rs::{runner::RunConfig, Agent, FunctionTool, Runner};
 use std::sync::Arc;

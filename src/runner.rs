@@ -31,10 +31,12 @@
 //! [`OutputGuardrail`]: crate::guardrail::OutputGuardrail
 //! [`Session`]: crate::memory::Session
 
+use std::any::Any;
 use std::sync::{Arc, Mutex};
 use tracing::{debug, info, warn};
 
 use crate::agent::Agent;
+use crate::context::ContextDecision;
 use crate::error::{AgentsError, Result};
 use crate::guardrail::GuardrailRunner;
 use crate::items::{
@@ -43,6 +45,7 @@ use crate::items::{
 use crate::memory::Session;
 use crate::model::ModelProvider;
 use crate::result::{RunResult, StreamEvent, StreamingRunResult};
+use crate::context::ContextualAgent;
 use crate::tracing::{AgentSpan, GenerationSpan, ToolSpan, TracingContext};
 use crate::usage::UsageStats;
 
@@ -201,7 +204,7 @@ impl Runner {
         messages.push(Message::user(input));
 
         // Run the agent loop
-        let result = Self::run_loop(agent, messages, config.clone(), context.clone()).await?;
+        let (result, _state) = Self::run_loop(agent, messages, config.clone(), context.clone()).await?;
 
         // Save to session if configured
         if let Some(session) = &config.session {
@@ -209,6 +212,47 @@ impl Runner {
         }
 
         Ok(result)
+    }
+
+    /// Executes a typed contextual agent and returns the result along with the final context value.
+    pub async fn run_with_context<C>(
+        agent: ContextualAgent<C>,
+        input: impl Into<String>,
+        config: RunConfig,
+    ) -> Result<crate::result::RunResultWithContext<C>>
+    where
+        C: Send + Sync + 'static,
+    {
+        let input = input.into();
+        let agent = agent.into_inner();
+        info!(agent = %agent.name(), "Starting agent run (typed context)");
+
+        let context = Arc::new(Mutex::new(TracingContext::new()));
+        let _trace_id = context.lock().unwrap().trace_id().to_string();
+
+        if !agent.config.input_guardrails.is_empty() {
+            GuardrailRunner::check_input(&agent.config.input_guardrails, &input).await?;
+        }
+
+        let mut messages = vec![agent.build_system_message()];
+        if let Some(session) = &config.session {
+            let history = session.get_messages(None).await?;
+            messages.extend(history);
+        }
+        messages.push(Message::user(input));
+
+        // Run loop and capture final context state
+        let (result, state) = Self::run_loop(agent.clone(), messages, config.clone(), context.clone()).await?;
+
+        if let Some(session) = &config.session {
+            session.add_items(result.items.clone()).await?;
+        }
+
+        let state = state.ok_or_else(|| AgentsError::Other("No contextual state present".to_string()))?;
+        let typed = state
+            .downcast::<C>()
+            .map_err(|_| AgentsError::Other("Context type mismatch".to_string()))?;
+        Ok(crate::result::RunResultWithContext { result, context: *typed })
     }
 
     /// Executes an agent synchronously and blocks until the result is available.
@@ -273,7 +317,7 @@ impl Runner {
         mut messages: Vec<Message>,
         config: RunConfig,
         context: Arc<Mutex<TracingContext>>,
-    ) -> Result<RunResult> {
+    ) -> Result<(RunResult, Option<Box<dyn Any + Send>>)> {
         let mut items = Vec::new();
         let mut usage_stats = UsageStats::new();
         let mut turn_count = 0;
@@ -291,6 +335,13 @@ impl Runner {
                 Arc::new(crate::model::MockProvider::new(&agent.config.model))
             }
         });
+
+        // Initialize per-run contextual state if configured
+        let mut contextual_state: Option<Box<dyn Any + Send>> = agent
+            .config
+            .tool_context
+            .as_ref()
+            .map(|spec| (spec.factory)());
 
         loop {
             turn_count += 1;
@@ -347,12 +398,15 @@ impl Runner {
                         agent_span.complete();
 
                         let trace_id = context.lock().unwrap().trace_id().to_string();
-                        return Ok(RunResult::success(
-                            serde_json::Value::String(final_content),
-                            items,
-                            agent.name().to_string(),
-                            usage_stats,
-                            trace_id,
+                        return Ok((
+                            RunResult::success(
+                                serde_json::Value::String(final_content),
+                                items,
+                                agent.name().to_string(),
+                                usage_stats,
+                                trace_id,
+                            ),
+                            contextual_state,
                         ));
                     }
                 }
@@ -425,27 +479,90 @@ impl Runner {
                         Ok(result) => {
                             tool_span.success();
 
-                            messages.push(Message::tool(result.output.to_string(), &tool_call.id));
+                            // Prepare original success output
+                            let finalizing = result.is_final;
+                            let mut output_value = result.output.clone();
+                            let mut error_value: Option<String> = result.error.clone();
 
-                            let output = result.output.clone();
+                            // Apply contextual handler if present
+                            if let (Some(spec), Some(state)) =
+                                (agent.config.tool_context.as_ref(), contextual_state.take())
+                            {
+                                let input_to_handler = if let Some(err_msg) = &error_value {
+                                    Err(err_msg.clone())
+                                } else {
+                                    Ok(output_value.clone())
+                                };
+                                let decision_res = spec.handler.on_tool_output(
+                                    state,
+                                    &tool_call.name,
+                                    &tool_call.arguments,
+                                    input_to_handler,
+                                );
+
+                                match decision_res {
+                                    Ok((new_state, decision)) => {
+                                        contextual_state = Some(new_state);
+                                        match decision {
+                                            ContextDecision::Forward => {}
+                                            ContextDecision::Rewrite(v) => {
+                                                output_value = v;
+                                                if error_value.is_some() {
+                                                    error_value = None;
+                                                }
+                                            }
+                                            ContextDecision::Final(v) => {
+                                                agent_span.complete();
+                                                let trace_id =
+                                                    context.lock().unwrap().trace_id().to_string();
+                                                return Ok((
+                                                    RunResult::success(
+                                                        v,
+                                                        items,
+                                                        agent.name().to_string(),
+                                                        usage_stats,
+                                                        trace_id,
+                                                    ),
+                                                    contextual_state,
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    Err(err) => {
+                                        // If handler fails, log and fall back to forward behavior
+                                        warn!(error = %err, "Context handler failed on success output");
+                                        contextual_state = agent
+                                            .config
+                                            .tool_context
+                                            .as_ref()
+                                            .map(|spec| (spec.factory)());
+                                    }
+                                }
+                            }
+
+                            // Record message and item with possibly rewritten output
+                            messages.push(Message::tool(output_value.to_string(), &tool_call.id));
                             items.push(RunItem::ToolOutput(ToolOutputItem {
                                 id: uuid::Uuid::new_v4().to_string(),
                                 tool_call_id: tool_call.id.clone(),
-                                output: result.output,
-                                error: result.error,
+                                output: output_value.clone(),
+                                error: error_value,
                                 created_at: chrono::Utc::now(),
                             }));
 
-                            if result.is_final {
+                            if finalizing {
                                 agent_span.complete();
 
                                 let trace_id = context.lock().unwrap().trace_id().to_string();
-                                return Ok(RunResult::success(
-                                    output,
-                                    items,
-                                    agent.name().to_string(),
-                                    usage_stats,
-                                    trace_id,
+                                return Ok((
+                                    RunResult::success(
+                                        output_value,
+                                        items,
+                                        agent.name().to_string(),
+                                        usage_stats,
+                                        trace_id,
+                                    ),
+                                    contextual_state,
                                 ));
                             }
                         }
@@ -453,15 +570,79 @@ impl Runner {
                             tool_span.error(e.to_string());
                             warn!(error = %e, "Tool execution failed");
 
-                            messages.push(Message::tool(format!("Error: {}", e), &tool_call.id));
+                            // Give the context handler a chance to rewrite or finalize errors
+                            let mut handled = false;
+                            if let (Some(spec), Some(state)) =
+                                (agent.config.tool_context.as_ref(), contextual_state.take())
+                            {
+                                let decision_res = spec.handler.on_tool_output(
+                                    state,
+                                    &tool_call.name,
+                                    &tool_call.arguments,
+                                    Err(e.to_string()),
+                                );
+                                match decision_res {
+                                    Ok((new_state, decision)) => {
+                                        contextual_state = Some(new_state);
+                                        match decision {
+                                            ContextDecision::Forward => {
+                                                // fall through to default error behavior
+                                            }
+                                            ContextDecision::Rewrite(v) => {
+                                                // Treat as success rewrite
+                                                messages.push(Message::tool(
+                                                    v.to_string(),
+                                                    &tool_call.id,
+                                                ));
+                                                items.push(RunItem::ToolOutput(ToolOutputItem {
+                                                    id: uuid::Uuid::new_v4().to_string(),
+                                                    tool_call_id: tool_call.id.clone(),
+                                                    output: v,
+                                                    error: None,
+                                                    created_at: chrono::Utc::now(),
+                                                }));
+                                                handled = true;
+                                            }
+                                            ContextDecision::Final(v) => {
+                                                agent_span.complete();
+                                                let trace_id =
+                                                    context.lock().unwrap().trace_id().to_string();
+                                                return Ok((
+                                                    RunResult::success(
+                                                        v,
+                                                        items,
+                                                        agent.name().to_string(),
+                                                        usage_stats,
+                                                        trace_id,
+                                                    ),
+                                                    contextual_state,
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    Err(err) => {
+                                        warn!(error = %err, "Context handler failed on error output");
+                                        contextual_state = agent
+                                            .config
+                                            .tool_context
+                                            .as_ref()
+                                            .map(|spec| (spec.factory)());
+                                    }
+                                }
+                            }
 
-                            items.push(RunItem::ToolOutput(ToolOutputItem {
-                                id: uuid::Uuid::new_v4().to_string(),
-                                tool_call_id: tool_call.id.clone(),
-                                output: serde_json::Value::Null,
-                                error: Some(e.to_string()),
-                                created_at: chrono::Utc::now(),
-                            }));
+                            if !handled {
+                                messages
+                                    .push(Message::tool(format!("Error: {}", e), &tool_call.id));
+
+                                items.push(RunItem::ToolOutput(ToolOutputItem {
+                                    id: uuid::Uuid::new_v4().to_string(),
+                                    tool_call_id: tool_call.id.clone(),
+                                    output: serde_json::Value::Null,
+                                    error: Some(e.to_string()),
+                                    created_at: chrono::Utc::now(),
+                                }));
+                            }
                         }
                     }
                 } else {
@@ -483,8 +664,11 @@ impl Runner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context::{ContextStep, ToolContext};
+    use crate::items::ToolCall as MsgToolCall;
     use crate::model::MockProvider;
     use crate::tool::FunctionTool;
+    use std::sync::Mutex;
 
     #[tokio::test]
     async fn test_simple_run() {
@@ -557,6 +741,385 @@ mod tests {
             .items
             .iter()
             .any(|item| matches!(item, RunItem::ToolOutput(_))));
+    }
+
+    #[derive(Clone, Default)]
+    struct Ctx {
+        count: usize,
+    }
+
+    struct ForwardHandler;
+    impl ToolContext<Ctx> for ForwardHandler {
+        fn on_tool_output(
+            &self,
+            mut ctx: Ctx,
+            _tool_name: &str,
+            _arguments: &serde_json::Value,
+            _result: std::result::Result<serde_json::Value, String>,
+        ) -> Result<ContextStep<Ctx>> {
+            ctx.count += 1;
+            Ok(ContextStep::forward(ctx))
+        }
+    }
+
+    struct RewriteHandler;
+    impl ToolContext<Ctx> for RewriteHandler {
+        fn on_tool_output(
+            &self,
+            mut ctx: Ctx,
+            _tool_name: &str,
+            _arguments: &serde_json::Value,
+            _result: std::result::Result<serde_json::Value, String>,
+        ) -> Result<ContextStep<Ctx>> {
+            ctx.count += 1;
+            Ok(ContextStep::rewrite(ctx, serde_json::json!("OVERRIDDEN")))
+        }
+    }
+
+    struct FinalHandler;
+    impl ToolContext<Ctx> for FinalHandler {
+        fn on_tool_output(
+            &self,
+            ctx: Ctx,
+            _tool_name: &str,
+            _arguments: &serde_json::Value,
+            _result: std::result::Result<serde_json::Value, String>,
+        ) -> Result<ContextStep<Ctx>> {
+            Ok(ContextStep::final_output(ctx, serde_json::json!("done")))
+        }
+    }
+
+    struct RewriteOnErrorHandler;
+    impl ToolContext<Ctx> for RewriteOnErrorHandler {
+        fn on_tool_output(
+            &self,
+            ctx: Ctx,
+            _tool_name: &str,
+            _arguments: &serde_json::Value,
+            result: std::result::Result<serde_json::Value, String>,
+        ) -> Result<ContextStep<Ctx>> {
+            match result {
+                Ok(v) => Ok(ContextStep::rewrite(ctx, v)),
+                Err(_) => Ok(ContextStep::rewrite(ctx, serde_json::json!("RECOVERED"))),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_context_forward_noop() {
+        let tool = Arc::new(FunctionTool::simple(
+            "uppercase",
+            "Converts to uppercase",
+            |s: String| s.to_uppercase(),
+        ));
+
+        let agent = Agent::simple("CtxAgent", "Use tools")
+            .with_tool(tool)
+            .with_context_factory(|| Ctx::default(), ForwardHandler);
+
+        let provider = Arc::new(
+            MockProvider::new("test-model")
+                .with_tool_call("uppercase", serde_json::json!({"input": "hello"}))
+                .with_message("The result is: HELLO"),
+        );
+
+        let config = RunConfig {
+            model_provider: Some(provider),
+            ..Default::default()
+        };
+        let result = Runner::run(agent, "Run", config).await.unwrap();
+
+        // Should contain tool output with original uppercase output
+        assert!(result.items.iter().any(|item| match item {
+            RunItem::ToolOutput(o) => o.output == serde_json::json!("HELLO"),
+            _ => false,
+        }));
+    }
+
+    #[tokio::test]
+    async fn test_context_rewrite() {
+        let tool = Arc::new(FunctionTool::simple(
+            "uppercase",
+            "Converts to uppercase",
+            |s: String| s.to_uppercase(),
+        ));
+
+        let agent = Agent::simple("CtxRewrite", "Use tools")
+            .with_tool(tool)
+            .with_context_factory(|| Ctx::default(), RewriteHandler);
+
+        let provider = Arc::new(
+            MockProvider::new("test-model")
+                .with_tool_call("uppercase", serde_json::json!({"input": "hello"}))
+                .with_message("The result is: HELLO"),
+        );
+
+        let config = RunConfig {
+            model_provider: Some(provider),
+            ..Default::default()
+        };
+        let result = Runner::run(agent, "Run", config).await.unwrap();
+
+        // Tool output should be rewritten
+        assert!(result.items.iter().any(|item| match item {
+            RunItem::ToolOutput(o) => o.output == serde_json::json!("OVERRIDDEN"),
+            _ => false,
+        }));
+    }
+
+    #[tokio::test]
+    async fn test_context_final() {
+        let tool = Arc::new(FunctionTool::simple(
+            "uppercase",
+            "Converts to uppercase",
+            |s: String| s.to_uppercase(),
+        ));
+
+        let agent = Agent::simple("CtxFinal", "Use tools")
+            .with_tool(tool)
+            .with_context_factory(|| Ctx::default(), FinalHandler);
+
+        let provider = Arc::new(
+            MockProvider::new("test-model")
+                .with_tool_call("uppercase", serde_json::json!({"input": "hello"})),
+        );
+
+        let config = RunConfig {
+            model_provider: Some(provider),
+            ..Default::default()
+        };
+        let result = Runner::run(agent, "Run", config).await.unwrap();
+
+        assert!(result.is_success());
+        assert_eq!(result.final_output, serde_json::json!("done"));
+    }
+
+    #[tokio::test]
+    async fn test_context_error_rewrite() {
+        let tool = Arc::new(crate::tool::FunctionTool::new(
+            "failing".to_string(),
+            "Always fails".to_string(),
+            serde_json::json!({}),
+            |_args| {
+                Err(crate::error::AgentsError::ToolExecutionError {
+                    message: "Intentional failure".to_string(),
+                })
+            },
+        ));
+
+        let agent = Agent::simple("CtxErr", "Use tools")
+            .with_tool(tool)
+            .with_context_factory(|| Ctx::default(), RewriteOnErrorHandler);
+
+        let provider = Arc::new(
+            MockProvider::new("test-model").with_tool_call("failing", serde_json::json!({})),
+        );
+
+        let config = RunConfig {
+            model_provider: Some(provider),
+            ..Default::default()
+        };
+        let result = Runner::run(agent, "Run", config).await.unwrap();
+
+        // Tool error should be rewritten to a successful output
+        assert!(result.items.iter().any(|item| match item {
+            RunItem::ToolOutput(o) =>
+                o.output == serde_json::json!("RECOVERED") && o.error.is_none(),
+            _ => false,
+        }));
+    }
+
+    struct CountingHandler;
+    impl ToolContext<Ctx> for CountingHandler {
+        fn on_tool_output(
+            &self,
+            mut ctx: Ctx,
+            _tool_name: &str,
+            _arguments: &serde_json::Value,
+            result: std::result::Result<serde_json::Value, String>,
+        ) -> Result<ContextStep<Ctx>> {
+            ctx.count += 1;
+            let payload = match result {
+                Ok(v) => serde_json::json!({"value": v, "count": ctx.count}),
+                Err(e) => serde_json::json!({"error": e, "count": ctx.count}),
+            };
+            Ok(ContextStep::rewrite(ctx, payload))
+        }
+    }
+
+    struct ErrOnceCountingHandler {
+        fail_first: Mutex<bool>,
+    }
+
+    impl ErrOnceCountingHandler {
+        fn new() -> Self {
+            Self {
+                fail_first: Mutex::new(true),
+            }
+        }
+    }
+
+    impl ToolContext<Ctx> for ErrOnceCountingHandler {
+        fn on_tool_output(
+            &self,
+            mut ctx: Ctx,
+            _tool_name: &str,
+            _arguments: &serde_json::Value,
+            result: std::result::Result<serde_json::Value, String>,
+        ) -> Result<ContextStep<Ctx>> {
+            let mut flag = self.fail_first.lock().unwrap();
+            if *flag {
+                *flag = false;
+                return Err(crate::error::AgentsError::Other(
+                    "handler failure".to_string(),
+                ));
+            }
+            ctx.count += 1;
+            let payload = match result {
+                Ok(v) => serde_json::json!({"value": v, "count": ctx.count}),
+                Err(e) => serde_json::json!({"error": e, "count": ctx.count}),
+            };
+            Ok(ContextStep::rewrite(ctx, payload))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_context_handler_failure_fallback_and_reset() {
+        let tool = Arc::new(FunctionTool::simple(
+            "uppercase",
+            "Converts to uppercase",
+            |s: String| s.to_uppercase(),
+        ));
+
+        let agent = Agent::simple("CtxFail", "Use tools")
+            .with_tool(tool)
+            .with_context_factory(|| Ctx::default(), ErrOnceCountingHandler::new());
+
+        // Two consecutive tool calls, then a final message
+        let tc1 = MsgToolCall {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: "uppercase".to_string(),
+            arguments: serde_json::json!({"input":"a"}),
+        };
+        let tc2 = MsgToolCall {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: "uppercase".to_string(),
+            arguments: serde_json::json!({"input":"b"}),
+        };
+
+        let provider = Arc::new(
+            MockProvider::new("test-model")
+                .with_response(crate::items::ModelResponse::new_tool_calls(vec![tc1]))
+                .with_response(crate::items::ModelResponse::new_tool_calls(vec![tc2]))
+                .with_message("done"),
+        );
+
+        let config = RunConfig {
+            model_provider: Some(provider),
+            ..Default::default()
+        };
+        let result = Runner::run(agent, "Run", config).await.unwrap();
+
+        // First output forwarded (no rewrite) due to handler failure; second rewritten
+        let outputs: Vec<_> = result
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                RunItem::ToolOutput(o) => Some(o.output.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs[0], serde_json::json!("A"));
+        assert_eq!(outputs[1]["count"], serde_json::json!(1));
+    }
+
+    #[tokio::test]
+    async fn test_context_multiple_tool_calls_single_turn_accumulates() {
+        let tool = Arc::new(FunctionTool::simple(
+            "uppercase",
+            "Converts to uppercase",
+            |s: String| s.to_uppercase(),
+        ));
+
+        let agent = Agent::simple("CtxMulti", "Use tools")
+            .with_tool(tool)
+            .with_context_factory(|| Ctx::default(), CountingHandler);
+
+        let tc1 = MsgToolCall {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: "uppercase".to_string(),
+            arguments: serde_json::json!({"input":"a"}),
+        };
+        let tc2 = MsgToolCall {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: "uppercase".to_string(),
+            arguments: serde_json::json!({"input":"b"}),
+        };
+
+        let provider = Arc::new(
+            MockProvider::new("test-model")
+                .with_response(crate::items::ModelResponse::new_tool_calls(vec![tc1, tc2]))
+                .with_message("ok"),
+        );
+
+        let config = RunConfig {
+            model_provider: Some(provider),
+            ..Default::default()
+        };
+        let result = Runner::run(agent, "Run", config).await.unwrap();
+
+        let outputs: Vec<_> = result
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                RunItem::ToolOutput(o) => Some(o.output.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs[0]["count"], serde_json::json!(1));
+        assert_eq!(outputs[1]["count"], serde_json::json!(2));
+        assert_eq!(outputs[0]["value"], serde_json::json!("A"));
+        assert_eq!(outputs[1]["value"], serde_json::json!("B"));
+    }
+
+    #[tokio::test]
+    async fn test_streaming_with_context_rewrite_collects() {
+        let tool = Arc::new(FunctionTool::simple(
+            "uppercase",
+            "Converts to uppercase",
+            |s: String| s.to_uppercase(),
+        ));
+
+        let agent = Agent::simple("CtxStream", "Use tools")
+            .with_tool(tool)
+            .with_context_factory(|| Ctx::default(), CountingHandler);
+
+        let provider = Arc::new(
+            MockProvider::new("test-model")
+                .with_tool_call("uppercase", serde_json::json!({"input":"a"}))
+                .with_message("done"),
+        );
+
+        let config = RunConfig {
+            model_provider: Some(provider),
+            ..Default::default()
+        };
+        let streaming = Runner::run_stream(agent, "Run", config).await.unwrap();
+        let result = streaming.collect().await.unwrap();
+
+        let outputs: Vec<_> = result
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                RunItem::ToolOutput(o) => Some(o.output.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0]["count"], serde_json::json!(1));
+        assert_eq!(outputs[0]["value"], serde_json::json!("A"));
     }
 
     #[tokio::test]
