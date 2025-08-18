@@ -114,9 +114,9 @@ impl Default for AgentConfig {
             handoffs: vec![],
             input_guardrails: vec![],
             output_guardrails: vec![],
-            model: "gpt-4".to_string(),
+            model: "gpt-5".to_string(),
             max_turns: Some(10),
-            temperature: Some(0.7),
+            temperature: Some(1.0),
             max_tokens: None,
             output_schema: None,
             tool_context: None,
@@ -449,7 +449,7 @@ mod tests {
         let agent = Agent::simple("TestAgent", "You are a test agent");
         assert_eq!(agent.name(), "TestAgent");
         assert_eq!(agent.instructions(), "You are a test agent");
-        assert_eq!(agent.config.model, "gpt-4");
+        assert_eq!(agent.config.model, "gpt-5");
     }
 
     #[test]
@@ -533,9 +533,9 @@ mod tests {
     fn test_agent_default_config() {
         let config = AgentConfig::default();
         assert_eq!(config.name, "Assistant");
-        assert_eq!(config.model, "gpt-4");
+        assert_eq!(config.model, "gpt-5");
         assert_eq!(config.max_turns, Some(10));
-        assert_eq!(config.temperature, Some(0.7));
+        assert_eq!(config.temperature, Some(1.0));
         assert!(config.tools.is_empty());
         assert!(config.handoffs.is_empty());
     }
@@ -555,7 +555,7 @@ mod tests {
         let debug_str = format!("{:?}", agent);
 
         assert!(debug_str.contains("Debug"));
-        assert!(debug_str.contains("gpt-4"));
+        assert!(debug_str.contains("gpt-5"));
         assert!(debug_str.contains("tools_count"));
     }
 }

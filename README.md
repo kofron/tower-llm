@@ -7,6 +7,7 @@ A Rust implementation of the OpenAI Agents SDK, providing a lightweight yet powe
 - ✅ **Agent System**: LLMs configured with instructions, tools, and handoffs
 - ✅ **Tool System**: Extensible tool framework for agent capabilities
 - ✅ **Handoffs**: Transfer control between specialized agents
+- ✅ **Agent Groups**: Compose multiple agents into a single, cohesive unit
 - ✅ **Guardrails**: Input/output validation for safety
 - ✅ **Session Memory**: Maintain conversation history across runs
 - ✅ **Tracing**: Built-in observability using the `tracing` crate
@@ -71,12 +72,15 @@ The SDK is built around a few core concepts that work together to create powerfu
 
 - **[`Agent`]**: The fundamental building block, representing an entity that can process input and generate a response. Agents are defined by their configuration, including their identity, instructions, and tools.
 - **[`Runner`]**: The engine that executes an agent's logic. It manages the interaction loop with the LLM, handles tool calls, and orchestrates the overall workflow.
+- **[`AgentGroup`]**: Compose multiple agents with declared handoffs so they act as a single agent. Ideal for multi-agent workflows.
 - **[`Tool`]**: A function or capability that an agent can use to interact with the outside world, such as calling an API or accessing a database.
 - **[`Session`]**: Manages the state of an interaction, including the history of messages. A [`SqliteSession`] is provided for persistent state.
 - **[`Guardrail`]**: A mechanism for validating and sanitizing the input and output of an agent, ensuring safety and reliability.
 
 [`Agent`]: https://docs.rs/openai-agents-rs/latest/openai_agents_rs/agent/struct.Agent.html
 [`Runner`]: https://docs.rs/openai-agents-rs/latest/openai_agents_rs/runner/struct.Runner.html
+[`AgentGroup`]: https://docs.rs/openai-agents-rs/latest/openai_agents_rs/group/struct.AgentGroup.html
+[`AgentGroupBuilder`]: https://docs.rs/openai-agents-rs/latest/openai_agents_rs/group/struct.AgentGroupBuilder.html
 [`Tool`]: https://docs.rs/openai-agents-rs/latest/openai_agents_rs/tool/trait.Tool.html
 [`Session`]: https://docs.rs/openai-agents-rs/latest/openai_agents_rs/memory/trait.Session.html
 [`SqliteSession`]: https://docs.rs/openai-agents-rs/latest/openai_agents_rs/sqlite_session/struct.SqliteSession.html
@@ -84,23 +88,27 @@ The SDK is built around a few core concepts that work together to create powerfu
 
 ## Examples
 
-The `examples/` directory contains a rich set of demonstrations that showcase the capabilities of the SDK.
+The `examples/` directory contains a rich set of demonstrations. Follow this progression to get a coherent tour of the SDK:
 
-### Basic Examples
+### Progression
 
-- **`hello_world.rs`**: A simple agent that writes haikus.
-- **`tool_example.rs`**: An agent that uses a tool to fetch weather information.
-
-### Advanced Examples
-
-- **`calculator.rs`**: A multi-tool calculator that solves complex math problems step-by-step.
-- **`multi_agent_research.rs`**: A research system with specialized agents for coordination, research, analysis, and archiving.
-- **`session_with_guardrails.rs`**: A personal assistant with session memory and safety guardrails.
-- **`persistent_session.rs`**: Demonstrates the use of SQLite for persistent conversation history.
-- **`parallel_tools.rs`**: Shows how to execute multiple tools concurrently for improved performance.
- - **`contextual.rs`**: Demonstrates contextual handling of tool outputs (rewrite/finalize)
- - **`db_migrator.rs`**: Transactional DB migrator where the handler manages a live transaction and commits/rolls back at the end
- - **`rpn_calculator.rs`**: RPN calculator where the handler maintains the execution stack and the final stack is extracted after the run
+- **Getting Started**
+  - `hello_world.rs`: A simple agent that writes haikus
+- **Adding Capabilities**
+  - `tool_example.rs`: An agent that uses a tool to fetch information
+- **Composing Agents**
+  - `group_no_shared.rs`: Compose multiple agents with explicit handoffs, no shared state
+- **Managing State**
+  - `group_shared.rs`: Share run-scoped context across a group to accumulate state
+- **Advanced Concepts**
+  - `persistent_session.rs`: SQLite-backed persistent conversation history
+  - `session_with_guardrails.rs`: Session memory with safety guardrails
+  - `parallel_tools.rs`: Execute multiple tools concurrently
+  - `calculator.rs`: Multi-tool calculator with step-by-step reasoning
+  - `db_migrator.rs`: Transactional DB migrator with run-context commit/rollback
+  - `rpn_calculator.rs`: RPN calculator with handler-managed execution stack
+- **Case Study**
+  - `multi_agent_research.rs`: Multi-agent research system with specialized roles
 
 To run the examples:
 
@@ -124,15 +132,14 @@ The SDK follows these design principles:
 4. **Extensible**: Easy to add custom tools, guardrails, and model providers
 5. **Context-aware**: Optional per-run context hook for tool output shaping
 
-### Contextual Runs
+### Context and Contextual Runs
 
-You can attach a contextual handler that observes tool outputs and decides to:
+Attach a context to observe and shape tool outputs. There are two complementary ways to do this:
 
-- Forward the output unchanged
-- Rewrite the output fed back to the model
-- Finalize the run immediately with a value
+#### Per-agent context
 
-Builder API:
+- Attach at agent construction time
+- Applies only while that agent is active
 
 ```rust
 use openai_agents_rs::{Agent, ToolContext, ContextStep};
@@ -161,6 +168,51 @@ impl ToolContext<MyCtx> for MyHandler {
 let agent = Agent::simple("Ctx", "...")
     .with_context_factory(|| MyCtx::default(), MyHandler);
 ```
+
+#### Run-scoped context (spans handoffs)
+
+- Attach at run time so it applies across all agents, including handoffs
+- Runs before any per-agent handler; its rewrite/final decisions take precedence
+
+```rust,no_run
+use openai_agents_rs::{Agent, Runner, runner::RunConfig, ContextStep, ToolContext, RunResultWithContext};
+use serde_json::Value;
+
+#[derive(Clone, Default)]
+struct RunCtx { calls: usize }
+struct RunHandler;
+
+impl ToolContext<RunCtx> for RunHandler {
+    fn on_tool_output(
+        &self,
+        mut ctx: RunCtx,
+        _tool: &str,
+        _args: &Value,
+        result: Result<Value, String>,
+    ) -> openai_agents_rs::Result<ContextStep<RunCtx>> {
+        ctx.calls += 1;
+        Ok(ContextStep::rewrite(ctx, result.unwrap_or(Value::Null)))
+    }
+}
+
+let agent = Agent::simple("Planner", "Use tools and possibly hand off …");
+let config = RunConfig::default();
+let out: RunResultWithContext<RunCtx> = Runner::run_with_run_context(
+    agent,
+    "Do the thing",
+    config,
+    || RunCtx::default(),
+    RunHandler,
+).await?;
+assert!(out.result.is_success());
+println!("run-scoped calls: {}", out.context.calls);
+```
+
+Notes:
+
+- Run-scoped context spans handoffs automatically
+- Ordering: run-scoped handler runs first, then any per-agent handler
+- Finalization: either handler can return `Final` to stop the run immediately
 
 ## Testing
 

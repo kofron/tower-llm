@@ -114,7 +114,7 @@ After finishing the requested computation, provide a concise explanation of the 
 
     Agent::simple("RPNCalc", instructions)
         .with_tool(rpn_tool())
-        .with_context_factory_typed(|| StackCtx::default(), RpnHandler)
+        .with_context_factory_typed(StackCtx::default, RpnHandler)
 }
 
 #[tokio::main]

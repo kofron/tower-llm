@@ -37,6 +37,7 @@ use tracing::{debug, info, warn};
 
 use crate::agent::Agent;
 use crate::context::ContextDecision;
+use crate::context::ContextualAgent;
 use crate::error::{AgentsError, Result};
 use crate::guardrail::GuardrailRunner;
 use crate::items::{
@@ -45,9 +46,73 @@ use crate::items::{
 use crate::memory::Session;
 use crate::model::ModelProvider;
 use crate::result::{RunResult, StreamEvent, StreamingRunResult};
-use crate::context::ContextualAgent;
 use crate::tracing::{AgentSpan, GenerationSpan, ToolSpan, TracingContext};
 use crate::usage::UsageStats;
+
+fn truncate_for_log(s: &str, max: usize) -> String {
+    if s.len() > max {
+        let mut out = s[..max].to_string();
+        out.push('…');
+        out
+    } else {
+        s.to_string()
+    }
+}
+
+fn format_messages_for_log(messages: &[Message]) -> String {
+    let mut lines = Vec::new();
+    for (idx, m) in messages.iter().enumerate() {
+        match m.role {
+            Role::User => {
+                lines.push(format!(
+                    "{:02} USER     | {}",
+                    idx,
+                    truncate_for_log(&m.content, 160)
+                ));
+            }
+            Role::System => {
+                lines.push(format!(
+                    "{:02} SYSTEM   | {}",
+                    idx,
+                    truncate_for_log(&m.content, 160)
+                ));
+            }
+            Role::Assistant => {
+                if let Some(tool_calls) = &m.tool_calls {
+                    let calls: Vec<String> = tool_calls
+                        .iter()
+                        .map(|tc| format!("id={}, name={}", tc.id, tc.name))
+                        .collect();
+                    lines.push(format!(
+                        "{:02} ASSIST   | tool_calls=[{}] content=\"{}\"",
+                        idx,
+                        calls.join(", "),
+                        truncate_for_log(&m.content, 120)
+                    ));
+                } else {
+                    lines.push(format!(
+                        "{:02} ASSIST   | {}",
+                        idx,
+                        truncate_for_log(&m.content, 160)
+                    ));
+                }
+            }
+            Role::Tool => {
+                let tcid = m
+                    .tool_call_id
+                    .as_deref()
+                    .unwrap_or("<missing tool_call_id>");
+                lines.push(format!(
+                    "{:02} TOOL     | tool_call_id={} payload={}",
+                    idx,
+                    tcid,
+                    truncate_for_log(&m.content, 120)
+                ));
+            }
+        }
+    }
+    lines.join("\n")
+}
 
 /// Configuration for an agent run.
 ///
@@ -97,6 +162,13 @@ pub struct RunConfig {
     /// a default `OpenAIProvider` will be used in production, or a `MockProvider`
     /// in test environments.
     pub model_provider: Option<Arc<dyn ModelProvider>>,
+
+    /// Optional run-scoped context handler that applies across all agents in this run.
+    ///
+    /// When set via [`RunConfig::with_run_context`], the handler will receive every
+    /// tool output (or error) across the entire run, including after handoffs.
+    /// Its decisions are applied before any per-agent context handler.
+    pub run_context: Option<crate::context::RunContextSpec>,
 }
 
 impl std::fmt::Debug for RunConfig {
@@ -106,6 +178,7 @@ impl std::fmt::Debug for RunConfig {
             .field("stream", &self.stream)
             .field("session", &self.session.is_some())
             .field("model_provider", &self.model_provider.is_some())
+            .field("run_context", &self.run_context.is_some())
             .finish()
     }
 }
@@ -117,7 +190,38 @@ impl Default for RunConfig {
             stream: false,
             session: None,
             model_provider: None,
+            run_context: None,
         }
+    }
+}
+
+impl RunConfig {
+    /// Attach a run-scoped context handler that applies across all agents in this run.
+    ///
+    /// The handler is invoked after each tool execution (success or error).
+    /// It can forward, rewrite, or finalize the run via a [`ContextDecision`].
+    /// The context value is constructed once per run using the provided factory
+    /// and evolves across turns and handoffs.
+    pub fn with_run_context<C, H, F>(mut self, factory_fn: F, handler: H) -> Self
+    where
+        C: Send + Sync + 'static,
+        H: crate::context::ToolContext<C> + Send + Sync + 'static,
+        F: Fn() -> C + Send + Sync + 'static,
+    {
+        let factory = std::sync::Arc::new(move || Box::new(factory_fn()) as Box<dyn Any + Send>);
+        let erased: std::sync::Arc<dyn crate::context::ErasedToolContextHandler> =
+            std::sync::Arc::new(crate::context::TypedHandler::<C, H>::new(handler));
+        self.run_context = Some(crate::context::RunContextSpec {
+            factory,
+            handler: erased,
+        });
+        self
+    }
+
+    /// Convenience: set a model provider.
+    pub fn with_model_provider(mut self, provider: Option<Arc<dyn ModelProvider>>) -> Self {
+        self.model_provider = provider;
+        self
     }
 }
 
@@ -204,7 +308,8 @@ impl Runner {
         messages.push(Message::user(input));
 
         // Run the agent loop
-        let (result, _state) = Self::run_loop(agent, messages, config.clone(), context.clone()).await?;
+        let (result, _state, _run_state) =
+            Self::run_loop(agent, messages, config.clone(), context.clone()).await?;
 
         // Save to session if configured
         if let Some(session) = &config.session {
@@ -242,17 +347,76 @@ impl Runner {
         messages.push(Message::user(input));
 
         // Run loop and capture final context state
-        let (result, state) = Self::run_loop(agent.clone(), messages, config.clone(), context.clone()).await?;
+        let (result, state, _run_state) =
+            Self::run_loop(agent.clone(), messages, config.clone(), context.clone()).await?;
 
         if let Some(session) = &config.session {
             session.add_items(result.items.clone()).await?;
         }
 
-        let state = state.ok_or_else(|| AgentsError::Other("No contextual state present".to_string()))?;
+        let state =
+            state.ok_or_else(|| AgentsError::Other("No contextual state present".to_string()))?;
         let typed = state
             .downcast::<C>()
             .map_err(|_| AgentsError::Other("Context type mismatch".to_string()))?;
-        Ok(crate::result::RunResultWithContext { result, context: *typed })
+        Ok(crate::result::RunResultWithContext {
+            result,
+            context: *typed,
+        })
+    }
+
+    /// Executes an agent with a run-scoped context and returns the result along with the final run context value.
+    ///
+    /// This is a convenience around attaching a run-scoped handler to the
+    /// [`RunConfig`] and invoking the regular runner. It ensures the final
+    /// typed context is only available once the run completes.
+    pub async fn run_with_run_context<C>(
+        agent: Agent,
+        input: impl Into<String>,
+        mut config: RunConfig,
+        factory: impl Fn() -> C + Send + Sync + 'static,
+        handler: impl crate::context::ToolContext<C> + 'static,
+    ) -> Result<crate::result::RunResultWithContext<C>>
+    where
+        C: Send + Sync + 'static,
+    {
+        // Attach run-scoped context
+        config = config.with_run_context(factory, handler);
+
+        let input = input.into();
+        info!(agent = %agent.name(), "Starting agent run (run-scoped context)");
+
+        let context = Arc::new(Mutex::new(TracingContext::new()));
+        let _trace_id = context.lock().unwrap().trace_id().to_string();
+
+        if !agent.config.input_guardrails.is_empty() {
+            GuardrailRunner::check_input(&agent.config.input_guardrails, &input).await?;
+        }
+
+        let mut messages = vec![agent.build_system_message()];
+        if let Some(session) = &config.session {
+            let history = session.get_messages(None).await?;
+            messages.extend(history);
+        }
+        messages.push(Message::user(input));
+
+        // Run loop and capture final run-scoped context state
+        let (result, _state, run_state) =
+            Self::run_loop(agent.clone(), messages, config.clone(), context.clone()).await?;
+
+        if let Some(session) = &config.session {
+            session.add_items(result.items.clone()).await?;
+        }
+
+        let state = run_state
+            .ok_or_else(|| AgentsError::Other("No run-scoped context present".to_string()))?;
+        let typed = state
+            .downcast::<C>()
+            .map_err(|_| AgentsError::Other("Run context type mismatch".to_string()))?;
+        Ok(crate::result::RunResultWithContext {
+            result,
+            context: *typed,
+        })
     }
 
     /// Executes an agent synchronously and blocks until the result is available.
@@ -317,7 +481,11 @@ impl Runner {
         mut messages: Vec<Message>,
         config: RunConfig,
         context: Arc<Mutex<TracingContext>>,
-    ) -> Result<(RunResult, Option<Box<dyn Any + Send>>)> {
+    ) -> Result<(
+        RunResult,
+        Option<Box<dyn Any + Send>>, // per-agent contextual state
+        Option<Box<dyn Any + Send>>, // run-scoped state
+    )> {
         let mut items = Vec::new();
         let mut usage_stats = UsageStats::new();
         let mut turn_count = 0;
@@ -336,12 +504,16 @@ impl Runner {
             }
         });
 
-        // Initialize per-run contextual state if configured
+        // Initialize per-run contextual state if configured (per-agent)
         let mut contextual_state: Option<Box<dyn Any + Send>> = agent
             .config
             .tool_context
             .as_ref()
             .map(|spec| (spec.factory)());
+
+        // Initialize run-scoped context if configured (applies across handoffs)
+        let mut run_scoped_state: Option<Box<dyn Any + Send>> =
+            config.run_context.as_ref().map(|spec| (spec.factory)());
 
         loop {
             turn_count += 1;
@@ -362,10 +534,24 @@ impl Runner {
             // Get LLM response
             let gen_span = GenerationSpan::new(context.clone(), agent.config.model.clone());
 
+            // Advertise both regular tools and handoffs (as tools) to the provider
+            let mut advertised_tools: Vec<Arc<dyn crate::tool::Tool>> = agent.config.tools.clone();
+            for h in agent.handoffs() {
+                let ht = crate::handoff::HandoffTool::from(h.clone());
+                advertised_tools.push(Arc::new(ht));
+            }
+
+            debug!(
+                target: "runner::messages",
+                "\n=== Sending to provider (model: {}) ===\n{}\n=== end ===",
+                agent.config.model,
+                format_messages_for_log(&messages)
+            );
+
             let (response, usage) = model_provider
                 .complete(
                     messages.clone(),
-                    agent.config.tools.clone(),
+                    advertised_tools,
                     agent.config.temperature,
                     agent.config.max_tokens,
                 )
@@ -407,6 +593,7 @@ impl Runner {
                                 trace_id,
                             ),
                             contextual_state,
+                            run_scoped_state,
                         ));
                     }
                 }
@@ -438,6 +625,12 @@ impl Runner {
                     content: response.content.clone().unwrap_or_default(),
                     created_at: chrono::Utc::now(),
                 }));
+
+                debug!(
+                    target: "runner::messages",
+                    "\n↳ Appended assistant tool_calls message\n{}\n---",
+                    format_messages_for_log(&messages)
+                );
             }
 
             // Process tool calls
@@ -461,6 +654,27 @@ impl Runner {
                         created_at: chrono::Utc::now(),
                     }));
 
+                    // IMPORTANT: respond to the tool_call with a tool message so the provider protocol remains valid
+                    let handoff_ack = serde_json::json!({
+                        "handoff": handoff.name,
+                        "ack": true
+                    });
+                    messages.push(Message::tool(handoff_ack.to_string(), &tool_call.id));
+                    items.push(RunItem::ToolOutput(ToolOutputItem {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        tool_call_id: tool_call.id.clone(),
+                        output: handoff_ack,
+                        error: None,
+                        created_at: chrono::Utc::now(),
+                    }));
+
+                    debug!(
+                        target: "runner::messages",
+                        "\n↳ Appended handoff TOOL reply (tool_call_id={})\n{}\n---",
+                        tool_call.id,
+                        format_messages_for_log(&messages)
+                    );
+
                     // Switch to the new agent
                     agent = handoff.agent().clone();
 
@@ -483,6 +697,57 @@ impl Runner {
                             let finalizing = result.is_final;
                             let mut output_value = result.output.clone();
                             let mut error_value: Option<String> = result.error.clone();
+
+                            // First apply run-scoped handler if present
+                            if let (Some(spec), Some(state)) =
+                                (config.run_context.as_ref(), run_scoped_state.take())
+                            {
+                                let input_to_handler = if let Some(err_msg) = &error_value {
+                                    Err(err_msg.clone())
+                                } else {
+                                    Ok(output_value.clone())
+                                };
+                                match spec.handler.on_tool_output(
+                                    state,
+                                    &tool_call.name,
+                                    &tool_call.arguments,
+                                    input_to_handler,
+                                ) {
+                                    Ok((new_state, decision)) => {
+                                        run_scoped_state = Some(new_state);
+                                        match decision {
+                                            ContextDecision::Forward => {}
+                                            ContextDecision::Rewrite(v) => {
+                                                output_value = v;
+                                                error_value = None;
+                                            }
+                                            ContextDecision::Final(v) => {
+                                                agent_span.complete();
+                                                let trace_id =
+                                                    context.lock().unwrap().trace_id().to_string();
+                                                return Ok((
+                                                    RunResult::success(
+                                                        v,
+                                                        items,
+                                                        agent.name().to_string(),
+                                                        usage_stats,
+                                                        trace_id,
+                                                    ),
+                                                    contextual_state,
+                                                    run_scoped_state,
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    Err(err) => {
+                                        warn!(error = %err, "Run-scoped context handler failed on success output");
+                                        run_scoped_state = config
+                                            .run_context
+                                            .as_ref()
+                                            .map(|spec| (spec.factory)());
+                                    }
+                                }
+                            }
 
                             // Apply contextual handler if present
                             if let (Some(spec), Some(state)) =
@@ -524,6 +789,7 @@ impl Runner {
                                                         trace_id,
                                                     ),
                                                     contextual_state,
+                                                    run_scoped_state,
                                                 ));
                                             }
                                         }
@@ -550,6 +816,13 @@ impl Runner {
                                 created_at: chrono::Utc::now(),
                             }));
 
+                            debug!(
+                                target: "runner::messages",
+                                "\n↳ Appended TOOL reply (tool_call_id={})\n{}\n---",
+                                tool_call.id,
+                                format_messages_for_log(&messages)
+                            );
+
                             if finalizing {
                                 agent_span.complete();
 
@@ -563,6 +836,7 @@ impl Runner {
                                         trace_id,
                                     ),
                                     contextual_state,
+                                    run_scoped_state,
                                 ));
                             }
                         }
@@ -570,7 +844,70 @@ impl Runner {
                             tool_span.error(e.to_string());
                             warn!(error = %e, "Tool execution failed");
 
-                            // Give the context handler a chance to rewrite or finalize errors
+                            // Run-scoped handler can rewrite or finalize errors first
+                            let mut handled_by_run = false;
+                            if let (Some(spec), Some(state)) =
+                                (config.run_context.as_ref(), run_scoped_state.take())
+                            {
+                                match spec.handler.on_tool_output(
+                                    state,
+                                    &tool_call.name,
+                                    &tool_call.arguments,
+                                    Err(e.to_string()),
+                                ) {
+                                    Ok((new_state, decision)) => {
+                                        run_scoped_state = Some(new_state);
+                                        match decision {
+                                            ContextDecision::Forward => {}
+                                            ContextDecision::Rewrite(v) => {
+                                                messages.push(Message::tool(
+                                                    v.to_string(),
+                                                    &tool_call.id,
+                                                ));
+                                                items.push(RunItem::ToolOutput(ToolOutputItem {
+                                                    id: uuid::Uuid::new_v4().to_string(),
+                                                    tool_call_id: tool_call.id.clone(),
+                                                    output: v,
+                                                    error: None,
+                                                    created_at: chrono::Utc::now(),
+                                                }));
+                                                debug!(
+                                                    target: "runner::messages",
+                                                    "\n↳ Appended TOOL reply (run-scoped rewrite) id={}\n{}\n---",
+                                                    tool_call.id,
+                                                    format_messages_for_log(&messages)
+                                                );
+                                                handled_by_run = true;
+                                            }
+                                            ContextDecision::Final(v) => {
+                                                agent_span.complete();
+                                                let trace_id =
+                                                    context.lock().unwrap().trace_id().to_string();
+                                                return Ok((
+                                                    RunResult::success(
+                                                        v,
+                                                        items,
+                                                        agent.name().to_string(),
+                                                        usage_stats,
+                                                        trace_id,
+                                                    ),
+                                                    contextual_state,
+                                                    run_scoped_state,
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    Err(err) => {
+                                        warn!(error = %err, "Run-scoped context handler failed on error output");
+                                        run_scoped_state = config
+                                            .run_context
+                                            .as_ref()
+                                            .map(|spec| (spec.factory)());
+                                    }
+                                }
+                            }
+
+                            // Give the per-agent context handler a chance to rewrite or finalize errors
                             let mut handled = false;
                             if let (Some(spec), Some(state)) =
                                 (agent.config.tool_context.as_ref(), contextual_state.take())
@@ -601,6 +938,12 @@ impl Runner {
                                                     error: None,
                                                     created_at: chrono::Utc::now(),
                                                 }));
+                                                debug!(
+                                                    target: "runner::messages",
+                                                    "\n↳ Appended TOOL reply (agent rewrite) id={}\n{}\n---",
+                                                    tool_call.id,
+                                                    format_messages_for_log(&messages)
+                                                );
                                                 handled = true;
                                             }
                                             ContextDecision::Final(v) => {
@@ -616,6 +959,7 @@ impl Runner {
                                                         trace_id,
                                                     ),
                                                     contextual_state,
+                                                    run_scoped_state,
                                                 ));
                                             }
                                         }
@@ -631,7 +975,7 @@ impl Runner {
                                 }
                             }
 
-                            if !handled {
+                            if !handled && !handled_by_run {
                                 messages
                                     .push(Message::tool(format!("Error: {}", e), &tool_call.id));
 
@@ -642,6 +986,12 @@ impl Runner {
                                     error: Some(e.to_string()),
                                     created_at: chrono::Utc::now(),
                                 }));
+                                debug!(
+                                    target: "runner::messages",
+                                    "\n↳ Appended TOOL error reply id={}\n{}\n---",
+                                    tool_call.id,
+                                    format_messages_for_log(&messages)
+                                );
                             }
                         }
                     }
@@ -652,6 +1002,12 @@ impl Runner {
                         format!("Error: Unknown tool '{}'", tool_call.name),
                         &tool_call.id,
                     ));
+                    debug!(
+                        target: "runner::messages",
+                        "\n↳ Appended TOOL unknown reply id={}\n{}\n---",
+                        tool_call.id,
+                        format_messages_for_log(&messages)
+                    );
                 }
             }
 
@@ -815,7 +1171,7 @@ mod tests {
 
         let agent = Agent::simple("CtxAgent", "Use tools")
             .with_tool(tool)
-            .with_context_factory(|| Ctx::default(), ForwardHandler);
+            .with_context_factory(Ctx::default, ForwardHandler);
 
         let provider = Arc::new(
             MockProvider::new("test-model")
@@ -846,7 +1202,7 @@ mod tests {
 
         let agent = Agent::simple("CtxRewrite", "Use tools")
             .with_tool(tool)
-            .with_context_factory(|| Ctx::default(), RewriteHandler);
+            .with_context_factory(Ctx::default, RewriteHandler);
 
         let provider = Arc::new(
             MockProvider::new("test-model")
@@ -877,7 +1233,7 @@ mod tests {
 
         let agent = Agent::simple("CtxFinal", "Use tools")
             .with_tool(tool)
-            .with_context_factory(|| Ctx::default(), FinalHandler);
+            .with_context_factory(Ctx::default, FinalHandler);
 
         let provider = Arc::new(
             MockProvider::new("test-model")
@@ -909,7 +1265,7 @@ mod tests {
 
         let agent = Agent::simple("CtxErr", "Use tools")
             .with_tool(tool)
-            .with_context_factory(|| Ctx::default(), RewriteOnErrorHandler);
+            .with_context_factory(Ctx::default, RewriteOnErrorHandler);
 
         let provider = Arc::new(
             MockProvider::new("test-model").with_tool_call("failing", serde_json::json!({})),
@@ -993,7 +1349,7 @@ mod tests {
 
         let agent = Agent::simple("CtxFail", "Use tools")
             .with_tool(tool)
-            .with_context_factory(|| Ctx::default(), ErrOnceCountingHandler::new());
+            .with_context_factory(Ctx::default, ErrOnceCountingHandler::new());
 
         // Two consecutive tool calls, then a final message
         let tc1 = MsgToolCall {
@@ -1044,7 +1400,7 @@ mod tests {
 
         let agent = Agent::simple("CtxMulti", "Use tools")
             .with_tool(tool)
-            .with_context_factory(|| Ctx::default(), CountingHandler);
+            .with_context_factory(Ctx::default, CountingHandler);
 
         let tc1 = MsgToolCall {
             id: uuid::Uuid::new_v4().to_string(),
@@ -1094,7 +1450,7 @@ mod tests {
 
         let agent = Agent::simple("CtxStream", "Use tools")
             .with_tool(tool)
-            .with_context_factory(|| Ctx::default(), CountingHandler);
+            .with_context_factory(Ctx::default, CountingHandler);
 
         let provider = Arc::new(
             MockProvider::new("test-model")
@@ -1120,6 +1476,567 @@ mod tests {
         assert_eq!(outputs.len(), 1);
         assert_eq!(outputs[0]["count"], serde_json::json!(1));
         assert_eq!(outputs[0]["value"], serde_json::json!("A"));
+    }
+
+    #[tokio::test]
+    async fn test_streaming_run_scoped_rewrite_collects() {
+        #[derive(Clone, Default)]
+        struct RC {
+            n: usize,
+        }
+        struct RH;
+        impl ToolContext<RC> for RH {
+            fn on_tool_output(
+                &self,
+                mut ctx: RC,
+                _tool: &str,
+                _args: &serde_json::Value,
+                result: std::result::Result<serde_json::Value, String>,
+            ) -> Result<ContextStep<RC>> {
+                ctx.n += 1;
+                Ok(ContextStep::rewrite(
+                    ctx,
+                    result.unwrap_or(serde_json::json!(null)),
+                ))
+            }
+        }
+
+        let tool = Arc::new(FunctionTool::simple(
+            "uppercase",
+            "Converts to uppercase",
+            |s: String| s.to_uppercase(),
+        ));
+        let agent = Agent::simple("RSStream", "Use tools").with_tool(tool);
+
+        let provider = Arc::new(
+            MockProvider::new("test-model")
+                .with_tool_call("uppercase", serde_json::json!({"input":"abc"}))
+                .with_message("ok"),
+        );
+
+        let config = RunConfig::default()
+            .with_model_provider(Some(provider))
+            .with_run_context(RC::default, RH);
+        let streaming = Runner::run_stream(agent, "Run", config).await.unwrap();
+        let result = streaming.collect().await.unwrap();
+
+        let outputs: Vec<_> = result
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                RunItem::ToolOutput(o) => Some(o.output.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(outputs.len(), 1);
+        // We don't have the RC value here, but rewrite applied should reflect uppercase
+        assert_eq!(outputs[0], serde_json::json!("ABC"));
+    }
+
+    #[tokio::test]
+    async fn test_run_scoped_run_with_run_context_typed_api() {
+        #[derive(Clone, Default)]
+        struct RC {
+            n: usize,
+        }
+
+        struct Inc;
+        impl ToolContext<RC> for Inc {
+            fn on_tool_output(
+                &self,
+                mut ctx: RC,
+                _tool: &str,
+                _args: &serde_json::Value,
+                result: std::result::Result<serde_json::Value, String>,
+            ) -> Result<ContextStep<RC>> {
+                ctx.n += 1;
+                Ok(ContextStep::rewrite(
+                    ctx,
+                    result.unwrap_or(serde_json::json!(null)),
+                ))
+            }
+        }
+
+        let tool = Arc::new(FunctionTool::simple(
+            "uppercase",
+            "Converts to uppercase",
+            |s: String| s.to_uppercase(),
+        ));
+        let agent = Agent::simple("TypedRun", "Use tools").with_tool(tool);
+
+        let provider = Arc::new(
+            MockProvider::new("test-model")
+                .with_tool_call("uppercase", serde_json::json!({"input":"abc"}))
+                .with_message("ok"),
+        );
+
+        let config = RunConfig::default().with_model_provider(Some(provider));
+        let out = Runner::run_with_run_context(agent, "Run", config, RC::default, Inc)
+            .await
+            .unwrap();
+
+        assert!(out.result.is_success());
+        assert_eq!(out.context.n, 1);
+    }
+
+    struct RunScopedErrOnce {
+        fail_first: Mutex<bool>,
+    }
+    impl RunScopedErrOnce {
+        fn new() -> Self {
+            Self {
+                fail_first: Mutex::new(true),
+            }
+        }
+    }
+    impl ToolContext<RunCtx> for RunScopedErrOnce {
+        fn on_tool_output(
+            &self,
+            mut ctx: RunCtx,
+            _tool: &str,
+            _args: &serde_json::Value,
+            result: std::result::Result<serde_json::Value, String>,
+        ) -> Result<ContextStep<RunCtx>> {
+            let mut flag = self.fail_first.lock().unwrap();
+            if *flag {
+                *flag = false;
+                return Err(crate::error::AgentsError::Other(
+                    "run handler fail".to_string(),
+                ));
+            }
+            ctx.n += 1;
+            Ok(ContextStep::rewrite(
+                ctx,
+                result.unwrap_or(serde_json::json!(null)),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_scoped_handler_failure_fallback_and_reset() {
+        let tool = Arc::new(FunctionTool::simple(
+            "uppercase",
+            "Converts to uppercase",
+            |s: String| s.to_uppercase(),
+        ));
+        let agent = Agent::simple("RunFail", "Use tools").with_tool(tool);
+
+        let tc1 = MsgToolCall {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: "uppercase".to_string(),
+            arguments: serde_json::json!({"input":"a"}),
+        };
+        let tc2 = MsgToolCall {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: "uppercase".to_string(),
+            arguments: serde_json::json!({"input":"b"}),
+        };
+        let provider = Arc::new(
+            MockProvider::new("test-model")
+                .with_response(crate::items::ModelResponse::new_tool_calls(vec![tc1]))
+                .with_response(crate::items::ModelResponse::new_tool_calls(vec![tc2]))
+                .with_message("done"),
+        );
+
+        let config = RunConfig::default()
+            .with_run_context(RunCtx::default, RunScopedErrOnce::new())
+            .with_model_provider(Some(provider));
+        let result = Runner::run(agent, "Run", config).await.unwrap();
+
+        let outputs: Vec<_> = result
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                RunItem::ToolOutput(o) => Some(o.output.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(outputs.len(), 2);
+        // First forwarded (no rewrite) == "A"; second rewritten payload has no enforced shape here; ensure not Null
+        assert_eq!(outputs[0], serde_json::json!("A"));
+        assert!(outputs[1] != serde_json::Value::Null);
+    }
+
+    struct RunScopedFinal;
+    impl ToolContext<RunCtx> for RunScopedFinal {
+        fn on_tool_output(
+            &self,
+            ctx: RunCtx,
+            _tool: &str,
+            _args: &serde_json::Value,
+            _result: std::result::Result<serde_json::Value, String>,
+        ) -> Result<ContextStep<RunCtx>> {
+            Ok(ContextStep::final_output(ctx, serde_json::json!("stop")))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_scoped_finalization_precedence() {
+        let tool = Arc::new(FunctionTool::simple(
+            "uppercase",
+            "Converts to uppercase",
+            |s: String| s.to_uppercase(),
+        ));
+        let agent = Agent::simple("RunFinal", "Use tools").with_tool(tool);
+        let provider = Arc::new(
+            MockProvider::new("test-model")
+                .with_tool_call("uppercase", serde_json::json!({"input":"x"})),
+        );
+        let config = RunConfig::default()
+            .with_run_context(RunCtx::default, RunScopedFinal)
+            .with_model_provider(Some(provider));
+        let result = Runner::run(agent, "Run", config).await.unwrap();
+        assert!(result.is_success());
+        assert_eq!(result.final_output, serde_json::json!("stop"));
+    }
+
+    #[tokio::test]
+    async fn test_agent_group_handoff_executes() {
+        use crate::group::AgentGroupBuilder;
+
+        let specialist = Agent::simple("Specialist", "I handle special tasks");
+        let root = Agent::simple("Coordinator", "Delegate to Specialist");
+        let group = AgentGroupBuilder::new(root)
+            .with_handoff(specialist, "Do work")
+            .build();
+
+        let provider = Arc::new(
+            MockProvider::new("test-model")
+                .with_tool_call("Specialist", serde_json::json!({}))
+                .with_message("Task complete"),
+        );
+
+        let config = RunConfig::default().with_model_provider(Some(provider));
+        let result = Runner::run(group.into_agent(), "Run", config)
+            .await
+            .unwrap();
+
+        assert!(result.is_success());
+        assert_eq!(result.final_agent, "Specialist");
+        assert!(result
+            .items
+            .iter()
+            .any(|i| matches!(i, RunItem::Handoff(_))));
+    }
+
+    #[tokio::test]
+    async fn test_agent_group_with_run_scoped_context() {
+        use crate::group::AgentGroupBuilder;
+
+        #[derive(Clone, Default)]
+        struct RC {
+            n: usize,
+        }
+        struct RH;
+        impl ToolContext<RC> for RH {
+            fn on_tool_output(
+                &self,
+                mut ctx: RC,
+                _tool: &str,
+                _args: &serde_json::Value,
+                result: std::result::Result<serde_json::Value, String>,
+            ) -> Result<ContextStep<RC>> {
+                ctx.n += 1;
+                Ok(ContextStep::rewrite(
+                    ctx,
+                    result.unwrap_or(serde_json::json!(null)),
+                ))
+            }
+        }
+
+        let tool = Arc::new(FunctionTool::simple(
+            "uppercase",
+            "Converts to uppercase",
+            |s: String| s.to_uppercase(),
+        ));
+
+        let specialist = Agent::simple("Specialist", "Use tools").with_tool(tool);
+        let root = Agent::simple("Coordinator", "Delegate to Specialist");
+        let group = AgentGroupBuilder::new(root)
+            .with_handoff(specialist, "Do work")
+            .build();
+
+        let provider = Arc::new(
+            MockProvider::new("test-model")
+                .with_tool_call("Specialist", serde_json::json!({}))
+                .with_tool_call("uppercase", serde_json::json!({"input":"x"}))
+                .with_message("done"),
+        );
+
+        let config = RunConfig::default()
+            .with_model_provider(Some(provider))
+            .with_run_context(RC::default, RH);
+        let result = Runner::run(group.into_agent(), "Run", config)
+            .await
+            .unwrap();
+
+        // Ensure run-scoped rewrite applied to the tool output after handoff
+        let outputs: Vec<_> = result
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                RunItem::ToolOutput(o) => Some(o.output.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(!outputs.is_empty());
+        assert_eq!(outputs.last().unwrap(), &serde_json::json!("X"));
+    }
+
+    #[tokio::test]
+    async fn test_handoffs_are_exposed_as_tools_to_provider() {
+        use async_trait::async_trait;
+
+        // Spy provider that records tool names passed into `complete`
+        struct ProviderSpy {
+            model: String,
+            recorded: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        }
+
+        #[async_trait]
+        impl crate::model::ModelProvider for ProviderSpy {
+            async fn complete(
+                &self,
+                _messages: Vec<crate::items::Message>,
+                tools: Vec<std::sync::Arc<dyn crate::tool::Tool>>,
+                _temperature: Option<f32>,
+                _max_tokens: Option<u32>,
+            ) -> crate::error::Result<(crate::items::ModelResponse, crate::usage::Usage)>
+            {
+                let mut names: Vec<String> = tools.iter().map(|t| t.name().to_string()).collect();
+                names.sort();
+                self.recorded.lock().unwrap().extend(names);
+                Ok((
+                    crate::items::ModelResponse::new_message("ok"),
+                    crate::usage::Usage::new(0, 0),
+                ))
+            }
+
+            fn model_name(&self) -> &str {
+                &self.model
+            }
+        }
+
+        let recorded = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let spy = std::sync::Arc::new(ProviderSpy {
+            model: "spy".to_string(),
+            recorded: recorded.clone(),
+        });
+
+        let specialist = Agent::simple("Specialist", "I handle special tasks");
+        let handoff = crate::handoff::Handoff::new(specialist, "Do work");
+        let coordinator =
+            Agent::simple("Coordinator", "Delegate to Specialist").with_handoff(handoff);
+
+        let config = RunConfig::default().with_model_provider(Some(spy));
+        let _ = Runner::run(coordinator, "Hi", config).await.unwrap();
+
+        let tools_seen = recorded.lock().unwrap().clone();
+        assert!(
+            tools_seen.iter().any(|n| n == "Specialist"),
+            "handoff name should be exposed as a tool"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handoff_generates_tool_message_reply() {
+        use async_trait::async_trait;
+
+        // Spy provider that returns a handoff tool_call first, then records messages on second call
+        struct Spy {
+            model: String,
+            first_id: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+            saw_tool_reply: std::sync::Arc<std::sync::Mutex<bool>>,
+        }
+
+        #[async_trait]
+        impl crate::model::ModelProvider for Spy {
+            async fn complete(
+                &self,
+                messages: Vec<crate::items::Message>,
+                _tools: Vec<std::sync::Arc<dyn crate::tool::Tool>>,
+                _temperature: Option<f32>,
+                _max_tokens: Option<u32>,
+            ) -> crate::error::Result<(crate::items::ModelResponse, crate::usage::Usage)>
+            {
+                let mut guard = self.first_id.lock().unwrap();
+                if guard.is_none() {
+                    // First call: return a tool_call for a handoff named "Specialist"
+                    let tc = crate::items::ToolCall {
+                        id: "call_1".to_string(),
+                        name: "Specialist".to_string(),
+                        arguments: serde_json::json!({}),
+                    };
+                    *guard = Some(tc.id.clone());
+                    Ok((
+                        crate::items::ModelResponse::new_tool_calls(vec![tc]),
+                        crate::usage::Usage::new(0, 0),
+                    ))
+                } else {
+                    // Second call: ensure there is a tool message responding to the tool_call_id
+                    let id = guard.clone().unwrap();
+                    let has_tool_reply = messages.iter().any(|m| {
+                        m.role == crate::items::Role::Tool && m.tool_call_id.as_deref() == Some(&id)
+                    });
+                    *self.saw_tool_reply.lock().unwrap() = has_tool_reply;
+                    Ok((
+                        crate::items::ModelResponse::new_message("ok"),
+                        crate::usage::Usage::new(0, 0),
+                    ))
+                }
+            }
+
+            fn model_name(&self) -> &str {
+                &self.model
+            }
+        }
+
+        let spy = std::sync::Arc::new(Spy {
+            model: "spy".to_string(),
+            first_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            saw_tool_reply: std::sync::Arc::new(std::sync::Mutex::new(false)),
+        });
+
+        let specialist = Agent::simple("Specialist", "I handle special tasks");
+        let coordinator = Agent::simple("Coordinator", "Delegate to Specialist")
+            .with_handoff(crate::handoff::Handoff::new(specialist, "Do work"));
+        let config = RunConfig::default().with_model_provider(Some(spy.clone()));
+        let _ = Runner::run(coordinator, "Hi", config).await.unwrap();
+
+        assert!(
+            *spy.saw_tool_reply.lock().unwrap(),
+            "Expected a tool message replying to the handoff tool_call_id"
+        );
+    }
+    #[derive(Clone, Default)]
+    struct RunCtx {
+        n: usize,
+    }
+
+    struct RunScopedRewrite;
+    impl ToolContext<RunCtx> for RunScopedRewrite {
+        fn on_tool_output(
+            &self,
+            mut ctx: RunCtx,
+            _tool: &str,
+            _args: &serde_json::Value,
+            result: std::result::Result<serde_json::Value, String>,
+        ) -> Result<ContextStep<RunCtx>> {
+            ctx.n += 1;
+            let payload = match result {
+                Ok(v) => serde_json::json!({"run": ctx.n, "value": v}),
+                Err(e) => serde_json::json!({"run": ctx.n, "error": e}),
+            };
+            Ok(ContextStep::rewrite(ctx, payload))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_scoped_rewrite_across_handoff() {
+        // Agent A hands off to B; run-scoped context should rewrite both outputs
+        let tool = Arc::new(FunctionTool::simple(
+            "uppercase",
+            "Converts to uppercase",
+            |s: String| s.to_uppercase(),
+        ));
+
+        let agent_a = Agent::simple("A", "Use tools").with_tool(tool.clone());
+        let agent_b = Agent::simple("B", "Use tools").with_tool(tool);
+        let handoff = crate::handoff::Handoff::new(agent_b, "B does follow-up");
+        let agent = agent_a.with_handoff(handoff);
+
+        // First turn: A calls tool; second turn: after handoff, B calls tool
+        let tc1 = MsgToolCall {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: "uppercase".to_string(),
+            arguments: serde_json::json!({"input":"a"}),
+        };
+        let tc2 = MsgToolCall {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: "uppercase".to_string(),
+            arguments: serde_json::json!({"input":"b"}),
+        };
+
+        let provider = Arc::new(
+            MockProvider::new("test-model")
+                .with_response(crate::items::ModelResponse::new_tool_calls(vec![tc1]))
+                .with_response(crate::items::ModelResponse::new_tool_calls(vec![tc2]))
+                .with_message("done"),
+        );
+
+        let config = RunConfig::default()
+            .with_run_context(RunCtx::default, RunScopedRewrite)
+            .with_model_provider(Some(provider));
+
+        let result = Runner::run(agent, "Run", config).await.unwrap();
+
+        let outputs: Vec<_> = result
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                RunItem::ToolOutput(o) => Some(o.output.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs[0]["run"], serde_json::json!(1));
+        assert_eq!(outputs[0]["value"], serde_json::json!("A"));
+        assert_eq!(outputs[1]["run"], serde_json::json!(2));
+        assert_eq!(outputs[1]["value"], serde_json::json!("B"));
+    }
+
+    struct AgentRewrite;
+    impl ToolContext<Ctx> for AgentRewrite {
+        fn on_tool_output(
+            &self,
+            mut ctx: Ctx,
+            _tool_name: &str,
+            _args: &serde_json::Value,
+            result: std::result::Result<serde_json::Value, String>,
+        ) -> Result<ContextStep<Ctx>> {
+            let v = result.unwrap_or(serde_json::json!(null));
+            let wrapped = serde_json::json!({"agent": true, "inner": v});
+            ctx.count += 1;
+            Ok(ContextStep::rewrite(ctx, wrapped))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_scoped_then_per_agent_ordering() {
+        let tool = Arc::new(FunctionTool::simple(
+            "uppercase",
+            "Converts to uppercase",
+            |s: String| s.to_uppercase(),
+        ));
+
+        let agent = Agent::simple("Order", "Use tools")
+            .with_tool(tool)
+            .with_context_factory(Ctx::default, AgentRewrite);
+
+        let provider = Arc::new(
+            MockProvider::new("test-model")
+                .with_tool_call("uppercase", serde_json::json!({"input":"x"}))
+                .with_message("ok"),
+        );
+
+        let config = RunConfig::default()
+            .with_run_context(RunCtx::default, RunScopedRewrite)
+            .with_model_provider(Some(provider));
+        let result = Runner::run(agent, "Run", config).await.unwrap();
+
+        let outputs: Vec<_> = result
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                RunItem::ToolOutput(o) => Some(o.output.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(outputs.len(), 1);
+        // Outer layer from per-agent, inner value from run-scoped rewrite
+        assert_eq!(outputs[0]["agent"], serde_json::json!(true));
+        assert_eq!(outputs[0]["inner"]["run"], serde_json::json!(1));
+        assert_eq!(outputs[0]["inner"]["value"], serde_json::json!("X"));
     }
 
     #[tokio::test]

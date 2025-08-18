@@ -415,7 +415,7 @@ mod tests {
     fn test_various_stream_events() {
         let events = vec![
             StreamEvent::GenerationStarted {
-                model: "gpt-4".to_string(),
+                model: "gpt-5".to_string(),
             },
             StreamEvent::ContentDelta {
                 delta: "Hello".to_string(),

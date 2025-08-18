@@ -13,6 +13,9 @@
 //! - **[`Runner`]**: The engine that executes an agent's logic. It manages the
 //!   interaction loop with the LLM, handles tool calls, and orchestrates the
 //!   overall workflow.
+//! - **[`AgentGroup`]**: Compose multiple agents with declared handoffs so they
+//!   act as a single agent. Useful for building multi-agent workflows that
+//!   operate as one logical unit.
 //! - **[`Tool`]**: A function or capability that an agent can use to interact
 //!   with the outside world, such as calling an API or accessing a database.
 //! - **[`Session`]**: Manages the state of an interaction, including the history
@@ -59,6 +62,7 @@
 //!
 //! [`Agent`]: crate::agent::Agent
 //! [`Runner`]: crate::runner::Runner
+//! [`AgentGroup`]: crate::group::AgentGroup
 //! [`Tool`]: crate::tool::Tool
 //! [`Session`]: crate::memory::Session
 //! [`SqliteSession`]: crate::sqlite_session::SqliteSession
@@ -67,6 +71,7 @@ pub mod agent;
 pub mod config;
 pub mod context;
 pub mod error;
+pub mod group;
 pub mod guardrail;
 pub mod handoff;
 pub mod items;
@@ -82,16 +87,17 @@ pub mod usage;
 
 // Re-export core types for convenience
 pub use agent::{Agent, AgentConfig};
+pub use context::ContextualAgent;
 pub use context::{ContextDecision, ContextStep, ToolContext};
 pub use error::{AgentsError, Result};
+pub use group::{AgentGroup, AgentGroupBuilder};
 pub use guardrail::{InputGuardrail, OutputGuardrail};
 pub use handoff::Handoff;
 pub use memory::Session;
-pub use result::{RunResult, StreamingRunResult, RunResultWithContext};
+pub use result::{RunResult, RunResultWithContext, StreamingRunResult};
 pub use runner::Runner;
 pub use sqlite_session::SqliteSession;
 pub use tool::{FunctionTool, Tool};
-pub use context::ContextualAgent;
 
 #[cfg(test)]
 mod tests {
