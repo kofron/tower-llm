@@ -46,5 +46,3 @@ jobs:
       #   env:
       #     OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       #   run: cargo run --bin run_examples --quiet
-
-  
