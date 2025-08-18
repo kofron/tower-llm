@@ -4,7 +4,6 @@ on:
   push:
     branches: ["main"]
   pull_request:
-    branches: ["main"]
 
 env:
   CARGO_TERM_COLOR: always
@@ -20,6 +19,8 @@ jobs:
         with:
           toolchain: stable
           components: rustfmt, clippy
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
 
       - name: Cargo fetch
         run: cargo fetch
