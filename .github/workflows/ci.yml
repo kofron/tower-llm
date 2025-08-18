@@ -3,8 +3,14 @@ name: Rust CI
 on:
   workflow_dispatch:
   push:
-    branches: ["main"]
+    branches:
+      - "**"
   pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
