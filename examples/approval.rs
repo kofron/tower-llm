@@ -1,5 +1,5 @@
 use openai_agents_rs::{
-    service::BoxedApprovalLayer, 
+    service::BoxedApprovalLayer,
     runner::RunConfig, 
     Agent, 
     FunctionTool, 
@@ -16,7 +16,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_tool(safe)
         .with_tool(danger);
 
-    // Deny the tool named "danger" - using vector API until runner supports typed layers
+    // TODO: Convert to typed layer API once predicate-based approval layer is available
+    // or migrate to capability-based approval when Runner supports custom Env
     let cfg = RunConfig::default().with_run_layers(vec![
         Arc::new(BoxedApprovalLayer::new(|_agent, tool, _args| tool != "danger"))
     ]);

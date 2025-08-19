@@ -175,6 +175,30 @@ impl Approval for ManualApproval {
     }
 }
 
+/// General approval capability wrapper that can hold any Approval implementation.
+/// This allows the capability system to work with custom Approval implementations.
+pub struct ApprovalCapability {
+    inner: Arc<dyn Approval>,
+}
+
+impl ApprovalCapability {
+    pub fn new<T: Approval + 'static>(approval: T) -> Self {
+        Self {
+            inner: Arc::new(approval)
+        }
+    }
+    
+    pub fn from_arc(approval: Arc<dyn Approval>) -> Self {
+        Self { inner: approval }
+    }
+}
+
+impl Approval for ApprovalCapability {
+    fn request_approval(&self, operation: &str, details: &str) -> bool {
+        self.inner.request_approval(operation, details)
+    }
+}
+
 /// Capability for metrics collection.
 pub trait Metrics: Send + Sync {
     /// Record a counter metric.

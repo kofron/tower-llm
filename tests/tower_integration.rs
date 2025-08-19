@@ -163,17 +163,10 @@ fn test_separation_of_concerns() {
 
     // 2. Agent level - manages agent-specific configuration
     let agent = Agent::simple("APIAgent", "Handles API calls")
-        .with_tool(Arc::new(api_tool))
-        .with_agent_layers(vec![
-            // Agent-level concerns like tracing would go here
-            // layers::boxed_trace_all(),
-        ]);
+        .with_tool(Arc::new(api_tool));
 
     // 3. Run level - manages run-specific configuration
-    let _config = RunConfig::default().with_run_layers(vec![
-        // Run-level concerns like global timeout would go here
-        // layers::boxed_global_timeout_secs(300),
-    ]);
+    let _config = RunConfig::default();
 
     // Each level is independent and manages its own concerns
     assert_eq!(agent.tools()[0].name(), "external_api");
@@ -251,14 +244,10 @@ fn test_tower_philosophy() {
         .with_tool(Arc::new(service2));
 
     // The agent itself could have layers (agent-level policies)
-    let agent_with_layers = agent.with_agent_layers(vec![
-        // Agent-level layers
-    ]);
+    let agent_with_layers = agent.clone();
 
     // And runs could have their own layers (run-level policies)
-    let _config = RunConfig::default().with_run_layers(vec![
-        // Run-level layers
-    ]);
+    let _config = RunConfig::default();
 
     // Clean, uniform composition at every level
     assert_eq!(agent_with_layers.tools().len(), 2);

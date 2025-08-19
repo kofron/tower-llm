@@ -12,6 +12,7 @@ use tower::{service_fn, util::BoxService, BoxError, Layer, Service};
 use crate::tool::Tool;
 use crate::usage::Usage;
 use crate::{items::Message, model::ModelProvider};
+use crate::env::Approval;
 
 // Re-export DefaultEnv from env module for backwards compatibility
 pub use crate::env::DefaultEnv;
@@ -499,10 +500,6 @@ impl<S> Layer<S> for RetryLayer {
     }
 }
 
-/// Approval capability trait; environments can implement this to enforce approvals.
-pub trait HasApproval {
-    fn approve(&self, agent: &str, tool: &str, args: &Value) -> bool;
-}
 
 /// Generic approval layer: denies execution if `approve` returns false.
 #[derive(Clone, Copy, Debug, Default)]
@@ -522,7 +519,7 @@ impl<S> Layer<S> for ApprovalLayer {
 
 impl<S, E> Service<ToolRequest<E>> for ApprovalService<S>
 where
-    E: HasApproval + crate::env::Env,
+    E: crate::env::Env,
     S: Service<ToolRequest<E>, Response = ToolResponse, Error = BoxError> + Clone + Send + 'static,
     S::Future: Send + 'static,
 {
@@ -540,9 +537,27 @@ where
     fn call(&mut self, req: ToolRequest<E>) -> Self::Future {
         let mut inner = self.inner.clone();
         Box::pin(async move {
-            if !req.env.approve(&req.agent, &req.tool_name, &req.arguments) {
-                return Ok(ToolResponse::error("not approved".to_string()));
+            // Try to get approval capability - check for implementations in order of preference
+            let operation = format!("tool:{}", req.tool_name);
+            let details = format!("Agent '{}' requesting to execute tool '{}' with args: {}", 
+                req.agent, req.tool_name, req.arguments);
+            
+            let approved = if let Some(approval) = req.env.capability::<crate::env::ApprovalCapability>() {
+                // General wrapper for any custom Approval implementation
+                approval.request_approval(&operation, &details)
+            } else if let Some(approval) = req.env.capability::<crate::env::AutoApprove>() {
+                approval.request_approval(&operation, &details)
+            } else if let Some(approval) = req.env.capability::<crate::env::ManualApproval>() {
+                approval.request_approval(&operation, &details)
+            } else {
+                // Deny-by-default when no approval capability is provided (safer security model)
+                false
+            };
+            
+            if !approved {
+                return Ok(ToolResponse::error("approval denied".to_string()));
             }
+            
             inner.call(req).await
         })
     }
@@ -616,7 +631,7 @@ mod tests {
     use crate::tool::FunctionTool;
     use std::sync::Arc;
     
-    /// Helper function for tests: create a service from a tool without using BaseToolService
+    /// Helper function for tests: create a service from a tool using service-based approach
     fn create_tool_service<E: crate::env::Env + 'static>(
         tool: Arc<dyn crate::tool::Tool>
     ) -> impl tower::Service<ToolRequest<E>, Response = ToolResponse, Error = BoxError, Future = Pin<Box<dyn Future<Output = Result<ToolResponse, BoxError>> + Send>>> + Clone {
@@ -861,26 +876,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn approval_layer_denies_without_approval() {
+    async fn approval_layer_denies_without_capability() {
         use tower::Layer;
-        #[derive(Clone, Default)]
-        struct Deny;
-        impl HasApproval for Deny {
-            fn approve(&self, _agent: &str, _tool: &str, _args: &Value) -> bool {
-                false
-            }
-        }
-        impl crate::env::Env for Deny {
-            fn capability<T: std::any::Any + Send + Sync>(&self) -> Option<Arc<T>> {
-                None
-            }
-        }
-
+        use crate::env::{DefaultEnv};
+        
+        // Test deny-by-default when no approval capability is provided
         let tool = Arc::new(FunctionTool::simple("echo", "Echo", |s: String| s));
-        let base = create_tool_service::<Deny>(tool);
+        let base = create_tool_service::<DefaultEnv>(tool);
         let mut svc = ApprovalLayer.layer(base);
         let req = ToolRequest {
-            env: Deny,
+            env: DefaultEnv, // DefaultEnv has no capabilities, should deny
             run_id: "r".into(),
             agent: "A".into(),
             tool_call_id: "t".into(),
@@ -889,7 +894,41 @@ mod tests {
         };
         let resp = svc.call(req).await.unwrap();
         assert!(resp.error.is_some());
-        assert_eq!(resp.error.unwrap(), "not approved");
+        assert_eq!(resp.error.unwrap(), "approval denied");
+    }
+
+    #[tokio::test]
+    async fn approval_layer_allows_with_capability() {
+        use tower::Layer;
+        use crate::env::{EnvBuilder, ApprovalCapability, Approval};
+        
+        // Create a test approval that always approves
+        #[derive(Default)]
+        struct TestApproval;
+        impl Approval for TestApproval {
+            fn request_approval(&self, _operation: &str, _details: &str) -> bool {
+                true // Always approve
+            }
+        }
+        
+        let env = EnvBuilder::new()
+            .with_capability(Arc::new(ApprovalCapability::new(TestApproval)))
+            .build();
+        
+        let tool = Arc::new(FunctionTool::simple("echo", "Echo", |s: String| s));
+        let base = create_tool_service(tool);
+        let mut svc = ApprovalLayer.layer(base);
+        let req = ToolRequest {
+            env: env.clone(),
+            run_id: "r".into(),
+            agent: "A".into(),
+            tool_call_id: "t".into(),
+            tool_name: "echo".into(),
+            arguments: serde_json::json!({"input":"hello"}),
+        };
+        let resp = svc.call(req).await.unwrap();
+        assert!(resp.error.is_none()); // Should succeed
+        assert_eq!(resp.output, serde_json::json!("hello"));
     }
 
     #[tokio::test]

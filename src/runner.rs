@@ -232,7 +232,7 @@ impl RunConfig {
     /// use std::time::Duration;
     /// 
     /// let config = RunConfig::default()
-    ///     .layer(TimeoutLayer::new(Duration::from_secs(30)))
+    ///     .layer(TimeoutLayer::from_duration(Duration::from_secs(30)))
     ///     .layer(RetryLayer::times(3));
     /// ```
     pub fn layer<L>(self, layer: L) -> LayeredRunConfig<L, Self> {
@@ -739,50 +739,71 @@ impl Runner {
                             };
 
                             let mut stack = {
-                                // Replace build_tool_stack with service-based approach
-                                use tower::{service_fn, util::BoxService, Layer};
-                                use crate::service::{ToolRequest, ToolResponse, InputSchemaLayer};
-                                use crate::tool::ToolResult;
+                                // Use service-based tool path for Arc<dyn Tool>
+                                use tower::{util::BoxService, Layer};
+                                use crate::service::{InputSchemaLayer, ToolRequest, ToolResponse};
+                                use tower::BoxError;
                                 use crate::env::DefaultEnv;
+                                use std::future::Future;
+                                use std::pin::Pin;
+                                use crate::tool::ToolResult;
+                                use std::sync::Arc;
                                 
-                                let tool_clone = tool.clone();
                                 let schema = tool.parameters_schema();
+                                let tool_arc = tool.clone();
                                 
-                                // Create service directly without BaseToolService adapter
-                                let tool_service = service_fn(move |req: ToolRequest<DefaultEnv>| {
-                                    let tool = tool_clone.clone();
-                                    async move {
-                                        match tool.execute(req.arguments.clone()).await {
-                                            Ok(ToolResult { output, is_final, error }) => {
-                                                if let Some(err) = error {
+                                // Create tool service directly for Arc<dyn Tool>
+                                #[derive(Clone)]
+                                struct ToolService {
+                                    tool: Arc<dyn crate::tool::Tool>,
+                                }
+                                
+                                impl tower::Service<ToolRequest<DefaultEnv>> for ToolService {
+                                    type Response = ToolResponse;
+                                    type Error = BoxError;
+                                    type Future = Pin<Box<dyn Future<Output = std::result::Result<Self::Response, Self::Error>> + Send>>;
+
+                                    fn poll_ready(&mut self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<std::result::Result<(), Self::Error>> {
+                                        std::task::Poll::Ready(Ok(()))
+                                    }
+
+                                    fn call(&mut self, req: ToolRequest<DefaultEnv>) -> Self::Future {
+                                        let tool = self.tool.clone();
+                                        Box::pin(async move {
+                                            match tool.execute(req.arguments).await {
+                                                Ok(ToolResult { output, is_final, error }) => {
+                                                    if let Some(err) = error {
+                                                        Ok(ToolResponse {
+                                                            output: serde_json::Value::Null,
+                                                            error: Some(err),
+                                                            effect: crate::service::Effect::Continue,
+                                                        })
+                                                    } else {
+                                                        let effect = if is_final {
+                                                            crate::service::Effect::Final(output.clone())
+                                                        } else {
+                                                            crate::service::Effect::Continue
+                                                        };
+                                                        Ok(ToolResponse {
+                                                            output,
+                                                            error: None,
+                                                            effect,
+                                                        })
+                                                    }
+                                                },
+                                                Err(e) => {
                                                     Ok(ToolResponse {
                                                         output: serde_json::Value::Null,
-                                                        error: Some(err),
+                                                        error: Some(e.to_string()),
                                                         effect: crate::service::Effect::Continue,
                                                     })
-                                                } else {
-                                                    let effect = if is_final {
-                                                        crate::service::Effect::Final(output.clone())
-                                                    } else {
-                                                        crate::service::Effect::Continue
-                                                    };
-                                                    Ok(ToolResponse {
-                                                        output,
-                                                        error: None,
-                                                        effect,
-                                                    })
                                                 }
-                                            },
-                                            Err(e) => {
-                                                Ok(ToolResponse {
-                                                    output: serde_json::Value::Null,
-                                                    error: Some(e.to_string()),
-                                                    effect: crate::service::Effect::Continue,
-                                                })
                                             }
-                                        }
+                                        })
                                     }
-                                });
+                                }
+                                
+                                let tool_service = ToolService { tool: tool_arc };
                                 
                                 // Add default schema validation (to be moved to tool constructors in Step 6)
                                 let with_schema = InputSchemaLayer::lenient(schema).layer(tool_service);
@@ -935,50 +956,71 @@ impl Runner {
                                     };
 
                                     let mut stack = {
-                                        // Replace build_tool_stack with service-based approach
-                                        use tower::{service_fn, util::BoxService, Layer};
-                                        use crate::service::{ToolRequest, ToolResponse, InputSchemaLayer};
-                                        use crate::tool::ToolResult;
+                                        // Use service-based tool path for Arc<dyn Tool>
+                                        use tower::{util::BoxService, Layer};
+                                        use crate::service::{InputSchemaLayer, ToolRequest, ToolResponse};
+                                use tower::BoxError;
                                         use crate::env::DefaultEnv;
+                                        use std::future::Future;
+                                        use std::pin::Pin;
+                                        use crate::tool::ToolResult;
+                                        use std::sync::Arc;
                                         
-                                        let tool_clone = tool.clone();
                                         let schema = tool.parameters_schema();
+                                        let tool_arc = tool.clone();
                                         
-                                        // Create service directly without BaseToolService adapter
-                                        let tool_service = service_fn(move |req: ToolRequest<DefaultEnv>| {
-                                            let tool = tool_clone.clone();
-                                            async move {
-                                                match tool.execute(req.arguments.clone()).await {
-                                                    Ok(ToolResult { output, is_final, error }) => {
-                                                        if let Some(err) = error {
+                                        // Create tool service directly for Arc<dyn Tool>
+                                        #[derive(Clone)]
+                                        struct ToolService {
+                                            tool: Arc<dyn crate::tool::Tool>,
+                                        }
+                                        
+                                        impl tower::Service<ToolRequest<DefaultEnv>> for ToolService {
+                                            type Response = ToolResponse;
+                                            type Error = BoxError;
+                                            type Future = Pin<Box<dyn Future<Output = std::result::Result<Self::Response, Self::Error>> + Send>>;
+
+                                            fn poll_ready(&mut self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<std::result::Result<(), Self::Error>> {
+                                                std::task::Poll::Ready(Ok(()))
+                                            }
+
+                                            fn call(&mut self, req: ToolRequest<DefaultEnv>) -> Self::Future {
+                                                let tool = self.tool.clone();
+                                                Box::pin(async move {
+                                                    match tool.execute(req.arguments).await {
+                                                        Ok(ToolResult { output, is_final, error }) => {
+                                                            if let Some(err) = error {
+                                                                Ok(ToolResponse {
+                                                                    output: serde_json::Value::Null,
+                                                                    error: Some(err),
+                                                                    effect: crate::service::Effect::Continue,
+                                                                })
+                                                            } else {
+                                                                let effect = if is_final {
+                                                                    crate::service::Effect::Final(output.clone())
+                                                                } else {
+                                                                    crate::service::Effect::Continue
+                                                                };
+                                                                Ok(ToolResponse {
+                                                                    output,
+                                                                    error: None,
+                                                                    effect,
+                                                                })
+                                                            }
+                                                        },
+                                                        Err(e) => {
                                                             Ok(ToolResponse {
                                                                 output: serde_json::Value::Null,
-                                                                error: Some(err),
+                                                                error: Some(e.to_string()),
                                                                 effect: crate::service::Effect::Continue,
                                                             })
-                                                        } else {
-                                                            let effect = if is_final {
-                                                                crate::service::Effect::Final(output.clone())
-                                                            } else {
-                                                                crate::service::Effect::Continue
-                                                            };
-                                                            Ok(ToolResponse {
-                                                                output,
-                                                                error: None,
-                                                                effect,
-                                                            })
                                                         }
-                                                    },
-                                                    Err(e) => {
-                                                        Ok(ToolResponse {
-                                                            output: serde_json::Value::Null,
-                                                            error: Some(e.to_string()),
-                                                            effect: crate::service::Effect::Continue,
-                                                        })
                                                     }
-                                                }
+                                                })
                                             }
-                                        });
+                                        }
+                                        
+                                        let tool_service = ToolService { tool: tool_arc };
                                         
                                         // Add default schema validation (to be moved to tool constructors in Step 6)
                                         let with_schema = InputSchemaLayer::lenient(schema).layer(tool_service);
@@ -1200,6 +1242,114 @@ mod tests {
 
         assert!(result.is_success());
         // Should have tool call and output items
+        assert!(result
+            .items
+            .iter()
+            .any(|item| matches!(item, RunItem::ToolCall(_))));
+        assert!(result
+            .items
+            .iter()
+            .any(|item| matches!(item, RunItem::ToolOutput(_))));
+    }
+
+    #[test]
+    fn test_runconfig_layer_chaining_compiles() {
+        use crate::service::{TimeoutLayer, RetryLayer};
+        use std::time::Duration;
+
+        // Test that RunConfig layer chaining compiles and can be chained
+        let config = RunConfig::default()
+            .layer(TimeoutLayer::from_duration(Duration::from_secs(30)))
+            .layer(RetryLayer::times(3));
+            
+        // Test double layering compiles
+        let double_layered = config
+            .layer(TimeoutLayer::from_duration(Duration::from_secs(60)));
+            
+        // Verify it's a layered config (type check passes)
+        let _: LayeredRunConfig<_, _> = double_layered;
+    }
+
+    #[tokio::test]
+    async fn test_runner_uses_service_tools() {
+        use crate::tool::FunctionTool;
+        
+        // Create a simple tool
+        let tool = Arc::new(FunctionTool::simple(
+            "echo", 
+            "Echoes input", 
+            |s: String| s.to_uppercase()
+        ));
+        
+        let agent = Agent::simple("ServiceAgent", "I use service-based tools")
+            .with_tool(tool);
+
+        // Mock provider that generates one tool call then finishes
+        struct MockP {
+            call_count: std::sync::atomic::AtomicUsize,
+        }
+        impl MockP {
+            fn new() -> Self {
+                Self {
+                    call_count: std::sync::atomic::AtomicUsize::new(0),
+                }
+            }
+        }
+        #[async_trait::async_trait]
+        impl crate::model::ModelProvider for MockP {
+            async fn complete(
+                &self,
+                _messages: Vec<crate::items::Message>,
+                _tools: Vec<std::sync::Arc<dyn crate::tool::Tool>>,
+                _temperature: Option<f32>,
+                _max_tokens: Option<u32>,
+            ) -> crate::error::Result<(crate::items::ModelResponse, crate::usage::Usage)>
+            {
+                let count = self.call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                
+                if count == 0 {
+                    // First call: return a tool call to test service integration
+                    let tool_call = crate::items::ToolCall {
+                        id: "test_1".to_string(),
+                        name: "echo".to_string(),
+                        arguments: serde_json::json!({"input": "hello"}),
+                    };
+                    Ok((
+                        crate::items::ModelResponse::new_tool_calls(vec![tool_call]),
+                        crate::usage::Usage::new(10, 20),
+                    ))
+                } else {
+                    // Subsequent calls: return a final message
+                    Ok((
+                        crate::items::ModelResponse::new_message("Tool execution completed successfully!"),
+                        crate::usage::Usage::new(5, 10),
+                    ))
+                }
+            }
+            fn model_name(&self) -> &str {
+                "test-service-model"
+            }
+        }
+
+        let provider = Arc::new(MockP::new());
+        let config = RunConfig {
+            model_provider: Some(provider),
+            ..Default::default()
+        };
+
+        // This test verifies that the runner successfully uses service-based tools
+        // without any BaseToolService adapter
+        let result = Runner::run(agent, "test service tools", config).await;
+        
+        // The test passes if execution completes successfully using the service path
+        if let Err(e) = &result {
+            println!("Runner error: {:?}", e);
+        }
+        assert!(result.is_ok());
+        let result = result.unwrap();
+        assert!(result.is_success());
+        
+        // Should have tool call and tool output (proving service path worked)
         assert!(result
             .items
             .iter()

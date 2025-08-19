@@ -81,10 +81,7 @@ fn test_clean_separation_of_concerns() {
 
     // Agent manages its own configuration (would add agent layers here)
     let agent = Agent::simple("DataAgent", "Handles data operations")
-        .with_tool(Arc::new(db_tool))
-        .with_agent_layers(vec![
-            // Agent-level layers (e.g., tracing, metrics)
-        ]);
+        .with_tool(Arc::new(db_tool));
 
     // Clean boundaries - each level manages itself
     assert_eq!(agent.tools().len(), 1);

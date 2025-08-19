@@ -353,7 +353,7 @@ impl Agent {
     /// use std::time::Duration;
     /// 
     /// let agent = Agent::simple("Assistant", "Be helpful")
-    ///     .layer(TimeoutLayer::new(Duration::from_secs(30)))
+    ///     .layer(TimeoutLayer::from_duration(Duration::from_secs(30)))
     ///     .layer(RetryLayer::times(3));
     /// ```
     pub fn layer<L>(self, layer: L) -> LayeredAgent<L, Self> {
@@ -576,5 +576,26 @@ mod tests {
         assert!(debug_str.contains("Debug"));
         assert!(debug_str.contains("gpt-5"));
         assert!(debug_str.contains("tools_count"));
+    }
+
+    #[test]
+    fn test_agent_layer_chaining_compiles() {
+        use crate::service::{TimeoutLayer, RetryLayer};
+        use std::time::Duration;
+
+        // Test that agent layer chaining compiles and can be chained
+        let agent = Agent::simple("LayeredAgent", "Test layering")
+            .layer(TimeoutLayer::from_duration(Duration::from_secs(30)))
+            .layer(RetryLayer::times(3));
+            
+        // Verify the underlying agent is accessible
+        assert_eq!(agent.name(), "LayeredAgent");
+        assert_eq!(agent.instructions(), "Test layering");
+        
+        // Test double layering compiles
+        let double_layered = agent
+            .layer(TimeoutLayer::from_duration(Duration::from_secs(60)));
+            
+        assert_eq!(double_layered.name(), "LayeredAgent");
     }
 }
