@@ -166,8 +166,7 @@ impl ModelProvider for OpenAIProvider {
 
         // Map response
         let choice = resp
-            .choices
-            .get(0)
+            .choices.first()
             .ok_or_else(|| crate::error::AgentsError::Other("no choices".into()))?;
         let msg = &choice.message;
         let usage = resp.usage.as_ref().cloned().unwrap_or_default();

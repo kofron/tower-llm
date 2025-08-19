@@ -7,7 +7,7 @@ use openai_agents_rs::{
     env::{DefaultEnv, EnvBuilder, LoggingCapability},
     service::{ToolRequest, ToolResponse},
     tool::FunctionTool,
-    tool_service::{IntoToolService, ServiceTool},
+    tool_service::IntoToolService,
 };
 use serde_json::json;
 use std::sync::Arc;

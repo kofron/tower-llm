@@ -235,7 +235,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = RunConfig {
         session: Some(session.clone()),
-        run_context: None,
         ..Default::default()
     };
 

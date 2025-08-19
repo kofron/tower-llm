@@ -287,37 +287,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("\n{}\n", "=".repeat(60));
     }
 
-    // 3. Enter interactive mode.
-    //
-    // After the predefined problems, the example enters a loop where you can
-    // provide your own math problems for the agent to solve.
-    println!("Now entering interactive mode. Type 'quit' to exit.\n");
-
-    use std::io::{self, Write};
-
-    loop {
-        print!("Enter a math problem: ");
-        io::stdout().flush()?;
-
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-        let input = input.trim();
-
-        if input.eq_ignore_ascii_case("quit") || input.eq_ignore_ascii_case("exit") {
-            println!("Goodbye!");
-            break;
-        }
-
-        println!("\nCalculating...\n");
-
-        let result = Runner::run(agent.clone(), input, RunConfig::default()).await?;
-
-        if result.is_success() {
-            println!("\nAnswer: {}\n", result.final_output);
-        } else {
-            println!("\nError: {:?}\n", result.error());
-        }
-    }
-
     Ok(())
 }

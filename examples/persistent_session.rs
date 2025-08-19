@@ -84,7 +84,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         stream: false,
         session: Some(session.clone()),
         model_provider: None, // Use default OpenAI provider
-        run_context: None,
         parallel_tools: true,
         max_concurrency: None,
         run_layers: Vec::new(),

@@ -34,6 +34,7 @@ impl Metrics for TestMetrics {
 }
 
 /// Test approval service
+#[allow(dead_code)]
 struct TestApproval {
     approved: Arc<Mutex<Vec<String>>>,
     should_approve: bool,

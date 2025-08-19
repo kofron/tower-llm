@@ -303,17 +303,18 @@ where
 mod tests {
     use super::*;
     use crate::env::DefaultEnv;
+    use crate::tool::FunctionTool;
     use serde_json::json;
 
     #[tokio::test]
     async fn test_service_tool() {
-        let tool = ServiceTool::<_, DefaultEnv>::simple(
+        // Use the adapter pattern instead of ServiceTool::simple
+        let tool = FunctionTool::simple(
             "uppercase",
             "Converts to uppercase",
             |s: String| s.to_uppercase(),
         );
-
-        let mut service = tool.clone();
+        let mut service = tool.into_service::<DefaultEnv>();
 
         let req = ToolRequest {
             env: DefaultEnv,
@@ -357,11 +358,12 @@ mod tests {
     fn test_service_tool_with_layers() {
         use tower::ServiceBuilder;
 
-        let tool = ServiceTool::<_, DefaultEnv>::simple("echo", "Echoes input", |s: String| s);
+        let tool = FunctionTool::simple("echo", "Echoes input", |s: String| s);
+        let service = tool.into_service::<DefaultEnv>();
 
         // Tools can be composed with Tower layers directly
         let _service = ServiceBuilder::new()
             .timeout(std::time::Duration::from_secs(5))
-            .service(tool);
+            .service(service);
     }
 }

@@ -1,9 +1,8 @@
-//! # Example: Transactional Database Migrator with Context Handler
+//! # Example: Database Migrator with Tower Layers
 //!
-//! This example demonstrates a side-effecting workflow where the context handler
-//! manages a live SQLite transaction on a dedicated thread. The tool proposes
-//! operations (execute SQL, commit, rollback), while the handler applies them to
-//! an in-memory database and rewrites outputs with structured status.
+//! This example demonstrates a database migration workflow using Tower layers
+//! to manage SQLite transactions. Tools propose operations (execute SQL, commit,
+//! rollback) which are executed against an in-memory database.
 //!
 //! To run:
 //!
@@ -11,239 +10,185 @@
 //! export OPENAI_API_KEY="your-api-key"
 //! cargo run --example db_migrator
 //! ```
-//!
-//! Expected: The agent should call tools to create a table and add rows.  
-//! It might be the case that it does this multiple times - but at the end of the day, it must do at least that.  It is expected
-//! that the agent will succeed and be able to select all of the users during its run.
 
-use openai_agents_rs::{
-    runner::RunConfig, Agent, ContextStep, ContextualAgent, FunctionTool, RunResultWithContext,
-    Runner, ToolContext,
-};
+use openai_agents_rs::{error::AgentsError, runner::RunConfig, Agent, FunctionTool, Runner};
 use rusqlite::Connection;
-use serde_json::Value;
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::Arc;
-use std::thread;
+use serde_json::{json, Value};
+use std::sync::{Arc, Mutex};
 
-#[derive(Debug)]
-enum DbCommand {
-    Exec(String),
-    Commit,
-    Rollback,
+/// Shared database connection wrapped in Arc<Mutex> for thread safety
+struct DbState {
+    conn: Arc<Mutex<Connection>>,
 }
 
-#[derive(Debug)]
-enum DbReply {
-    Ok { changes: i64 },
-    Error { message: String },
-    Done,
-}
-
-fn start_db_worker() -> (Sender<DbCommand>, Receiver<DbReply>) {
-    let (tx_cmd, rx_cmd) = mpsc::channel::<DbCommand>();
-    let (tx_rep, rx_rep) = mpsc::channel::<DbReply>();
-
-    thread::spawn(move || {
-        // Single-threaded in-memory DB; one transaction per run
-        let conn = Connection::open_in_memory();
-        let conn = match conn {
-            Ok(c) => c,
-            Err(e) => {
-                let _ = tx_rep.send(DbReply::Error {
-                    message: format!("open error: {}", e),
-                });
-                return;
-            }
-        };
-
-        if let Err(e) = conn.execute_batch("BEGIN IMMEDIATE;") {
-            let _ = tx_rep.send(DbReply::Error {
-                message: format!("begin error: {}", e),
-            });
-            return;
+impl DbState {
+    fn new() -> Self {
+        let conn = Connection::open_in_memory().expect("Failed to create in-memory database");
+        Self {
+            conn: Arc::new(Mutex::new(conn)),
         }
+    }
 
-        for cmd in rx_cmd.iter() {
-            match cmd {
-                DbCommand::Exec(sql) => match conn.execute_batch(&sql) {
-                    Ok(_) => {
-                        let changes = conn.changes() as i64;
-                        let _ = tx_rep.send(DbReply::Ok { changes });
-                    }
-                    Err(e) => {
-                        let _ = tx_rep.send(DbReply::Error {
-                            message: e.to_string(),
-                        });
-                    }
-                },
-                DbCommand::Commit => {
-                    let res = conn.execute_batch("COMMIT;");
-                    let _ = tx_rep.send(match res {
-                        Ok(_) => DbReply::Done,
-                        Err(e) => DbReply::Error {
-                            message: e.to_string(),
-                        },
-                    });
-                    break;
+    fn execute_sql(&self, sql: &str) -> Result<Value, AgentsError> {
+        let conn = self.conn.lock().unwrap();
+        match conn.execute(sql, []) {
+            Ok(rows_affected) => Ok(json!({
+                "status": "success",
+                "rows_affected": rows_affected,
+                "message": format!("Executed: {}", sql)
+            })),
+            Err(e) => Err(AgentsError::Other(format!("SQL error: {}", e))),
+        }
+    }
+
+    fn query_sql(&self, sql: &str) -> Result<Value, AgentsError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(sql)
+            .map_err(|e| AgentsError::Other(format!("Prepare error: {}", e)))?;
+
+        let column_count = stmt.column_count();
+        let column_names: Vec<String> = (0..column_count)
+            .map(|i| stmt.column_name(i).unwrap_or("unknown").to_string())
+            .collect();
+
+        let rows = stmt
+            .query_map([], |row| {
+                let mut row_data = json!({});
+                for (i, name) in column_names.iter().enumerate() {
+                    let value: String = row.get(i).unwrap_or_default();
+                    row_data[name] = json!(value);
                 }
-                DbCommand::Rollback => {
-                    let res = conn.execute_batch("ROLLBACK;");
-                    let _ = tx_rep.send(match res {
-                        Ok(_) => DbReply::Done,
-                        Err(e) => DbReply::Error {
-                            message: e.to_string(),
-                        },
-                    });
-                    break;
-                }
-            }
-        }
-    });
+                Ok(row_data)
+            })
+            .map_err(|e| AgentsError::Other(format!("Query error: {}", e)))?;
 
-    (tx_cmd, rx_rep)
-}
+        let results: Result<Vec<Value>, _> = rows.collect();
+        let results = results.map_err(|e| AgentsError::Other(format!("Row error: {}", e)))?;
 
-#[derive(Clone)]
-struct DbCtx {
-    tx: Sender<DbCommand>,
-    rx: Arc<std::sync::Mutex<Receiver<DbReply>>>,
-    applied: Vec<String>,
-    errors: Vec<String>,
-}
-
-struct MigratorHandler;
-
-impl ToolContext<DbCtx> for MigratorHandler {
-    fn on_tool_output(
-        &self,
-        mut ctx: DbCtx,
-        _tool_name: &str,
-        _arguments: &Value,
-        result: Result<Value, String>,
-    ) -> openai_agents_rs::Result<ContextStep<DbCtx>> {
-        let mut finalize = None;
-        if let Ok(Value::Object(map)) = result {
-            let op = map.get("op").and_then(|v| v.as_str()).unwrap_or("");
-            match op {
-                "exec" => {
-                    if let Some(sql) = map.get("sql").and_then(|v| v.as_str()) {
-                        let _ = ctx.tx.send(DbCommand::Exec(sql.to_string()));
-                        let rep = ctx.rx.lock().unwrap().recv().unwrap();
-                        match rep {
-                            DbReply::Ok { changes } => {
-                                ctx.applied.push(sql.to_string());
-                                let rewritten = serde_json::json!({
-                                    "status": "ok",
-                                    "changes": changes,
-                                });
-                                return Ok(ContextStep::rewrite(ctx, rewritten));
-                            }
-                            DbReply::Error { message } => {
-                                ctx.errors.push(message.clone());
-                                let rewritten = serde_json::json!({
-                                    "status": "error",
-                                    "message": message,
-                                });
-                                return Ok(ContextStep::rewrite(ctx, rewritten));
-                            }
-                            DbReply::Done => {}
-                        }
-                    }
-                }
-                "commit" => finalize = Some(DbCommand::Commit),
-                "rollback" => finalize = Some(DbCommand::Rollback),
-                _ => {}
-            }
-        }
-
-        if let Some(cmd) = finalize {
-            let _ = ctx.tx.send(cmd);
-            let rep = ctx.rx.lock().unwrap().recv().unwrap();
-            let (status, message) = match rep {
-                DbReply::Done => ("committed_or_rolled_back", None),
-                DbReply::Error { message } => ("error", Some(message)),
-                DbReply::Ok { .. } => ("unexpected", None),
-            };
-            let summary = serde_json::json!({
-                "status": status,
-                "message": message,
-                "applied": ctx.applied,
-                "errors": ctx.errors,
-            });
-            return Ok(ContextStep::final_output(ctx, summary));
-        }
-
-        // No-op
-        Ok(ContextStep::rewrite(
-            ctx,
-            serde_json::json!({"status": "noop"}),
-        ))
+        Ok(json!({
+            "status": "success",
+            "rows": results,
+            "count": results.len()
+        }))
     }
 }
 
-fn migrator_tool() -> Arc<FunctionTool> {
-    let schema = serde_json::json!({
-        "type": "object",
-        "properties": {
-            "op": { "type": "string", "enum": ["exec", "commit", "rollback"], "description": "Operation type" },
-            "sql": { "type": ["string", "null"], "description": "SQL to execute when op == 'exec'" }
+fn create_db_tools(db_state: Arc<DbState>) -> Vec<Arc<dyn openai_agents_rs::Tool>> {
+    let db_state_execute = db_state.clone();
+    let execute_tool = FunctionTool::new(
+        "execute_sql".to_string(),
+        "Execute SQL statement (CREATE, INSERT, UPDATE, DELETE)".to_string(),
+        json!({
+            "type": "object",
+            "properties": {
+                "sql": {
+                    "type": "string",
+                    "description": "SQL statement to execute"
+                }
+            },
+            "required": ["sql"]
+        }),
+        move |args: Value| {
+            let sql = args["sql"].as_str().unwrap_or("");
+            db_state_execute.execute_sql(sql)
         },
-        "required": ["op"]
-    });
+    );
 
-    let func = |args: Value| -> openai_agents_rs::Result<Value> { Ok(args) };
-    Arc::new(FunctionTool::new(
-        "migrate".to_string(),
-        "Execute SQL statements, or commit/rollback the transaction.".to_string(),
-        schema,
-        func,
-    ))
-}
+    let db_state_query = db_state.clone();
+    let query_tool = FunctionTool::new(
+        "query_sql".to_string(),
+        "Query the database (SELECT statements)".to_string(),
+        json!({
+            "type": "object",
+            "properties": {
+                "sql": {
+                    "type": "string",
+                    "description": "SQL SELECT statement"
+                }
+            },
+            "required": ["sql"]
+        }),
+        move |args: Value| {
+            let sql = args["sql"].as_str().unwrap_or("");
+            db_state_query.query_sql(sql)
+        },
+    );
 
-fn build_agent() -> ContextualAgent<DbCtx> {
-    let instructions = r#"
-You are a cautious database migrator. Use the migrate tool to:
-- Execute SQL via {"op":"exec","sql":"..."}
-- Commit via {"op":"commit"} or rollback via {"op":"rollback"}
-Validate changes (e.g., create tables before inserts). When done, commit.  When you have finished,
-select all of the users from the table and return the results to validate that the table was correctly created 
-and populated.
-"#;
+    let db_state_schema = db_state.clone();
+    let schema_tool = FunctionTool::new(
+        "get_schema".to_string(),
+        "Get the current database schema".to_string(),
+        json!({
+            "type": "object",
+            "properties": {}
+        }),
+        move |_args: Value| {
+            let sql = "SELECT name, sql FROM sqlite_master WHERE type='table'";
+            db_state_schema.query_sql(sql)
+        },
+    );
 
-    let factory = || {
-        let (tx, rx) = start_db_worker();
-        DbCtx {
-            tx,
-            rx: Arc::new(std::sync::Mutex::new(rx)),
-            applied: vec![],
-            errors: vec![],
-        }
-    };
-
-    Agent::simple("DbMigrator", instructions)
-        .with_tool(migrator_tool())
-        .with_context_factory_typed(factory, MigratorHandler)
+    vec![
+        Arc::new(execute_tool),
+        Arc::new(query_tool),
+        Arc::new(schema_tool),
+    ]
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("Running DB migrator with contextual handler...\n");
+    // Create database state
+    let db_state = Arc::new(DbState::new());
 
-    let agent = build_agent();
-    let RunResultWithContext { result, context } = Runner::run_with_context(
+    // Create tools with database access
+    let tools = create_db_tools(db_state.clone());
+
+    // Create agent with database tools
+    let mut agent = Agent::simple(
+        "DatabaseMigrator",
+        "You are a database migration assistant. Your task is to:
+1. Create a 'users' table with columns: id (INTEGER PRIMARY KEY), name (TEXT), email (TEXT)
+2. Insert at least 3 sample users
+3. Query all users to verify the data
+
+Use the provided SQL tools to accomplish this task. Start by checking the schema, then create the table, insert data, and finally query to verify."
+    );
+
+    for tool in tools {
+        agent = agent.with_tool(tool);
+    }
+
+    // Run the agent
+    println!("Starting database migration...\n");
+
+    let config = RunConfig::default();
+    let result = Runner::run(
         agent,
-        "Create a 'users' table and insert two rows, then commit.",
-        RunConfig::default(),
+        "Please set up the users table with sample data as described in your instructions.",
+        config,
     )
     .await?;
 
     if result.is_success() {
-        println!("Final Response:\n{}\n", result.final_output);
-        println!("Applied Statements: {:?}", context.applied);
-        println!("Errors: {:?}", context.errors);
+        println!("\n✅ Migration completed successfully!");
+        println!("Final output: {}", result.final_output);
+
+        // Verify the final state
+        println!("\n📊 Final database state:");
+        match db_state.query_sql("SELECT * FROM users") {
+            Ok(result) => {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            }
+            Err(e) => {
+                println!("Could not query users table: {:?}", e);
+            }
+        }
     } else {
-        println!("Error: {:?}", result.error());
+        println!("\n❌ Migration failed");
+        if let Some(error) = result.error {
+            println!("Error: {}", error);
+        }
     }
 
     Ok(())

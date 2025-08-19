@@ -11,6 +11,9 @@ use openai_agents_rs::{group::AgentGroupBuilder, runner::RunConfig, Agent, Runne
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize tracing
+    tracing_subscriber::fmt::init();
+
     let researcher = Agent::simple(
         "Researcher",
         "Use the 'search' tool to find facts when asked.",

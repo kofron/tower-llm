@@ -2,7 +2,6 @@
 
 use openai_agents_rs::{layers, Agent, FunctionTool, Tool};
 use std::sync::Arc;
-use std::time::Duration;
 
 #[test]
 fn test_tool_with_layers() {
@@ -21,8 +20,7 @@ fn test_tool_with_layers() {
 #[test]
 fn test_tool_with_custom_name() {
     // Create a tool with a custom name
-    let tool = FunctionTool::simple("original", "A tool", |s: String| s)
-        .with_name("custom_name");
+    let tool = FunctionTool::simple("original", "A tool", |s: String| s).with_name("custom_name");
 
     assert_eq!(tool.name(), "custom_name");
 }
@@ -36,7 +34,7 @@ fn test_layered_tool_preserves_interface() {
     // LayeredTool implements Tool trait
     assert_eq!(layered.name(), "test");
     assert_eq!(layered.description(), "Test tool");
-    
+
     // Can be used as Arc<dyn Tool>
     let _tool_arc: Arc<dyn Tool> = Arc::new(layered);
 }
@@ -54,7 +52,7 @@ fn test_agent_with_layered_tools() {
     // Create tools with their own layers
     let tool1 = FunctionTool::simple("tool1", "First tool", |s: String| s)
         .layer(layers::boxed_timeout_secs(5));
-    
+
     let tool2 = FunctionTool::simple("tool2", "Second tool", |s: String| s.to_uppercase())
         .layer(layers::boxed_retry_times(3));
 
@@ -75,7 +73,7 @@ fn test_clean_separation_of_concerns() {
         "database".to_string(),
         "Database operations".to_string(),
         serde_json::json!({"type": "object"}),
-        |args| Ok(serde_json::json!({"result": "success"})),
+        |_args| Ok(serde_json::json!({"result": "success"})),
     )
     .with_name("user_db")
     .layer(layers::boxed_timeout_secs(30))

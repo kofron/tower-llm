@@ -1,9 +1,7 @@
-//! # Example: RPN Calculator with Contextual Handler
+//! # Example: RPN Calculator with Stateful Tool
 //!
-//! This example demonstrates using a contextual handler to maintain an
-//! execution stack for a Reverse Polish Notation (RPN) calculator. The
-//! tool simply echoes requested operations, while the handler updates a
-//! per-run stack and rewrites tool outputs to include the new stack state.
+//! This example demonstrates a Reverse Polish Notation (RPN) calculator
+//! implemented as a stateful tool that maintains its own stack.
 //!
 //! To run this example:
 //!
@@ -15,126 +13,232 @@
 //! Expected: The agent should be able to compute the RPN expression and return the result.
 //! The answer should be 16.
 
-use openai_agents_rs::{
-    runner::RunConfig, Agent, ContextStep, ContextualAgent, FunctionTool, RunResultWithContext,
-    Runner, ToolContext,
-};
-use serde_json::Value;
-use std::sync::Arc;
+use openai_agents_rs::{runner::RunConfig, Agent, FunctionTool, Runner};
+use serde_json::{json, Value};
+use std::sync::{Arc, Mutex};
 
-#[derive(Clone, Debug, Default)]
-struct StackCtx {
-    stack: Vec<f64>,
+/// Stateful RPN calculator that maintains a stack
+struct RpnCalculator {
+    stack: Arc<Mutex<Vec<f64>>>,
 }
 
-struct RpnHandler;
-
-impl ToolContext<StackCtx> for RpnHandler {
-    fn on_tool_output(
-        &self,
-        mut ctx: StackCtx,
-        tool_name: &str,
-        _arguments: &Value,
-        result: Result<Value, String>,
-    ) -> openai_agents_rs::Result<ContextStep<StackCtx>> {
-        let _ = tool_name; // single tool in this example
-
-        if let Ok(Value::Object(map)) = result {
-            let op = map.get("op").and_then(|v| v.as_str()).unwrap_or("");
-
-            match op {
-                "push" => {
-                    if let Some(v) = map.get("value").and_then(|v| v.as_f64()) {
-                        ctx.stack.push(v);
-                    }
-                }
-                "add" => {
-                    if let (Some(b), Some(a)) = (ctx.stack.pop(), ctx.stack.pop()) {
-                        ctx.stack.push(a + b);
-                    }
-                }
-                "sub" => {
-                    if let (Some(b), Some(a)) = (ctx.stack.pop(), ctx.stack.pop()) {
-                        ctx.stack.push(a - b);
-                    }
-                }
-                "mul" => {
-                    if let (Some(b), Some(a)) = (ctx.stack.pop(), ctx.stack.pop()) {
-                        ctx.stack.push(a * b);
-                    }
-                }
-                "div" => {
-                    if let (Some(b), Some(a)) = (ctx.stack.pop(), ctx.stack.pop()) {
-                        if b != 0.0 {
-                            ctx.stack.push(a / b);
-                        } else {
-                            // leave stack unchanged on divide-by-zero
-                        }
-                    }
-                }
-                _ => {}
-            }
+impl RpnCalculator {
+    fn new() -> Self {
+        Self {
+            stack: Arc::new(Mutex::new(Vec::new())),
         }
-
-        let rewritten = serde_json::json!({
-            "stack": ctx.stack,
-            "top": ctx.stack.last().cloned(),
-        });
-        Ok(ContextStep::rewrite(ctx, rewritten))
     }
-}
 
-fn rpn_tool() -> Arc<FunctionTool> {
-    let schema = serde_json::json!({
-        "type": "object",
-        "properties": {
-            "op": { "type": "string", "enum": ["push", "add", "sub", "mul", "div"], "description": "RPN operation" },
-            "value": { "type": ["number", "null"], "description": "Value to push when op == 'push'" }
-        },
-        "required": ["op"]
-    });
+    fn execute(
+        &self,
+        op: &str,
+        value: Option<f64>,
+    ) -> Result<Value, openai_agents_rs::error::AgentsError> {
+        let mut stack = self.stack.lock().unwrap();
 
-    // The tool echoes the requested operation. The handler maintains the stack.
-    let func = |args: Value| -> openai_agents_rs::Result<Value> { Ok(args) };
-    Arc::new(FunctionTool::new(
-        "rpn".to_string(),
-        "Apply an RPN operation. For push, include 'value'.".to_string(),
-        schema,
-        func,
-    ))
-}
+        match op {
+            "push" => {
+                if let Some(v) = value {
+                    stack.push(v);
+                    Ok(json!({
+                        "operation": "push",
+                        "value": v,
+                        "stack": stack.clone(),
+                        "top": stack.last().cloned()
+                    }))
+                } else {
+                    Err(openai_agents_rs::error::AgentsError::Other(
+                        "Push operation requires a value".to_string(),
+                    ))
+                }
+            }
+            "add" => {
+                if stack.len() < 2 {
+                    Err(openai_agents_rs::error::AgentsError::Other(
+                        "Add requires at least 2 values on stack".to_string(),
+                    ))
+                } else {
+                    let b = stack.pop().unwrap();
+                    let a = stack.pop().unwrap();
+                    let result = a + b;
+                    stack.push(result);
+                    Ok(json!({
+                        "operation": "add",
+                        "operands": [a, b],
+                        "result": result,
+                        "stack": stack.clone(),
+                        "top": result
+                    }))
+                }
+            }
+            "sub" => {
+                if stack.len() < 2 {
+                    Err(openai_agents_rs::error::AgentsError::Other(
+                        "Subtract requires at least 2 values on stack".to_string(),
+                    ))
+                } else {
+                    let b = stack.pop().unwrap();
+                    let a = stack.pop().unwrap();
+                    let result = a - b;
+                    stack.push(result);
+                    Ok(json!({
+                        "operation": "sub",
+                        "operands": [a, b],
+                        "result": result,
+                        "stack": stack.clone(),
+                        "top": result
+                    }))
+                }
+            }
+            "mul" => {
+                if stack.len() < 2 {
+                    Err(openai_agents_rs::error::AgentsError::Other(
+                        "Multiply requires at least 2 values on stack".to_string(),
+                    ))
+                } else {
+                    let b = stack.pop().unwrap();
+                    let a = stack.pop().unwrap();
+                    let result = a * b;
+                    stack.push(result);
+                    Ok(json!({
+                        "operation": "mul",
+                        "operands": [a, b],
+                        "result": result,
+                        "stack": stack.clone(),
+                        "top": result
+                    }))
+                }
+            }
+            "div" => {
+                if stack.len() < 2 {
+                    Err(openai_agents_rs::error::AgentsError::Other(
+                        "Divide requires at least 2 values on stack".to_string(),
+                    ))
+                } else {
+                    let b = stack.pop().unwrap();
+                    let a = stack.pop().unwrap();
+                    if b == 0.0 {
+                        // Put values back on divide by zero
+                        stack.push(a);
+                        stack.push(b);
+                        Err(openai_agents_rs::error::AgentsError::Other(
+                            "Division by zero".to_string(),
+                        ))
+                    } else {
+                        let result = a / b;
+                        stack.push(result);
+                        Ok(json!({
+                            "operation": "div",
+                            "operands": [a, b],
+                            "result": result,
+                            "stack": stack.clone(),
+                            "top": result
+                        }))
+                    }
+                }
+            }
+            "peek" => Ok(json!({
+                "operation": "peek",
+                "stack": stack.clone(),
+                "top": stack.last().cloned(),
+                "size": stack.len()
+            })),
+            "clear" => {
+                stack.clear();
+                Ok(json!({
+                    "operation": "clear",
+                    "stack": stack.clone(),
+                    "message": "Stack cleared"
+                }))
+            }
+            _ => Err(openai_agents_rs::error::AgentsError::Other(format!(
+                "Unknown operation: {}",
+                op
+            ))),
+        }
+    }
 
-fn build_agent() -> ContextualAgent<StackCtx> {
-    let instructions = r#"
-You are an RPN calculator assistant. Use the rpn tool to manipulate a stack:
-- To push a number: {"op": "push", "value": <number>}
-- To add/sub/mul/div: {"op": "add"} or {"op": "sub"} etc.
-After finishing the requested computation, provide a concise explanation of the result.
-"#;
+    fn create_tool(self: Arc<Self>) -> Arc<FunctionTool> {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "op": {
+                    "type": "string",
+                    "enum": ["push", "add", "sub", "mul", "div", "peek", "clear"],
+                    "description": "RPN operation to perform"
+                },
+                "value": {
+                    "type": ["number", "null"],
+                    "description": "Value to push when op == 'push'"
+                }
+            },
+            "required": ["op"]
+        });
 
-    Agent::simple("RPNCalc", instructions)
-        .with_tool(rpn_tool())
-        .with_context_factory_typed(StackCtx::default, RpnHandler)
+        let calculator = self.clone();
+        let func = move |args: Value| -> Result<Value, openai_agents_rs::error::AgentsError> {
+            let op = args.get("op").and_then(|v| v.as_str()).unwrap_or("peek");
+            let value = args.get("value").and_then(|v| v.as_f64());
+
+            calculator.execute(op, value)
+        };
+
+        Arc::new(FunctionTool::new(
+            "rpn".to_string(),
+            "RPN calculator operations: push values onto stack, perform arithmetic operations (add, sub, mul, div), peek at stack state, or clear stack".to_string(),
+            schema,
+            func,
+        ))
+    }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("Running RPN calculator with contextual handler...\n");
+    // Create the RPN calculator
+    let calculator = Arc::new(RpnCalculator::new());
 
-    let agent = build_agent();
-    let RunResultWithContext { result, context } = Runner::run_with_context(
-        agent,
-        // Example: (3 5 + 2 *) -> (3 + 5) * 2 = 16
-        "Compute the RPN expression: 3 5 + 2 *",
-        RunConfig::default(),
+    // Create the tool
+    let rpn_tool = calculator.clone().create_tool();
+
+    // Create the agent with the RPN tool
+    let agent = Agent::simple(
+        "RpnCalculator",
+        "You are an RPN calculator assistant. Help the user compute expressions using Reverse Polish Notation.
+
+RPN works by pushing values onto a stack, then performing operations that pop operands and push results.
+For example, to compute (3 + 5) * 2:
+1. Push 3
+2. Push 5  
+3. Add (pops 3 and 5, pushes 8)
+4. Push 2
+5. Multiply (pops 8 and 2, pushes 16)
+
+Always peek at the stack after operations to show the current state."
     )
-    .await?;
+    .with_tool(rpn_tool);
+
+    // Test the RPN calculator
+    let input = "Calculate (3 + 5) * 2 using RPN. Show me each step.";
+
+    println!("🧮 RPN Calculator Example");
+    println!("Input: {}\n", input);
+
+    let config = RunConfig::default();
+    let result = Runner::run(agent, input, config).await?;
 
     if result.is_success() {
-        println!("Final Response:\n{}\n", result.final_output);
-        println!("Final Stack: {:?}", context.stack);
+        println!("\n✅ Calculation completed!");
+        println!("Final output: {}", result.final_output);
+
+        // Show the final stack state
+        println!("\n📊 Final stack state:");
+        let final_state = calculator.execute("peek", None)?;
+        println!("{}", serde_json::to_string_pretty(&final_state)?);
     } else {
-        println!("Error: {:?}", result.error());
+        println!("\n❌ Calculation failed");
+        if let Some(error) = result.error {
+            println!("Error: {}", error);
+        }
     }
 
     Ok(())

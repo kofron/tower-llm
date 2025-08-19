@@ -1,3 +1,4 @@
+use openai_agents_rs::env::Env;
 use openai_agents_rs::service::HasApproval;
 use openai_agents_rs::service::ToolResponse;
 use openai_agents_rs::{layers::ApprovalLayer, service::BaseToolService, service::ToolRequest};
@@ -8,6 +9,13 @@ use tower::{Layer, ServiceExt};
 // Advanced: typed Env implementing HasApproval used by ApprovalLayer
 #[derive(Clone, Default)]
 struct EnvAllowSafe;
+
+impl Env for EnvAllowSafe {
+    fn capability<T: std::any::Any + Send + Sync>(&self) -> Option<Arc<T>> {
+        None
+    }
+}
+
 impl HasApproval for EnvAllowSafe {
     fn approve(&self, _agent: &str, tool: &str, _args: &serde_json::Value) -> bool {
         tool != "danger"

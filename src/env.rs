@@ -87,7 +87,7 @@ pub struct CapabilityEnv {
 impl Env for CapabilityEnv {
     fn capability<T: Any + Send + Sync>(&self) -> Option<Arc<T>> {
         for cap in self.capabilities.iter() {
-            if let Some(typed) = cap.clone().downcast::<T>().ok() {
+            if let Ok(typed) = cap.clone().downcast::<T>() {
                 return Some(typed);
             }
         }
