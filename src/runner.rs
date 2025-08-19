@@ -1,35 +1,9 @@
-//! # Agent Execution Runner
+//! # Runner (orientation)
 //!
-//! The [`Runner`] is the engine that drives the agent's execution. It orchestrates
-//! the entire lifecycle of an agent run, from receiving user input to generating
-//! a final response. The runner implements the core logic for the agent loop,
-//! handling tool calls, handoffs, and guardrails.
-//!
-//! ## The Agent Loop
-//!
-//! The runner's primary responsibility is to manage the interaction loop with the
-//! Language Model (LLM). This loop consists of the following steps:
-//!
-//! 1.  **Input Processing**: The user's input is processed, and any configured
-//!     [`InputGuardrail`]s are applied to validate the input.
-//! 2.  **Message History**: The conversation history is loaded from the
-//!     [`Session`], if one is provided.
-//! 3.  **LLM Interaction**: The agent's system message, along with the message
-//!     history, is sent to the LLM to get a response.
-//! 4.  **Response Handling**: The LLM's response is processed. If it contains
-//!     tool calls, the corresponding tools are executed. If it's a handoff,
-//!     control is transferred to another agent.
-//! 5.  **Output Validation**: Any configured [`OutputGuardrail`]s are applied to
-//!     validate the agent's final output.
-//! 6.  **State Management**: The new messages are saved to the session to
-//!     maintain the conversation's state.
-//!
-//! The loop continues until the agent produces a final response, a tool indicates
-//! the run is complete, or the maximum number of turns is reached.
-//!
-//! [`InputGuardrail`]: crate::guardrail::InputGuardrail
-//! [`OutputGuardrail`]: crate::guardrail::OutputGuardrail
-//! [`Session`]: crate::memory::Session
+//! The `Runner` coordinates an agent run: it interacts with the model, routes
+//! tool-calls through the Tower stack (Agent → Run → Tool → BaseTool), and
+//! maintains ordering and state across turns and handoffs. Policy layers and
+//! tool execution are composed in `service.rs`; this module focuses on orchestration.
 
 use std::any::Any;
 use std::sync::{Arc, Mutex};
@@ -1027,8 +1001,27 @@ mod tests {
     async fn test_simple_run() {
         let agent = Agent::simple("TestAgent", "You are a test agent");
 
-        let provider =
-            Arc::new(MockProvider::new("test-model").with_message("Hello! How can I help you?"));
+        struct MockP;
+        #[async_trait::async_trait]
+        impl crate::model::ModelProvider for MockP {
+            async fn complete(
+                &self,
+                _messages: Vec<crate::items::Message>,
+                _tools: Vec<std::sync::Arc<dyn crate::tool::Tool>>,
+                _temperature: Option<f32>,
+                _max_tokens: Option<u32>,
+            ) -> crate::error::Result<(crate::items::ModelResponse, crate::usage::Usage)>
+            {
+                Ok((
+                    crate::items::ModelResponse::new_message("Hello! How can I help you?"),
+                    crate::usage::Usage::new(0, 0),
+                ))
+            }
+            fn model_name(&self) -> &str {
+                "test-model"
+            }
+        }
+        let provider = Arc::new(MockP);
 
         let config = RunConfig {
             model_provider: Some(provider),

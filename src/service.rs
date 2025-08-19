@@ -897,7 +897,7 @@ where
 mod tests {
     use super::*;
     use crate::context::{ContextStep, ToolContext, TypedHandler};
-    use crate::model::MockProvider;
+    // use crate::model::MockProvider; // replaced with local mock in tests below
     use crate::tool::FunctionTool;
     use std::sync::Arc;
     use tower::ServiceExt;
@@ -1227,7 +1227,27 @@ mod tests {
 
     #[tokio::test]
     async fn model_service_pass_through() {
-        let provider = std::sync::Arc::new(MockProvider::new("m").with_message("ok"));
+        struct MP;
+        #[async_trait::async_trait]
+        impl crate::model::ModelProvider for MP {
+            async fn complete(
+                &self,
+                _messages: Vec<crate::items::Message>,
+                _tools: Vec<std::sync::Arc<dyn crate::tool::Tool>>,
+                _temperature: Option<f32>,
+                _max_tokens: Option<u32>,
+            ) -> crate::error::Result<(crate::items::ModelResponse, crate::usage::Usage)>
+            {
+                Ok((
+                    crate::items::ModelResponse::new_message("ok"),
+                    crate::usage::Usage::new(0, 0),
+                ))
+            }
+            fn model_name(&self) -> &str {
+                "m"
+            }
+        }
+        let provider = std::sync::Arc::new(MP);
         let mut svc = super::ModelService::new(provider);
         let req = super::ModelRequest {
             messages: vec![crate::items::Message::user("hi")],

@@ -1,34 +1,9 @@
-//! # Agent Definition and Configuration
+//! # Agent (orientation)
 //!
-//! At the heart of the framework is the [`Agent`], the fundamental building block
-//! that represents an entity capable of processing input and generating responses.
-//! Each agent is configured with a set of instructions, a specific [`model`], and
-//! a collection of [`tools`] and [`handoffs`] that define its capabilities.
-//!
-//! Agents are designed to be composable, allowing you to build sophisticated,
-//! multi-agent workflows where each agent has a specialized role.
-//!
-//! The [`AgentConfig`] struct holds all the configuration details for an agent,
-//! making it easy to define and reuse agent specifications.
-//!
-//! ## Example: Creating a Simple Agent
-//!
-//! ```rust
-//! use openai_agents_rs::Agent;
-//!
-//! // Create an agent with a name and instructions.
-//! let haiku_agent = Agent::simple(
-//!     "HaikuBot",
-//!     "You are a helpful assistant that writes haikus.",
-//! );
-//!
-//! assert_eq!(haiku_agent.name(), "HaikuBot");
-//! assert!(haiku_agent.instructions().contains("writes haikus"));
-//! ```
-//!
-//! [`model`]: crate::model
-//! [`tools`]: crate::tool
-//! [`handoffs`]: crate::handoff
+//! An `Agent` represents a configured participant in a workflow: a name,
+//! instructions, tools, and optional handoffs. Agents are composable and can be
+//! grouped; policy layers and context shape tool execution at run/agent/tool
+//! scopes. This module defines the `Agent` API and its configuration surface.
 
 use std::any::Any;
 use std::sync::Arc;
@@ -43,13 +18,8 @@ use std::collections::HashMap;
 
 /// Defines the complete configuration for an [`Agent`].
 ///
-/// This struct holds all the parameters that control an agent's behavior,
-/// including its identity, instructions, tools, and handoff targets. It also
-/// configures the underlying LLM settings, such as the model, temperature,
-/// and maximum tokens.
-///
-/// `AgentConfig` provides a [`Default`] implementation, which can be used
-/// as a baseline for creating custom configurations.
+/// Holds identity, instructions, tools, handoffs, model settings, and optional
+/// context/policy hooks. Built for composition and reuse.
 #[derive(Clone)]
 pub struct AgentConfig {
     /// The name of the agent, used for identification and in logs.

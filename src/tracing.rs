@@ -1,65 +1,9 @@
-//! # Tracing System for Agent Execution
+//! # Tracing (orientation)
 //!
-//! This module provides a structured tracing system for monitoring and debugging
-//! agent execution. It is built on the concepts of traces and spans, which are
-//! common in distributed tracing systems. This allows for detailed observability
-//! into the agent's behavior, including LLM interactions, tool calls, and
-//! guardrail evaluations.
-//!
-//! ## Core Concepts
-//!
-//! - **Trace**: A trace represents the entire lifecycle of a single agent run,
-//!   from the initial user input to the final response. Each trace is identified
-//!   by a unique `TraceId`.
-//! - **Span**: A span represents a single unit of work within a trace, such as
-//!   an LLM call or a tool execution. Spans can be nested to create a causal
-//!   chain of events. Each span has a unique `SpanId`.
-//!
-//! ## Tracing Components
-//!
-//! - **[`TracingContext`]**: Manages the state of a trace, including the creation
-//!   and completion of spans.
-//! - **[`Span`]**: The data structure that holds all the information about a
-//!   single span, including its type, start and end times, and any associated
-//!   errors or metadata. The `SpanType` enum defines the different kinds of
-//!   operations that can be traced.
-//! - **Span Builders**: Helper structs like [`AgentSpan`], [`ToolSpan`], and
-//!   [`GenerationSpan`] provide a convenient, RAII-style interface for creating
-//!   and managing spans.
-//! - **[`TraceExporter`]**: A trait for exporting completed traces to external
-//!   systems, such as logging platforms or observability tools. A simple
-//!   [`ConsoleExporter`] is provided for debugging.
-//!
-//! ### Example: Manually Creating Spans
-//!
-//! ```rust
-//! use openai_agents_rs::tracing::{TracingContext, SpanType};
-//!
-//! let mut context = TracingContext::new();
-//!
-//! // Start the parent span.
-//! let agent_span_id = context.start_span(SpanType::Agent {
-//!     agent_name: "MyAgent".to_string(),
-//!     instructions: "Be helpful.".to_string(),
-//! });
-//!
-//! // Start a nested span for a tool call.
-//! let tool_span_id = context.start_span(SpanType::Tool {
-//!     tool_name: "get_weather".to_string(),
-//!     arguments: serde_json::json!({"location": "San Francisco"}),
-//! });
-//!
-//! // Complete the spans.
-//! context.end_span(&tool_span_id);
-//! context.end_span(&agent_span_id);
-//!
-//! let spans = context.spans();
-//! assert_eq!(spans.len(), 2);
-//! assert_eq!(spans[1].parent_id, Some(agent_span_id));
-//! ```
-//! Tracing system for agent execution using the `tracing` crate
-//!
-//! Provides structured logging and observability for agent runs.
+//! Minimal, in-process tracing primitives for agent runs. Traces are composed of
+//! spans (agent, generation, tool, guardrail, handoff). Span builders
+//! (`AgentSpan`, `GenerationSpan`, `ToolSpan`) provide an RAII-style interface.
+//! Exporters can ship traces elsewhere via `TraceExporter`.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

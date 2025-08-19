@@ -1,44 +1,8 @@
-//! # Core Data Structures for Agent Communication
+//! # Items (orientation)
 //!
-//! This module defines the fundamental data structures that represent the
-//! various components of an agent's conversation and execution trace. These
-//! "items" are used to construct the conversation history sent to the LLM,
-//! to represent tool calls and their outputs, and to log the agent's actions.
-//!
-//! ## Key Data Structures
-//!
-//! - **[`Role`]**: An enum representing the speaker in a conversation (e.g.,
-//!   `System`, `User`, `Assistant`).
-//! - **[`Message`]**: The primary unit of conversation, containing the content
-//!   of a message and the role of the speaker.
-//! - **[`ToolCall`]**: Represents a request from the agent to execute a tool,
-//!   including the tool's name and arguments.
-//! - **[`ModelResponse`]**: Encapsulates the raw response from the LLM, which
-//!   can include both text content and tool calls.
-//! - **[`RunItem`]**: A comprehensive enum that represents a single step in the
-//!   agent's execution trace. It can be a message, a tool call, a tool output,
-//!   or a handoff.
-//!
-//! These structures are designed to be serializable, allowing them to be easily
-//! stored for session management and logging.
-//!
-//! ### Example: Creating Different Message Types
-//!
-//! ```rust
-//! use openai_agents_rs::items::{Message, Role};
-//!
-//! let system_message = Message::system("You are a helpful assistant.");
-//! assert_eq!(system_message.role, Role::System);
-//!
-//! let user_message = Message::user("What is the weather like today?");
-//! assert_eq!(user_message.role, Role::User);
-//!
-//! let assistant_message = Message::assistant("I can help with that.");
-//! assert_eq!(assistant_message.role, Role::Assistant);
-//! ```
-//! Items representing messages, tool calls, and model responses
-//!
-//! This module defines the core data structures for agent communication.
+//! Core data structures for agent communication and execution traces: `Message`,
+//! `ToolCall`, `ModelResponse`, and `RunItem`. These types are shared across the
+//! runner, model providers, and session storage.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
