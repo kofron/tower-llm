@@ -196,6 +196,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("  Time taken: {:.2?}", elapsed);
             println!("  Tool calls made: {}", tool_calls);
             println!("  Total tokens: {}", result.usage.total.total_tokens);
+            println!(
+                "  Note: Tool replies preserve provider order even when executed in parallel."
+            );
 
             // Estimate the time that would have been saved by running the tools
             // in parallel compared to running them sequentially.

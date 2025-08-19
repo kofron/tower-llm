@@ -37,7 +37,9 @@ use crate::context::{ContextualAgent, ToolContext, ToolContextSpec, TypedHandler
 use crate::guardrail::{InputGuardrail, OutputGuardrail};
 use crate::handoff::Handoff;
 use crate::items::Message;
+use crate::service::ErasedToolLayer;
 use crate::tool::Tool;
+use std::collections::HashMap;
 
 /// Defines the complete configuration for an [`Agent`].
 ///
@@ -48,7 +50,7 @@ use crate::tool::Tool;
 ///
 /// `AgentConfig` provides a [`Default`] implementation, which can be used
 /// as a baseline for creating custom configurations.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AgentConfig {
     /// The name of the agent, used for identification and in logs.
     pub name: String,
@@ -102,6 +104,12 @@ pub struct AgentConfig {
 
     /// Optional contextual handler for per-run tool output processing.
     pub tool_context: Option<ToolContextSpec>,
+
+    /// Optional dynamic agent-scope policy layers applied around the tool stack for this agent.
+    pub agent_layers: Vec<Arc<dyn ErasedToolLayer>>,
+
+    /// Optional dynamic tool-scope policy layers keyed by tool name.
+    pub tool_layers: HashMap<String, Vec<Arc<dyn ErasedToolLayer>>>,
 }
 
 impl Default for AgentConfig {
@@ -120,6 +128,8 @@ impl Default for AgentConfig {
             max_tokens: None,
             output_schema: None,
             tool_context: None,
+            agent_layers: Vec::new(),
+            tool_layers: HashMap::new(),
         }
     }
 }
@@ -211,6 +221,22 @@ impl Agent {
     /// the agent can use to interact with the outside world.
     pub fn with_tool(mut self, tool: Arc<dyn Tool>) -> Self {
         self.config.tools.push(tool);
+        self
+    }
+
+    /// Attach dynamic agent-scope policy layers.
+    pub fn with_agent_layers(mut self, layers: Vec<Arc<dyn ErasedToolLayer>>) -> Self {
+        self.config.agent_layers = layers;
+        self
+    }
+
+    /// Attach dynamic tool-scope policy layers by tool name.
+    pub fn with_tool_layers(
+        mut self,
+        tool_name: impl Into<String>,
+        layers: Vec<Arc<dyn ErasedToolLayer>>,
+    ) -> Self {
+        self.config.tool_layers.insert(tool_name.into(), layers);
         self
     }
 

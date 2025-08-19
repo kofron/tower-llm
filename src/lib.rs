@@ -80,6 +80,7 @@ pub mod model;
 pub mod result;
 pub mod retry;
 pub mod runner;
+pub mod service;
 pub mod sqlite_session;
 pub mod tool;
 pub mod tracing;
@@ -94,10 +95,23 @@ pub use group::{AgentGroup, AgentGroupBuilder};
 pub use guardrail::{InputGuardrail, OutputGuardrail};
 pub use handoff::Handoff;
 pub use memory::Session;
+pub use openai_agents_derive::{tool_args, tool_output};
 pub use result::{RunResult, RunResultWithContext, StreamingRunResult};
 pub use runner::Runner;
 pub use sqlite_session::SqliteSession;
+pub use tool::TypedFunctionTool;
 pub use tool::{FunctionTool, Tool};
+
+// Public layer exports for DX (scope-agnostic policy layers and context layers)
+pub mod layers {
+    pub use crate::service::{
+        boxed_approval_with, boxed_input_schema_lenient, boxed_input_schema_strict,
+        boxed_retry_times, boxed_timeout_secs, AgentContextLayer, ApprovalLayer,
+        BoxedApprovalLayer, BoxedInputSchemaLayer, BoxedRetryLayer, BoxedTimeoutLayer,
+        ErasedToolLayer, InputSchemaLayer, RetryLayer, RunContextLayer, TimeoutLayer,
+    };
+}
+pub use service::DefaultEnv;
 
 #[cfg(test)]
 mod tests {

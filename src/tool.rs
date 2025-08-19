@@ -74,18 +74,18 @@
 //!
 //! ## Tool Call Serialization
 //!
-//! When communicating with an LLM, tool calls are serialized to JSON. The
-//! [`ToolCall`] struct represents this communication. It contains the tool's
-//! name, arguments, and a unique ID.
+//! When communicating with an LLM, tool calls are serialized to JSON. Use
+//! [`items::ToolCall`](crate::items::ToolCall) for representing calls (name,
+//! arguments, id).
 //!
 //! ```rust
-//! use openai_agents_rs::tool::ToolCall;
+//! use openai_agents_rs::items::ToolCall;
 //! use serde_json::json;
 //!
 //! let tool_call = ToolCall {
+//!     id: "call_123".to_string(),
 //!     name: "test_tool".to_string(),
 //!     arguments: json!({"key": "value"}),
-//!     id: "call_123".to_string(),
 //! };
 //!
 //! let serialized = serde_json::to_string(&tool_call).unwrap();
@@ -177,9 +177,11 @@
 //! implementations of tool execution logic.
 
 use async_trait::async_trait;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fmt::Debug;
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 use crate::error::Result;
@@ -241,22 +243,7 @@ impl ToolResult {
     }
 }
 
-/// Represents a request from the agent to call a specific tool.
-///
-/// When the LLM determines that a tool should be used, it generates a `ToolCall`
-/// with the name of the tool and the arguments to be passed to it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolCall {
-    /// The name of the tool to be invoked. This must match the name of a
-    /// registered [`Tool`].
-    pub name: String,
-    /// The arguments to pass to the tool, provided as a [`serde_json::Value`].
-    /// The structure of the arguments must match the tool's parameter schema.
-    pub arguments: Value,
-    /// A unique identifier for this specific tool call, used to associate the
-    /// call with its result.
-    pub id: String,
-}
+// NOTE: ToolCall definition removed; use crate::items::ToolCall
 
 /// Defines the interface for all tools that can be used by an agent.
 ///
@@ -414,8 +401,128 @@ impl Tool for FunctionTool {
     }
 
     async fn execute(&self, arguments: Value) -> Result<ToolResult> {
-        match (self.function)(arguments) {
-            Ok(output) => Ok(ToolResult::success(output)),
+        let func = self.function.clone();
+        let args = arguments;
+        let join = tokio::task::spawn_blocking(move || (func)(args)).await;
+        match join {
+            Ok(res) => match res {
+                Ok(output) => Ok(ToolResult::success(output)),
+                Err(e) => Ok(ToolResult::error(e.to_string())),
+            },
+            Err(e) => Ok(ToolResult::error(format!(
+                "tool panicked or was cancelled: {}",
+                e
+            ))),
+        }
+    }
+}
+
+/// A typed function tool that (de)serializes inputs/outputs via serde.
+///
+/// This wrapper allows you to write a strongly-typed tool function and provide
+/// an explicit JSON schema for its arguments. Output is serialized back to
+/// `serde_json::Value`.
+pub struct TypedFunctionTool<I, O, F>
+where
+    I: serde::de::DeserializeOwned + Send + 'static,
+    O: serde::Serialize + Send + 'static,
+    F: Fn(I) -> crate::error::Result<O> + Send + Sync + 'static,
+{
+    name: String,
+    description: String,
+    schema: Value,
+    function: Arc<F>,
+    _in: PhantomData<I>,
+    _out: PhantomData<O>,
+}
+
+impl<I, O, F> std::fmt::Debug for TypedFunctionTool<I, O, F>
+where
+    I: serde::de::DeserializeOwned + Send + 'static,
+    O: serde::Serialize + Send + 'static,
+    F: Fn(I) -> crate::error::Result<O> + Send + Sync + 'static,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TypedFunctionTool")
+            .field("name", &self.name)
+            .field("description", &self.description)
+            .field("schema", &self.schema)
+            .finish()
+    }
+}
+
+impl<I, O, F> TypedFunctionTool<I, O, F>
+where
+    I: serde::de::DeserializeOwned + Send + Sync + 'static,
+    O: serde::Serialize + Send + Sync + 'static,
+    F: Fn(I) -> crate::error::Result<O> + Send + Sync + 'static,
+{
+    /// Create a new typed tool with an explicit JSON schema for the input type.
+    pub fn new(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        schema: Value,
+        f: F,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            schema,
+            function: Arc::new(f),
+            _in: PhantomData,
+            _out: PhantomData,
+        }
+    }
+
+    /// Create a new typed tool with schema inferred from the input type `I`
+    /// using `schemars::JsonSchema`.
+    pub fn new_inferred(name: impl Into<String>, description: impl Into<String>, f: F) -> Self
+    where
+        I: JsonSchema,
+    {
+        let schema = schemars::schema_for!(I);
+        let schema_value = serde_json::to_value(schema.schema)
+            .unwrap_or_else(|_| serde_json::json!({"type":"object"}));
+        Self {
+            name: name.into(),
+            description: description.into(),
+            schema: schema_value,
+            function: Arc::new(f),
+            _in: PhantomData,
+            _out: PhantomData,
+        }
+    }
+}
+
+#[async_trait]
+impl<I, O, F> Tool for TypedFunctionTool<I, O, F>
+where
+    I: serde::de::DeserializeOwned + Send + Sync + 'static,
+    O: serde::Serialize + Send + Sync + 'static,
+    F: Fn(I) -> crate::error::Result<O> + Send + Sync + 'static,
+{
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn description(&self) -> &str {
+        &self.description
+    }
+    fn parameters_schema(&self) -> Value {
+        self.schema.clone()
+    }
+
+    async fn execute(&self, arguments: Value) -> Result<ToolResult> {
+        let parsed: I = match serde_json::from_value(arguments) {
+            Ok(v) => v,
+            Err(e) => {
+                return Ok(ToolResult::error(format!("invalid arguments: {}", e)));
+            }
+        };
+        match (self.function)(parsed) {
+            Ok(out) => match serde_json::to_value(out) {
+                Ok(val) => Ok(ToolResult::success(val)),
+                Err(e) => Ok(ToolResult::error(format!("serialization error: {}", e))),
+            },
             Err(e) => Ok(ToolResult::error(e.to_string())),
         }
     }
@@ -566,17 +673,91 @@ mod tests {
 
     #[test]
     fn test_tool_call_serialization() {
-        let tool_call = ToolCall {
+        let tool_call = crate::items::ToolCall {
+            id: "call_123".to_string(),
             name: "test_tool".to_string(),
             arguments: serde_json::json!({"key": "value"}),
-            id: "call_123".to_string(),
         };
 
         let serialized = serde_json::to_string(&tool_call).unwrap();
-        let deserialized: ToolCall = serde_json::from_str(&serialized).unwrap();
+        let deserialized: crate::items::ToolCall = serde_json::from_str(&serialized).unwrap();
 
         assert_eq!(tool_call.name, deserialized.name);
         assert_eq!(tool_call.arguments, deserialized.arguments);
         assert_eq!(tool_call.id, deserialized.id);
+    }
+
+    #[tokio::test]
+    async fn test_typed_function_tool() {
+        #[derive(Deserialize)]
+        struct AddArgs {
+            x: i32,
+            y: i32,
+        }
+        #[derive(Serialize)]
+        struct Sum {
+            sum: i32,
+        }
+
+        let schema = serde_json::json!({
+            "type":"object",
+            "properties":{ "x": {"type":"integer"}, "y": {"type":"integer"} },
+            "required":["x","y"]
+        });
+        let tool = TypedFunctionTool::new("add", "Adds two numbers", schema, |a: AddArgs| {
+            Ok(Sum { sum: a.x + a.y })
+        });
+        let args = serde_json::json!({"x": 2, "y": 5});
+        let result = tool.execute(args).await.unwrap();
+        assert!(result.error.is_none());
+        assert_eq!(result.output, serde_json::json!({"sum":7}));
+    }
+
+    #[tokio::test]
+    async fn test_typed_function_tool_inferred_schema() {
+        #[derive(Deserialize, JsonSchema)]
+        struct Args {
+            v: String,
+        }
+        #[derive(Serialize)]
+        struct Out {
+            len: usize,
+        }
+        let tool = TypedFunctionTool::<Args, Out, _>::new_inferred(
+            "len",
+            "Returns string length",
+            |a: Args| Ok(Out { len: a.v.len() }),
+        );
+        let args = serde_json::json!({"v":"abc"});
+        let res = tool.execute(args).await.unwrap();
+        assert!(res.error.is_none());
+        assert_eq!(res.output, serde_json::json!({"len":3}));
+        let schema = tool.parameters_schema();
+        assert!(schema.is_object());
+    }
+
+    #[tokio::test]
+    async fn test_tool_args_and_output_macros_compile_and_run() {
+        use crate::{tool_args, tool_output};
+        #[tool_args]
+        struct Args {
+            v: String,
+        }
+        #[tool_output]
+        struct Out {
+            len: usize,
+        }
+
+        let tool = TypedFunctionTool::<Args, Out, _>::new_inferred(
+            "len",
+            "Returns string length",
+            |a: Args| Ok(Out { len: a.v.len() }),
+        );
+        let args = serde_json::json!({"v":"abcd"});
+        let res = tool.execute(args).await.unwrap();
+        assert!(res.error.is_none());
+        assert_eq!(res.output, serde_json::json!({"len":4}));
+        let schema = tool.parameters_schema();
+        assert!(schema.is_object());
     }
 }
