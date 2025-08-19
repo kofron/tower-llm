@@ -59,6 +59,19 @@ Since the last applied wrapper is outermost, the current runtime order is Tool �
 
 This aligns with the migration plan’s “Layer Composition Model” and Tower’s outside-in wrapping semantics, ensuring global policies (run) can uniformly wrap agent- and tool-level behavior, as intended.
 
+### TODOs
+
+- Update `src/runner.rs` to apply layers in order: Tool → Agent → Run (applied inner-to-outer so runtime execution is Run → Agent → Tool → Base).
+- Update the runner module header comment to document the canonical order.
+- Add a dedicated test module (e.g., `tests/layer_ordering.rs`) with probe layers for run/agent/tool scopes that append to a shared log to capture call order.
+- Update any docs mentioning a different order (runner header, `TOWER_ARCHITECTURE.md`).
+
+### Acceptance criteria & tests
+
+- A test `test_cross_scope_layer_ordering` asserts the recorded call order is exactly: Run (enter) → Agent (enter) → Tool (enter) → Base → Tool (exit) → Agent (exit) → Run (exit).
+- A test `test_final_effect_precedence` sets a tool-scope layer and a run-scope layer to each produce `Effect::Final(_)` and asserts the run-scope finalization wins (outermost precedence).
+- Grep check: no remaining references to the older documented order in code comments or docs.
+
 ---
 
 ## 2) `BaseToolService` adapter remains (Phase 5 not completed)
@@ -116,6 +129,19 @@ pub fn build_tool_stack<E: crate::env::Env>(
 ### Why this better fits the design
 
 This fulfills Phase 5’s goal: “Tools are Tower Services, not wrapped by adapters,” simplifying the mental model and avoiding redundant indirection.
+
+### TODOs
+
+- Replace all usages of `BaseToolService` and `build_tool_stack` with the service-based tool path using `tool_service::IntoToolService` (or direct `Service` impls on tools).
+- Remove `BaseToolService` and `build_tool_stack` from `src/service.rs`.
+- Update runner execution to compose Tower layers on service tools directly.
+- Update examples (`examples/typed_env_approval.rs`, others) and tests to use the service-based path.
+
+### Acceptance criteria & tests
+
+- Grep checks: `BaseToolService` and `build_tool_stack` no longer exist; no references remain.
+- Integration test `test_runner_uses_service_tools` executes a tool through the runner and asserts expected output; this test imports no adapter types.
+- Examples compile and run using service tools with standard Tower middleware composition.
 
 ---
 
@@ -176,6 +202,19 @@ pub fn with_run_layers(
 
 It restores uniform, type-safe composition throughout the stack and removes dynamic/erased indirection that contradicts Tower’s patterns and the migration plan.
 
+### TODOs
+
+- Add fluent, typed `.layer<L>(...)` chaining APIs for `Agent` and `RunConfig` (returning typed wrappers mirroring Tower’s pattern).
+- Deprecate `with_agent_layers` and `with_run_layers` (doc deprecation + `#[deprecated]`), and migrate all call sites across examples/tests.
+- Remove `ErasedToolLayer` and all `boxed_*` helpers after migration; replace with typed layers used directly.
+- Update `LayeredTool` (see Section 8) or migrate off it to typed/service layering.
+
+### Acceptance criteria & tests
+
+- Grep checks: no occurrences of `with_agent_layers`, `with_run_layers`, `ErasedToolLayer`, or `boxed_timeout_secs`/`boxed_retry_times`/`boxed_input_schema_*` remain.
+- New tests: `test_agent_layer_chaining_compiles` and `test_runconfig_layer_chaining_compiles` compose two typed layers and assert both effects occur in expected order.
+- All examples compile using fluent `.layer(...)` APIs without vectors.
+
 ---
 
 ## 4) Context system remains in documentation (Phase 2 not completed)
@@ -219,6 +258,18 @@ pub struct RunResultWithContext<C> { ... }
 
 It eliminates mixed metaphors, clarifies the single layering model, and prevents users from adopting deprecated patterns.
 
+### TODOs
+
+- Remove all references to `ToolContext`, `with_context_factory`, and run-context APIs from `src/lib.rs` docs and `README.md`.
+- Remove or rewrite any examples that reference contexts; replace with stateful Tower layers.
+- Update or remove `RunResultWithContext` and associated docs; if retained for different semantics, provide up-to-date examples and tests.
+
+### Acceptance criteria & tests
+
+- Grep checks: no `ToolContext`, `with_context`, or `with_context_factory` references across the repo.
+- README and crate docs sections replaced with layer-based examples; `cargo doc` builds without broken references.
+- Any doctests or examples added for stateful layers compile and pass.
+
 ---
 
 ## 5) Approval capability duplication (`service::HasApproval` vs `env::Approval`)
@@ -260,6 +311,20 @@ pub trait Approval: Send + Sync { ... }
 
 It unifies capability provision via Env, making requirements explicit and type-safe as intended by Phase 4.
 
+### TODOs
+
+- Delete `service::HasApproval`.
+- Refactor `ApprovalLayer` to require `E: crate::env::Env` and use `req.env.capability::<dyn env::Approval>()` to decide.
+- Update examples (`examples/typed_env_approval.rs`) and tests to provide `env::Approval` via `EnvBuilder` or typed Env.
+- Decide deny-by-default vs allow-by-default when capability is absent; document behavior and add tests.
+
+### Acceptance criteria & tests
+
+- Grep checks: no references to `HasApproval` remain.
+- Test `approval_layer_denies_without_capability` uses an Env without `Approval` and asserts denial per chosen policy.
+- Test `approval_layer_allows_with_capability` provides an Env with `Approval` that approves and asserts success.
+- Example `typed_env_approval.rs` runs and demonstrates capability-driven approval.
+
 ---
 
 ## 6) Hard-coded default schema validation in Runner
@@ -292,6 +357,18 @@ BoxService::new(with_schema)
 ### Why this better fits the design
 
 It preserves the separation of concerns: tools configure tool policy; the runner orchestrates but does not silently alter tool behavior.
+
+### TODOs
+
+- Remove unconditional `InputSchemaLayer` insertion from the runner (`build_tool_stack`); migrate any remaining stack builder to not apply schema by default.
+- Provide explicit helpers to attach `InputSchemaLayer::{lenient,strict}` at tool/agent/run scopes as needed.
+- Optionally, define recommended defaults in tool constructors (e.g., `FunctionTool::default()` adds conservative layers) and document them clearly.
+
+### Acceptance criteria & tests
+
+- Test `schema_not_enforced_without_layer` constructs a tool whose schema would reject arguments under strict mode; without attaching schema layer, the call succeeds.
+- Test `schema_enforced_with_strict_layer` attaches strict `InputSchemaLayer` and asserts invalid args return an error.
+- Grep checks: runner code no longer injects schema layers implicitly.
 
 ---
 
@@ -334,6 +411,18 @@ let agent = Agent::simple("Writer", "Be helpful")
 
 It gives users a clear, single mental model and prevents reintroduction of deprecated, string-based patterns.
 
+### TODOs
+
+- Rewrite README to remove `with_*layers`, `with_tool_layers("name", ...)`, and all context content; replace with Tower `.layer(...)` examples and service-based tools.
+- Update all examples to use typed `.layer(...)` or Tower `ServiceBuilder` composition; remove string-based per-tool configuration.
+- Add an example that demonstrates typed Env capability consumption inside a custom layer.
+
+### Acceptance criteria & tests
+
+- Grep checks: no occurrences of `with_tool_layers`, `with_agent_layers`, `with_run_layers`, or `ToolContext` in README and examples.
+- Run `cargo run --example <name>` across all examples; each compiles and runs successfully with the new APIs.
+- README quick-start code compiles as a doctest (if enabled) or matches a real example.
+
 ---
 
 ## 8) `LayeredTool` carries erased layers and defers composition to Runner
@@ -372,6 +461,20 @@ pub fn layer(mut self, layer: Arc<dyn ErasedToolLayer>) -> Self {
 
 It eliminates dynamic indirection, restores typed composition, and keeps composition local to where the behavior is declared, improving clarity and safety.
 
+### TODOs
+
+- Decide final approach:
+  - Remove `LayeredTool` in favor of service-based layering; or
+  - Rework `LayeredTool` to build a typed service stack immediately and stop storing erased layers.
+- Migrate runner away from reading erased layers from tools; tools should expose already-layered services or typed layer builders.
+- Remove `ErasedToolLayer` and its boxed helpers if the service-based approach is chosen.
+
+### Acceptance criteria & tests
+
+- Grep checks: no references to `LayeredTool` storing `ErasedToolLayer` remain; either `LayeredTool` is removed or reworked to typed composition.
+- Test `tool_level_layer_applies_in_service_path` creates a tool with a tool-scope layer and verifies the layer’s effect when executed via runner.
+- No dynamic/erased layering is required for tool behavior.
+
 ---
 
 ## 9) Conflicting/duplicated architecture narratives
@@ -395,6 +498,19 @@ Different documents present conflicting orders and APIs (e.g., runner header vs 
 ### Why this better fits the design
 
 A single, consistent story reduces cognitive load and prevents future drift, reinforcing the Tower-first mental model.
+
+### TODOs
+
+- Update `TOWER_ARCHITECTURE.md` to state the canonical layer order and remove references to deprecated APIs.
+- Update `DESIGN.md` and `MIGRATION_GUIDE.md` to remove mentions of context handlers, string-coupled configuration, erased layers, and adapter paths.
+- Add a “Legacy APIs removed” section listing removed APIs and their replacements.
+- Add "Before vs After" snippets for: tool composition, agent/run layering, Env capabilities, and ordering.
+
+### Acceptance criteria & tests
+
+- Grep checks: no references to removed APIs (`with_*layers`, contexts, `ErasedToolLayer`, `BaseToolService`) across docs.
+- Documents are internally consistent regarding layer order and composition models.
+- Spot-check by a reviewer: following docs alone, a developer can implement a tool with layers and run it successfully.
 
 ---
 
@@ -420,6 +536,25 @@ Add tests that verify:
 ### Why this better fits the design
 
 It ensures the most important architectural invariants don’t regress and documents behavior through executable specs.
+
+### TODOs
+
+- Add the following tests:
+  - `test_cross_scope_layer_ordering`
+  - `test_final_effect_precedence`
+  - `test_runner_uses_service_tools`
+  - `test_agent_layer_chaining_compiles`
+  - `test_runconfig_layer_chaining_compiles`
+  - `approval_layer_denies_without_capability` and `approval_layer_allows_with_capability`
+  - `schema_not_enforced_without_layer` and `schema_enforced_with_strict_layer`
+  - `tool_level_layer_applies_in_service_path`
+- Remove or rewrite tests that depend on vector-based erased layers or `BaseToolService`.
+
+### Acceptance criteria & tests
+
+- All new tests compile and pass in CI.
+- No tests import or reference removed APIs.
+- Coverage (conceptual): cross-scope ordering, capability usage, service tools in runner, schema behavior, fluent agent/run layering.
 
 ---
 
