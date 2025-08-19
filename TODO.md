@@ -13,7 +13,7 @@ Principles
 Decisions (locked-in)
 
 - Preserve provider/tool-call order in replies; no reordering. Concurrency is an internal optimization only.
-- Fixed layer order: Agent → Run → Tool → BaseTool; not configurable in v1. Outermost `Final` wins.
+- Fixed layer order: Run → Agent → Tool → BaseTool; not configurable in v1. Outermost `Final` wins.
 - Generic policy layers are scope-agnostic (same type usable in run-, agent-, or tool-segments).
 - Schema validation defaults lenient (coercion best-effort); strict mode opt-in.
 - Timeouts/retries are opt-in (off by default) with ergonomic helpers.
@@ -238,7 +238,7 @@ Final API Surface (spec and examples)
 
 High-level concepts
 
-- Unified layers: same policy layer types can be added at run, agent, or tool scope. The stack is composed as Agent → Run → Tool → BaseTool.
+- Unified layers: same policy layer types can be added at run, agent, or tool scope. The stack is composed as Run → Agent → Tool → BaseTool.
 - Ordering and precedence are fixed (not configurable). Outermost `Final` wins.
 - Reply ordering preserves provider/tool-call sequence even with parallel calls.
 - Default behavior parity: if no layers are attached, behavior matches today’s runner.

@@ -48,6 +48,17 @@ for l in &tool_layers {
 
 Since the last applied wrapper is outermost, the current runtime order is Tool → Agent → Run → Base, which inverts the design intent and the migration plan’s “outside-in” model for chaining.
 
+### Design smells
+
+- Contradictory documentation vs implementation creates ambiguity about guarantees.
+- Applying tool layers outermost breaks specificity: the most local policies should be closest to the base.
+- Finalization precedence is undefined without a canonical, tested order, leading to surprising outcomes.
+
+### Design smells
+
+- Documentation enabling deprecated APIs creates “broken windows” and perpetuates drift.
+- String-based configuration contradicts type-safety goals and invites runtime errors.
+
 ### Solution
 
 - Standardize the canonical order to: Run (outermost) → Agent → Tool → Base.
@@ -117,6 +128,12 @@ pub fn build_tool_stack<E: crate::env::Env>(
     BoxService::new(with_schema)
 }
 ```
+
+### Design smells
+
+- Adapter indirection hides the true execution surface and fragments the mental model.
+- Dual execution paths (adapter vs direct service) complicate testing and maintenance.
+- Inconsistent composition semantics across tools vs services increase cognitive load.
 
 ### Solution
 
@@ -191,6 +208,12 @@ pub fn with_run_layers(
 ) -> Self { ... }
 ```
 
+### Design smells
+
+- Erased trait objects (`ErasedToolLayer`) undermine type safety and Tower’s typed composition.
+- Vector-based APIs obscure order and discourage fluent, readable chaining.
+- Boxed helper catalog (`boxed_*`) becomes a parallel composition system, diverging from Tower idioms.
+
 ### Solution
 
 - Introduce fluent, typed `.layer<L>(...)` on `Agent` and `RunConfig` that return a typed wrapper (mirroring Tower’s `Layered` pattern), eliminating vectors.
@@ -248,6 +271,12 @@ pub struct RunResultWithContext<C> { ... }
 
 (There is no `run_with_context` in the runner.)
 
+### Design smells
+
+- Mixed metaphors between layers and contexts encourage “action at a distance”.
+- Docs advertising removed APIs lead to dead ends and onboarding friction.
+- Conceptual surface area expands beyond the intended uniform Tower model.
+
 ### Solution
 
 - Remove all public references to `ToolContext` and context handlers from crate docs and README.
@@ -301,6 +330,11 @@ pub struct ApprovalLayer;
 pub trait Approval: Send + Sync { ... }
 ```
 
+### Design smells
+
+- Duplicated approval concepts (`HasApproval` vs Env `Approval`) create confusion and divergent extension points.
+- Layers bound to bespoke traits bypass the Env capability system, undermining uniformity.
+
 ### Solution
 
 - Remove `service::HasApproval` entirely.
@@ -347,6 +381,11 @@ let base = BaseToolService::new(tool);
 let with_schema = InputSchemaLayer::lenient(schema).layer(base);
 BoxService::new(with_schema)
 ```
+
+### Design smells
+
+- Hidden policy injection in the runner violates separation of concerns.
+- Surprising defaults make behavior non-local to the tool definition.
 
 ### Solution
 
@@ -451,6 +490,11 @@ pub fn layer(mut self, layer: Arc<dyn ErasedToolLayer>) -> Self {
 }
 ```
 
+### Design smells
+
+- Layering deferred to the runner splits responsibility and makes behavior non-local to the tool.
+- Erased layers stored out-of-band prevent typed, compile-time-checked composition.
+
 ### Solution
 
 - Option A: Remove `LayeredTool` and standardize on `.into_service::<E>().layer(...)` so tools compose like any Tower service.
@@ -489,6 +533,11 @@ Different documents present conflicting orders and APIs (e.g., runner header vs 
 - Context and string-coupled APIs present in README and crate docs (see Sections 4 and 7).
 - Boxed helpers positioned as public DX while migration plan targets removal.
 
+### Design smells
+
+- Multiple contradictory narratives lead to cargo-culting and regressions.
+- Lack of a single canonical source of truth undermines design clarity and enforcement.
+
 ### Solution
 
 - Canonicalize one architecture narrative in `TOWER_ARCHITECTURE.md` and align all other docs to it.
@@ -524,6 +573,11 @@ The migration plan emphasizes testing; however, we lack explicit tests for cross
 
 - Existing tests exercise service tools and capability layers in isolation, but runner tests still use the adapter path and vector-based layer APIs.
 
+### Design smells
+
+- Missing tests for core invariants allow silent drift from the architecture.
+- Reliance on adapter-path tests obscures the intended service-based path.
+
 ### Solution
 
 Add tests that verify:
@@ -558,16 +612,38 @@ It ensures the most important architectural invariants don’t regress and docum
 
 ---
 
-## Implementation plan (incremental)
+## Order of operations (with rationale)
 
-1. Fix runner order and comments; add a cross-scope order test.
-2. Add fluent `.layer<L>(...)` to `Agent` and `RunConfig`; mark vector APIs as deprecated.
-3. Replace `BaseToolService` with service-based tools in runner; remove adapter.
-4. Unify approval capability on `env::Approval`; update `ApprovalLayer`.
-5. Remove `ErasedToolLayer` and boxed helpers after migrating call sites.
-6. Move default schema from runner to tool constructors/builders.
-7. Purge context and string-coupled APIs from README/crate docs; update examples to Tower idioms.
-8. Decide and implement the final tool composition path (remove or rework `LayeredTool`).
+1. Fix runner layer order and document it; add cross-scope order tests.
+
+   - Rationale: Establishes the global invariant other changes depend on; prevents rework by locking the contract early.
+
+2. Introduce fluent, typed `.layer<L>(...)` APIs for `Agent` and `RunConfig`; deprecate vector APIs.
+
+   - Rationale: Enables migration off erased layers and vectors while keeping code building; prepares for removal steps.
+
+3. Switch runner to service-based tools and remove the `BaseToolService` adapter.
+
+   - Rationale: Unifies the execution model; reduces dual-path complexity before broad removals; aligns tests and examples.
+
+4. Unify approval on Env capability in `ApprovalLayer`.
+
+   - Rationale: Small, contained change that clarifies capability access patterns used by subsequent layers and examples.
+
+5. Remove `ErasedToolLayer` and boxed helpers once typed APIs and runner are in place.
+
+   - Rationale: Avoids premature deletion; ensures a smooth cutover with compile-time guidance in place.
+
+6. Move default schema behavior out of the runner into tool constructors/builders.
+
+   - Rationale: Separation of concerns; low risk once the execution path is stable.
+
+7. Purge deprecated APIs and contexts from docs/examples; align architecture docs.
+
+   - Rationale: Documentation last to reflect finalized APIs and prevent churn; reduces drift going forward.
+
+8. Decide and implement the final `LayeredTool` approach (remove or rework to typed composition).
+   - Rationale: Safer to resolve after typed APIs and execution path are stable to avoid conflicting layering flows.
 
 Each step is independently testable and reduces risk while converging on the target design.
 

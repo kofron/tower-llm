@@ -141,7 +141,7 @@ The SDK follows these design principles:
 
 ### Tower-based execution and layers
 
-Tools execute through a Tower stack with fixed ordering: Agent layers → Run layers → Tool layers → Base tool. Policy layers (schema, timeouts, retries, approval, tracing) are scope-agnostic: the same type can be attached at any of the three positions. Replies are always appended in the provider/tool-call order; per-turn tool calls may run in parallel internally.
+Tools execute through a Tower stack with fixed ordering: Run layers → Agent layers → Tool layers → Base tool. Policy layers (schema, timeouts, retries, approval, tracing) are scope-agnostic: the same type can be attached at any of the three positions. Replies are always appended in the provider/tool-call order; per-turn tool calls may run in parallel internally.
 
 ### Behavior invariants (v1)
 

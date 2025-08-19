@@ -41,7 +41,7 @@ Context
 Decisions
 
 - Adopt Tower as the execution substrate for tools. Tools are adapted to `Service<ToolRequest<E>> -> ToolResponse` with `Effect` to control flow (`Continue`, `Rewrite`, `Final`, `Handoff`).
-- Fix layer order to ensure predictable behavior: Agent → Run → Tool → BaseTool. Outermost `Final` wins. No configurability in v1 for simplicity.
+- Fix layer order to ensure predictable behavior: Run → Agent → Tool → BaseTool. Outermost `Final` wins. No configurability in v1 for simplicity.
 - Make generic policy layers scope-agnostic: a single `Layer<S>` works at run-, agent-, or tool-scope.
 - Preserve provider/tool-call reply order even under parallel execution. Concurrency is an internal optimization only.
 - Keep a non-generic default runner (`DefaultEnv`) while allowing typed Env for advanced users.

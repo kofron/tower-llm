@@ -1,7 +1,7 @@
 //! # Runner (orientation)
 //!
 //! The `Runner` coordinates an agent run: it interacts with the model, routes
-//! tool-calls through the Tower stack (Agent → Run → Tool → BaseTool), and
+//! tool-calls through the Tower stack (Run → Agent → Tool → BaseTool), and
 //! maintains ordering and state across turns and handoffs. Policy layers and
 //! tool execution are composed in `service.rs`; this module focuses on orchestration.
 
@@ -605,16 +605,18 @@ impl Runner {
                             };
 
                             let mut stack = crate::service::build_tool_stack::<DefaultEnv>(tool);
-                            // Apply dynamic layers: run-scope then agent-scope (Agent wraps Run)
-                            for l in &config.run_layers {
+                            // Apply layers Tool → Agent → Run (inner-to-outer) for runtime order Run → Agent → Tool → Base
+                            // Tool layers applied first (innermost, closest to base)
+                            for l in &tool_layers {
                                 stack = l.layer_boxed(stack);
                             }
+                            // Agent layers wrap tool layers
                             let agent_layers = agent.config.agent_layers.clone();
                             for l in &agent_layers {
                                 stack = l.layer_boxed(stack);
                             }
-                            // Apply tool's own layers (from LayeredTool)
-                            for l in &tool_layers {
+                            // Run layers wrap everything (outermost)
+                            for l in &config.run_layers {
                                 stack = l.layer_boxed(stack);
                             }
                             let req = ToolRequest::<DefaultEnv> {
@@ -751,14 +753,17 @@ impl Runner {
 
                                     let mut stack =
                                         crate::service::build_tool_stack::<DefaultEnv>(tool);
-                                    for l in &run_layers_clone {
+                                    // Apply layers Tool → Agent → Run (inner-to-outer) for runtime order Run → Agent → Tool → Base
+                                    // Tool layers applied first (innermost, closest to base)
+                                    for l in &tool_layers {
                                         stack = l.layer_boxed(stack);
                                     }
+                                    // Agent layers wrap tool layers
                                     for l in &agent_layers_clone {
                                         stack = l.layer_boxed(stack);
                                     }
-                                    // Apply tool's own layers (from LayeredTool)
-                                    for l in &tool_layers {
+                                    // Run layers wrap everything (outermost)
+                                    for l in &run_layers_clone {
                                         stack = l.layer_boxed(stack);
                                     }
                                     let req = ToolRequest::<DefaultEnv> {
