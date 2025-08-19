@@ -856,18 +856,18 @@ mod tests {
 
     #[tokio::test]
     async fn approval_layer_denies_without_approval() {
-            #[derive(Clone, Default)]
-    struct Deny;
-    impl HasApproval for Deny {
-        fn approve(&self, _agent: &str, _tool: &str, _args: &Value) -> bool {
-            false
+        #[derive(Clone, Default)]
+        struct Deny;
+        impl HasApproval for Deny {
+            fn approve(&self, _agent: &str, _tool: &str, _args: &Value) -> bool {
+                false
+            }
         }
-    }
-    impl crate::env::Env for Deny {
-        fn capability<T: std::any::Any + Send + Sync>(&self) -> Option<Arc<T>> {
-            None
+        impl crate::env::Env for Deny {
+            fn capability<T: std::any::Any + Send + Sync>(&self) -> Option<Arc<T>> {
+                None
+            }
         }
-    }
 
         let tool = Arc::new(FunctionTool::simple("echo", "Echo", |s: String| s));
         let base = BaseToolService::new(tool);
