@@ -5,16 +5,13 @@
 //! grouped; policy layers and context shape tool execution at run/agent/tool
 //! scopes. This module defines the `Agent` API and its configuration surface.
 
-use std::any::Any;
 use std::sync::Arc;
 
-use crate::context::{ContextualAgent, ToolContext, ToolContextSpec, TypedHandler};
 use crate::guardrail::{InputGuardrail, OutputGuardrail};
 use crate::handoff::Handoff;
 use crate::items::Message;
 use crate::service::ErasedToolLayer;
 use crate::tool::Tool;
-use std::collections::HashMap;
 
 /// Defines the complete configuration for an [`Agent`].
 ///
@@ -72,14 +69,8 @@ pub struct AgentConfig {
     /// conforms to this schema.
     pub output_schema: Option<serde_json::Value>,
 
-    /// Optional contextual handler for per-run tool output processing.
-    pub tool_context: Option<ToolContextSpec>,
-
     /// Optional dynamic agent-scope policy layers applied around the tool stack for this agent.
     pub agent_layers: Vec<Arc<dyn ErasedToolLayer>>,
-
-    /// Optional dynamic tool-scope policy layers keyed by tool name.
-    pub tool_layers: HashMap<String, Vec<Arc<dyn ErasedToolLayer>>>,
 }
 
 impl Default for AgentConfig {
@@ -97,9 +88,7 @@ impl Default for AgentConfig {
             temperature: Some(1.0),
             max_tokens: None,
             output_schema: None,
-            tool_context: None,
             agent_layers: Vec::new(),
-            tool_layers: HashMap::new(),
         }
     }
 }
@@ -200,15 +189,7 @@ impl Agent {
         self
     }
 
-    /// Attach dynamic tool-scope policy layers by tool name.
-    pub fn with_tool_layers(
-        mut self,
-        tool_name: impl Into<String>,
-        layers: Vec<Arc<dyn ErasedToolLayer>>,
-    ) -> Self {
-        self.config.tool_layers.insert(tool_name.into(), layers);
-        self
-    }
+
 
     /// Adds multiple tools to the agent.
     ///
@@ -291,80 +272,7 @@ impl Agent {
         self
     }
 
-    /// Adds a typed contextual tool output handler with a fixed initial context.
-    ///
-    /// A fresh context is cloned from `initial_ctx` for each run. The handler
-    /// can observe each tool output and decide to forward it unchanged, rewrite
-    /// it, or finalize the run. This is useful for aggregation, output envelopes,
-    /// or early termination.
-    pub fn with_context<C, H>(mut self, initial_ctx: C, handler: H) -> Self
-    where
-        C: Clone + Send + Sync + 'static,
-        H: ToolContext<C> + Send + Sync + 'static,
-    {
-        let factory = Arc::new(move || Box::new(initial_ctx.clone()) as Box<dyn Any + Send>);
-        let erased: Arc<dyn crate::context::ErasedToolContextHandler> =
-            Arc::new(TypedHandler::<C, H>::new(handler));
-        self.config.tool_context = Some(ToolContextSpec {
-            factory,
-            handler: erased,
-        });
-        self
-    }
 
-    /// Adds a typed contextual handler and returns a typed wrapper that enables
-    /// retrieving the final context value after the run completes.
-    pub fn with_context_typed<C, H>(self, initial_ctx: C, handler: H) -> ContextualAgent<C>
-    where
-        C: Clone + Send + Sync + 'static,
-        H: ToolContext<C> + Send + Sync + 'static,
-    {
-        let agent = self.with_context(initial_ctx, handler);
-        ContextualAgent {
-            agent,
-            _marker: std::marker::PhantomData,
-        }
-    }
-
-    /// Adds a typed contextual tool output handler with a factory that constructs
-    /// a fresh context for each run.
-    ///
-    /// Use this when the context requires dynamic initialization. The semantics
-    /// are the same as [`with_context`](Self::with_context).
-    pub fn with_context_factory<C, H, F>(mut self, factory_fn: F, handler: H) -> Self
-    where
-        C: Send + Sync + 'static,
-        H: ToolContext<C> + Send + Sync + 'static,
-        F: Fn() -> C + Send + Sync + 'static,
-    {
-        let factory = Arc::new(move || Box::new(factory_fn()) as Box<dyn Any + Send>);
-        let erased: Arc<dyn crate::context::ErasedToolContextHandler> =
-            Arc::new(TypedHandler::<C, H>::new(handler));
-        self.config.tool_context = Some(ToolContextSpec {
-            factory,
-            handler: erased,
-        });
-        self
-    }
-
-    /// Adds a typed contextual handler using a factory and returns a typed wrapper
-    /// that enables retrieving the final context value after the run completes.
-    pub fn with_context_factory_typed<C, H, F>(
-        self,
-        factory_fn: F,
-        handler: H,
-    ) -> ContextualAgent<C>
-    where
-        C: Send + Sync + 'static,
-        H: ToolContext<C> + Send + Sync + 'static,
-        F: Fn() -> C + Send + Sync + 'static,
-    {
-        let agent = self.with_context_factory(factory_fn, handler);
-        ContextualAgent {
-            agent,
-            _marker: std::marker::PhantomData,
-        }
-    }
 
     /// Returns the agent's name.
     pub fn name(&self) -> &str {

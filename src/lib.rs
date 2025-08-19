@@ -69,7 +69,7 @@
 
 pub mod agent;
 pub mod config;
-pub mod context;
+pub mod env;
 pub mod error;
 pub mod group;
 pub mod guardrail;
@@ -83,13 +83,12 @@ pub mod runner;
 pub mod service;
 pub mod sqlite_session;
 pub mod tool;
+pub mod tool_service;
 pub mod tracing;
 pub mod usage;
 
 // Re-export core types for convenience
 pub use agent::{Agent, AgentConfig};
-pub use context::ContextualAgent;
-pub use context::{ContextDecision, ContextStep, ToolContext};
 pub use error::{AgentsError, Result};
 pub use group::{AgentGroup, AgentGroupBuilder};
 pub use guardrail::{InputGuardrail, OutputGuardrail};
@@ -102,13 +101,13 @@ pub use sqlite_session::SqliteSession;
 pub use tool::TypedFunctionTool;
 pub use tool::{FunctionTool, Tool};
 
-// Public layer exports for DX (scope-agnostic policy layers and context layers)
+// Public layer exports for DX (scope-agnostic policy layers)
 pub mod layers {
     pub use crate::service::{
         boxed_approval_with, boxed_input_schema_lenient, boxed_input_schema_strict,
-        boxed_retry_times, boxed_timeout_secs, AgentContextLayer, ApprovalLayer,
-        BoxedApprovalLayer, BoxedInputSchemaLayer, BoxedRetryLayer, BoxedTimeoutLayer,
-        ErasedToolLayer, InputSchemaLayer, RetryLayer, RunContextLayer, TimeoutLayer,
+        boxed_retry_times, boxed_timeout_secs, ApprovalLayer, BoxedApprovalLayer,
+        BoxedInputSchemaLayer, BoxedRetryLayer, BoxedTimeoutLayer, ErasedToolLayer,
+        InputSchemaLayer, RetryLayer, TimeoutLayer,
     };
 }
 pub use service::DefaultEnv;

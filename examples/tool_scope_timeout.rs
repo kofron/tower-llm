@@ -1,8 +1,8 @@
 //! # Example: Tool-scope Timeout Layer
 //!
 //! This example demonstrates attaching a timeout policy at the tool scope.
-//! The agent defines a slow tool, and we attach a per-tool timeout layer so
-//! that if the model calls it, the call will be timed out and reported as an error.
+//! The tool manages its own timeout layer, showing how tools can be self-contained
+//! and manage their own cross-cutting concerns.
 //!
 //! To run this example, set `OPENAI_API_KEY` and run:
 //!
@@ -14,8 +14,9 @@
 use openai_agents_rs::{layers, runner::RunConfig, Agent, FunctionTool, Runner};
 use std::sync::Arc;
 
-fn make_slow_tool() -> Arc<FunctionTool> {
-    Arc::new(FunctionTool::new(
+fn make_slow_tool_with_timeout() -> Arc<dyn openai_agents_rs::Tool> {
+    // Create the base tool
+    let tool = FunctionTool::new(
         "slow".to_string(),
         "Sleeps for a while".to_string(),
         serde_json::json!({
@@ -26,20 +27,24 @@ fn make_slow_tool() -> Arc<FunctionTool> {
             std::thread::sleep(std::time::Duration::from_millis(250));
             Ok(serde_json::json!("done"))
         },
-    ))
+    );
+    
+    // Add a timeout layer to the tool itself
+    // The tool now manages its own timeout policy
+    let layered = tool.layer(layers::boxed_timeout_secs(2));
+    Arc::new(layered)
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Running tool-scope timeout example...\n");
+    println!("Note: The tool now manages its own timeout layer!");
 
     let agent = Agent::simple(
         "TimeoutAgent",
         "You have a slow tool named 'slow'. If appropriate, call it to complete the task.",
     )
-    .with_tool(make_slow_tool())
-    // Attach a per-tool timeout (2s) to the 'slow' tool
-    .with_tool_layers("slow", vec![layers::boxed_timeout_secs(2)]);
+    .with_tool(make_slow_tool_with_timeout());
 
     let cfg = RunConfig::default().with_parallel_tools(true);
     let result = Runner::run(agent, "Please run the slow tool and finish", cfg).await?;

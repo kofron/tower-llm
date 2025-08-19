@@ -19,6 +19,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use crate::error::Result;
+use crate::service::ErasedToolLayer;
 
 /// Represents the result of a tool's execution.
 ///
@@ -70,6 +71,83 @@ impl ToolResult {
 
 // NOTE: ToolCall definition removed; use crate::items::ToolCall
 
+/// A tool with attached layers.
+///
+/// This wrapper allows tools to carry their own layers, which will be applied
+/// when the tool is executed. This enables tools to be self-contained and
+/// manage their own cross-cutting concerns.
+pub struct LayeredTool {
+    tool: Arc<dyn Tool>,
+    layers: Vec<Arc<dyn ErasedToolLayer>>,
+}
+
+impl LayeredTool {
+    /// Create a new layered tool from a base tool.
+    pub fn new(tool: Arc<dyn Tool>) -> Self {
+        Self {
+            tool,
+            layers: Vec::new(),
+        }
+    }
+
+    /// Add a layer to this tool.
+    ///
+    /// Layers are applied in the order they are added, wrapping from outside-in
+    /// following Tower's pattern.
+    pub fn layer(mut self, layer: Arc<dyn ErasedToolLayer>) -> Self {
+        self.layers.push(layer);
+        self
+    }
+
+    /// Get the underlying tool.
+    pub fn inner(&self) -> &Arc<dyn Tool> {
+        &self.tool
+    }
+
+    /// Get the layers attached to this tool.
+    pub fn layers(&self) -> &[Arc<dyn ErasedToolLayer>] {
+        &self.layers
+    }
+}
+
+impl Debug for LayeredTool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LayeredTool")
+            .field("tool", &self.tool.name())
+            .field("layers_count", &self.layers.len())
+            .finish()
+    }
+}
+
+#[async_trait]
+impl Tool for LayeredTool {
+    fn name(&self) -> &str {
+        self.tool.name()
+    }
+
+    fn description(&self) -> &str {
+        self.tool.description()
+    }
+
+    fn parameters_schema(&self) -> Value {
+        self.tool.parameters_schema()
+    }
+
+    async fn execute(&self, arguments: Value) -> Result<ToolResult> {
+        // For now, just delegate to the inner tool
+        // The layers will be applied by the runner when it builds the service stack
+        self.tool.execute(arguments).await
+    }
+
+    fn requires_approval(&self) -> bool {
+        self.tool.requires_approval()
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
 /// Defines the interface for all tools that can be used by an agent.
 ///
 /// The `Tool` trait provides a common structure for defining external
@@ -93,6 +171,13 @@ pub trait Tool: Send + Sync + Debug {
     fn requires_approval(&self) -> bool {
         false
     }
+
+    /// Enable downcasting to concrete types.
+    fn as_any(&self) -> &dyn std::any::Any {
+        // Default implementation returns a dummy value
+        // Concrete types should override this
+        &()
+    }
 }
 
 /// A concrete `Tool` that wraps a Rust function.
@@ -111,6 +196,18 @@ impl std::fmt::Debug for FunctionTool {
             .field("description", &self.description)
             .field("parameters_schema", &self.parameters_schema)
             .finish()
+    }
+}
+
+impl Default for FunctionTool {
+    /// Creates a default FunctionTool with example configuration.
+    ///
+    /// This is primarily for demonstration - real tools should be constructed
+    /// with specific functionality.
+    fn default() -> Self {
+        Self::simple("example", "An example tool", |input: String| {
+            format!("Processed: {}", input)
+        })
     }
 }
 
@@ -154,6 +251,23 @@ impl FunctionTool {
             }),
             function: Arc::new(wrapped),
         }
+    }
+
+    /// Set a custom name for this tool.
+    ///
+    /// By default, tools use the name provided at construction.
+    /// This method allows overriding that name.
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
+    }
+
+    /// Add a layer to this tool, returning a LayeredTool.
+    ///
+    /// This consumes the tool and returns a LayeredTool that can have
+    /// additional layers added to it.
+    pub fn layer(self, layer: Arc<dyn ErasedToolLayer>) -> LayeredTool {
+        LayeredTool::new(Arc::new(self)).layer(layer)
     }
 }
 
@@ -257,6 +371,23 @@ where
             _in: PhantomData,
             _out: PhantomData,
         }
+    }
+
+    /// Set a custom name for this tool.
+    ///
+    /// By default, tools use the name provided at construction.
+    /// This method allows overriding that name.
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
+    }
+
+    /// Add a layer to this tool, returning a LayeredTool.
+    ///
+    /// This consumes the tool and returns a LayeredTool that can have
+    /// additional layers added to it.
+    pub fn layer(self, layer: Arc<dyn ErasedToolLayer>) -> LayeredTool {
+        LayeredTool::new(Arc::new(self)).layer(layer)
     }
 }
 

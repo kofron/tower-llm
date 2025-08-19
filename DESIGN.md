@@ -2,6 +2,36 @@
 
 This document captures the architectural decisions and their evolution during the migration to a Tower-driven execution model. Entries are chronological and append-only.
 
+### 2025-01 — Tool Self-Management and Context Removal
+
+Context
+
+- The codebase had evolved to support multiple ways of achieving the same goals (context handlers, tool layers, direct implementation), creating confusion and violating simplicity.
+- Agents could reach into tools to configure them (`with_tool_layers`), violating abstraction boundaries.
+- Context handlers created "spooky action at a distance" with global observation and modification of tool outputs.
+
+Decisions
+
+- Tools now manage their own layers via `.layer()` method that returns a `LayeredTool` wrapper.
+- Removed `ToolContext` trait and all context handler infrastructure entirely.
+- Removed `Agent::with_tool_layers()` - agents no longer configure tool internals.
+- Each abstraction level (tool/agent/run) manages only its own layers.
+- Tools can have custom names via `.with_name()` method.
+
+Implementation Notes
+
+- `LayeredTool` wraps a tool with its layers and implements the `Tool` trait.
+- Runner recognizes `LayeredTool` and applies its layers when building the service stack.
+- All context-based APIs removed in favor of Tower layers.
+- Clean separation: Tools do work, layers modify behavior.
+
+Benefits
+
+- Single, unified pattern for behavior modification.
+- No string-based coupling (removed tool name lookups).
+- Each abstraction maintains its boundaries.
+- Follows Tower's composition model exactly.
+
 ### 2025-08 — Tower-driven execution, scope-agnostic layers, generic Env
 
 Context

@@ -1,19 +1,20 @@
 //! Tower-based tool execution primitives and layers.
 
-use std::any::Any;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value;
 use tokio::time::{sleep, timeout};
 use tower::{service_fn, util::BoxService, BoxError, Layer, Service};
 
-use crate::context::{ContextDecision, RunContextSpec, ToolContextSpec};
 use crate::tool::{Tool, ToolResult};
 use crate::usage::Usage;
 use crate::{items::Message, model::ModelProvider};
+
+// Re-export DefaultEnv from env module for backwards compatibility
+pub use crate::env::DefaultEnv;
 
 /// Control surface for layers and services to steer execution/finalization.
 #[derive(Debug, Clone)]
@@ -23,13 +24,12 @@ pub enum Effect {
     Final(Value),
 }
 
-/// Default environment type for v1 (no capabilities required).
-#[derive(Debug, Clone, Default)]
-pub struct DefaultEnv;
-
 /// Request passed into the tool service stack.
 #[derive(Debug, Clone)]
-pub struct ToolRequest<E = DefaultEnv> {
+pub struct ToolRequest<E = DefaultEnv>
+where
+    E: crate::env::Env,
+{
     pub env: E,
     pub run_id: String,
     pub agent: String,
@@ -76,7 +76,7 @@ impl BaseToolService {
     }
 }
 
-impl<E: Clone + Send + 'static> Service<ToolRequest<E>> for BaseToolService {
+impl<E: crate::env::Env> Service<ToolRequest<E>> for BaseToolService {
     type Response = ToolResponse;
     type Error = BoxError;
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
@@ -348,235 +348,15 @@ impl Service<ModelRequest> for ModelService {
     }
 }
 
-/// Run-scoped context layer that can forward/rewrite/finalize tool outputs.
-#[derive(Clone)]
-pub struct RunContextLayer {
-    spec: Option<RunContextSpec>,
-    state: Arc<Mutex<Option<Box<dyn Any + Send>>>>,
-}
-
-impl RunContextLayer {
-    pub fn new(spec: Option<RunContextSpec>) -> Self {
-        let state = spec.as_ref().map(|s| (s.factory)());
-        Self {
-            spec,
-            state: Arc::new(Mutex::new(state)),
-        }
-    }
-
-    /// Extract the current run-scoped context state (if any). Subsequent calls return None
-    /// until the next handler invocation recreates it.
-    pub fn take_state(&self) -> Option<Box<dyn Any + Send>> {
-        self.state.lock().unwrap().take()
-    }
-}
-
-#[derive(Clone)]
-pub struct RunContextService<S> {
-    inner: S,
-    spec: Option<RunContextSpec>,
-    state: Arc<Mutex<Option<Box<dyn Any + Send>>>>,
-}
-
-impl<S> Layer<S> for RunContextLayer {
-    type Service = RunContextService<S>;
-    fn layer(&self, inner: S) -> Self::Service {
-        RunContextService {
-            inner,
-            spec: self.spec.clone(),
-            state: self.state.clone(),
-        }
-    }
-}
-
-impl<S, E> Service<ToolRequest<E>> for RunContextService<S>
-where
-    S: Service<ToolRequest<E>, Response = ToolResponse, Error = BoxError> + Clone + Send + 'static,
-    S::Future: Send + 'static,
-    E: Clone + Send + 'static,
-{
-    type Response = ToolResponse;
-    type Error = BoxError;
-    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
-
-    fn poll_ready(
-        &mut self,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<(), Self::Error>> {
-        self.inner.poll_ready(cx)
-    }
-
-    fn call(&mut self, req: ToolRequest<E>) -> Self::Future {
-        let mut inner = self.inner.clone();
-        let spec = self.spec.clone();
-        let state_arc = self.state.clone();
-        Box::pin(async move {
-            let mut resp = inner.call(req.clone()).await?;
-            if let Some(spec) = spec {
-                // Take state quickly and drop lock before handler execution
-                let prior = {
-                    let mut guard = state_arc.lock().unwrap();
-                    guard.take().or_else(|| Some((spec.factory)()))
-                };
-                if let Some(state) = prior {
-                    let input = if let Some(err) = &resp.error {
-                        Err(err.clone())
-                    } else {
-                        Ok(resp.output.clone())
-                    };
-                    let result =
-                        spec.handler
-                            .on_tool_output(state, &req.tool_name, &req.arguments, input);
-                    // Re-acquire to store new or reset state
-                    let mut guard = state_arc.lock().unwrap();
-                    match result {
-                        Ok((new_state, decision)) => {
-                            *guard = Some(new_state);
-                            match decision {
-                                ContextDecision::Forward => {}
-                                ContextDecision::Rewrite(v) => {
-                                    resp.output = v;
-                                    resp.error = None;
-                                    resp.effect = Effect::Continue;
-                                }
-                                ContextDecision::Final(v) => {
-                                    resp.output = v;
-                                    resp.error = None;
-                                    resp.effect = Effect::Final(resp.output.clone());
-                                }
-                            }
-                        }
-                        Err(_e) => {
-                            *guard = Some((spec.factory)());
-                        }
-                    }
-                }
-            }
-            Ok(resp)
-        })
-    }
-}
-
-/// Per-agent context layer mirroring the run-scoped one.
-#[derive(Clone)]
-pub struct AgentContextLayer {
-    spec: Option<ToolContextSpec>,
-    state: Arc<Mutex<Option<Box<dyn Any + Send>>>>,
-}
-
-impl AgentContextLayer {
-    pub fn new(spec: Option<ToolContextSpec>) -> Self {
-        let state = spec.as_ref().map(|s| (s.factory)());
-        Self {
-            spec,
-            state: Arc::new(Mutex::new(state)),
-        }
-    }
-
-    /// Extract the current per-agent context state (if any). Subsequent calls return None
-    /// until the next handler invocation recreates it.
-    pub fn take_state(&self) -> Option<Box<dyn Any + Send>> {
-        self.state.lock().unwrap().take()
-    }
-}
-
-#[derive(Clone)]
-pub struct AgentContextService<S> {
-    inner: S,
-    spec: Option<ToolContextSpec>,
-    state: Arc<Mutex<Option<Box<dyn Any + Send>>>>,
-}
-
-impl<S> Layer<S> for AgentContextLayer {
-    type Service = AgentContextService<S>;
-    fn layer(&self, inner: S) -> Self::Service {
-        AgentContextService {
-            inner,
-            spec: self.spec.clone(),
-            state: self.state.clone(),
-        }
-    }
-}
-
-impl<S, E> Service<ToolRequest<E>> for AgentContextService<S>
-where
-    S: Service<ToolRequest<E>, Response = ToolResponse, Error = BoxError> + Clone + Send + 'static,
-    S::Future: Send + 'static,
-    E: Clone + Send + 'static,
-{
-    type Response = ToolResponse;
-    type Error = BoxError;
-    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
-
-    fn poll_ready(
-        &mut self,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<(), Self::Error>> {
-        self.inner.poll_ready(cx)
-    }
-
-    fn call(&mut self, req: ToolRequest<E>) -> Self::Future {
-        let mut inner = self.inner.clone();
-        let spec = self.spec.clone();
-        let state_arc = self.state.clone();
-        Box::pin(async move {
-            let mut resp = inner.call(req.clone()).await?;
-            if let Some(spec) = spec {
-                let prior = {
-                    let mut guard = state_arc.lock().unwrap();
-                    guard.take().or_else(|| Some((spec.factory)()))
-                };
-                if let Some(state) = prior {
-                    let input = if let Some(err) = &resp.error {
-                        Err(err.clone())
-                    } else {
-                        Ok(resp.output.clone())
-                    };
-                    let result =
-                        spec.handler
-                            .on_tool_output(state, &req.tool_name, &req.arguments, input);
-                    let mut guard = state_arc.lock().unwrap();
-                    match result {
-                        Ok((new_state, decision)) => {
-                            *guard = Some(new_state);
-                            match decision {
-                                ContextDecision::Forward => {}
-                                ContextDecision::Rewrite(v) => {
-                                    resp.output = v;
-                                    resp.error = None;
-                                    resp.effect = Effect::Continue;
-                                }
-                                ContextDecision::Final(v) => {
-                                    resp.output = v;
-                                    resp.error = None;
-                                    resp.effect = Effect::Final(resp.output.clone());
-                                }
-                            }
-                        }
-                        Err(_e) => {
-                            *guard = Some((spec.factory)());
-                        }
-                    }
-                }
-            }
-            Ok(resp)
-        })
-    }
-}
-
-/// Utility to build a boxed service stack for a given tool, composing run → agent → tool → base.
-pub fn build_tool_stack<E: Clone + Send + 'static>(
+/// Utility to build a boxed service stack for a given tool.
+pub fn build_tool_stack<E: crate::env::Env>(
     tool: Arc<dyn Tool>,
-    run_layer: RunContextLayer,
-    agent_layer: AgentContextLayer,
 ) -> BoxService<ToolRequest<E>, ToolResponse, BoxError> {
     // Default lenient schema validation
     let schema = tool.parameters_schema();
     let base = BaseToolService::new(tool);
     let with_schema = InputSchemaLayer::lenient(schema).layer(base);
-    let with_run = run_layer.layer(with_schema);
-    let with_agent = agent_layer.layer(with_run);
-    BoxService::new(with_agent)
+    BoxService::new(with_schema)
 }
 
 /// Input schema validation layer. Scope-agnostic; validates req.arguments.
@@ -623,7 +403,7 @@ impl<S, E> Service<ToolRequest<E>> for InputSchemaService<S>
 where
     S: Service<ToolRequest<E>, Response = ToolResponse, Error = BoxError> + Clone + Send + 'static,
     S::Future: Send + 'static,
-    E: Clone + Send + 'static,
+    E: crate::env::Env,
 {
     type Response = ToolResponse;
     type Error = BoxError;
@@ -716,7 +496,7 @@ impl<S, E> Service<ToolRequest<E>> for TimeoutService<S>
 where
     S: Service<ToolRequest<E>, Response = ToolResponse, Error = BoxError> + Clone + Send + 'static,
     S::Future: Send + 'static,
-    E: Clone + Send + 'static,
+    E: crate::env::Env,
 {
     type Response = ToolResponse;
     type Error = BoxError;
@@ -806,7 +586,7 @@ impl<S> Layer<S> for ApprovalLayer {
 
 impl<S, E> Service<ToolRequest<E>> for ApprovalService<S>
 where
-    E: HasApproval + Clone + Send + 'static,
+    E: HasApproval + crate::env::Env,
     S: Service<ToolRequest<E>, Response = ToolResponse, Error = BoxError> + Clone + Send + 'static,
     S::Future: Send + 'static,
 {
@@ -836,7 +616,7 @@ impl<S, E> Service<ToolRequest<E>> for RetryService<S>
 where
     S: Service<ToolRequest<E>, Response = ToolResponse, Error = BoxError> + Clone + Send + 'static,
     S::Future: Send + 'static,
-    E: Clone + Send + 'static,
+    E: crate::env::Env,
 {
     type Response = ToolResponse;
     type Error = BoxError;
@@ -896,7 +676,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::context::{ContextStep, ToolContext, TypedHandler};
     // use crate::model::MockProvider; // replaced with local mock in tests below
     use crate::tool::FunctionTool;
     use std::sync::Arc;
@@ -907,11 +686,7 @@ mod tests {
         let tool = Arc::new(FunctionTool::simple("uppercase", "Upper", |s: String| {
             s.to_uppercase()
         }));
-        let stack = build_tool_stack::<DefaultEnv>(
-            tool,
-            RunContextLayer::new(None),
-            AgentContextLayer::new(None),
-        );
+        let stack = build_tool_stack::<DefaultEnv>(tool);
         let req = ToolRequest {
             env: DefaultEnv,
             run_id: "r".into(),
@@ -925,126 +700,6 @@ mod tests {
         assert!(resp.error.is_none());
         assert_eq!(resp.output, serde_json::json!("ABC"));
         matches!(resp.effect, Effect::Continue);
-    }
-
-    #[derive(Clone, Default)]
-    struct Ctx {
-        n: usize,
-    }
-
-    struct RunRewrite;
-    impl ToolContext<Ctx> for RunRewrite {
-        fn on_tool_output(
-            &self,
-            mut ctx: Ctx,
-            _tool: &str,
-            _args: &serde_json::Value,
-            result: Result<serde_json::Value, String>,
-        ) -> crate::error::Result<ContextStep<Ctx>> {
-            let new_n = ctx.n + 1;
-            ctx.n = new_n;
-            let v = result.unwrap_or(Value::Null);
-            Ok(ContextStep::rewrite(
-                ctx,
-                serde_json::json!({"run": new_n, "value": v}),
-            ))
-        }
-    }
-
-    struct AgentWrap;
-    impl ToolContext<Ctx> for AgentWrap {
-        fn on_tool_output(
-            &self,
-            mut ctx: Ctx,
-            _tool: &str,
-            _args: &serde_json::Value,
-            result: Result<serde_json::Value, String>,
-        ) -> crate::error::Result<ContextStep<Ctx>> {
-            ctx.n += 1;
-            let v = result.unwrap_or(Value::Null);
-            Ok(ContextStep::rewrite(
-                ctx,
-                serde_json::json!({"agent": true, "inner": v}),
-            ))
-        }
-    }
-
-    #[tokio::test]
-    async fn layer_ordering_run_then_agent() {
-        let tool = Arc::new(FunctionTool::simple("uppercase", "Upper", |s: String| {
-            s.to_uppercase()
-        }));
-
-        // Build run and agent specs
-        let run_spec = RunContextSpec {
-            factory: Arc::new(|| Box::new(Ctx::default()) as Box<dyn Any + Send>),
-            handler: Arc::new(TypedHandler::<Ctx, RunRewrite>::new(RunRewrite)),
-        };
-        let agent_spec = ToolContextSpec {
-            factory: Arc::new(|| Box::new(Ctx::default()) as Box<dyn Any + Send>),
-            handler: Arc::new(TypedHandler::<Ctx, AgentWrap>::new(AgentWrap)),
-        };
-
-        let stack = build_tool_stack::<DefaultEnv>(
-            tool,
-            RunContextLayer::new(Some(run_spec)),
-            AgentContextLayer::new(Some(agent_spec)),
-        );
-
-        let req = ToolRequest {
-            env: DefaultEnv,
-            run_id: "r".into(),
-            agent: "A".into(),
-            tool_call_id: "t1".into(),
-            tool_name: "uppercase".into(),
-            arguments: serde_json::json!({"input": "x"}),
-        };
-        let resp = stack.oneshot(req).await.unwrap();
-        assert!(resp.error.is_none());
-        assert_eq!(resp.output["agent"], serde_json::json!(true));
-        assert_eq!(resp.output["inner"]["run"], serde_json::json!(1));
-        assert_eq!(resp.output["inner"]["value"], serde_json::json!("X"));
-    }
-
-    struct RunFinal;
-    impl ToolContext<Ctx> for RunFinal {
-        fn on_tool_output(
-            &self,
-            ctx: Ctx,
-            _tool: &str,
-            _args: &serde_json::Value,
-            _result: Result<serde_json::Value, String>,
-        ) -> crate::error::Result<ContextStep<Ctx>> {
-            Ok(ContextStep::final_output(ctx, serde_json::json!("stop")))
-        }
-    }
-
-    #[tokio::test]
-    async fn run_layer_can_finalize() {
-        let tool = Arc::new(FunctionTool::simple("uppercase", "Upper", |s: String| {
-            s.to_uppercase()
-        }));
-        let run_spec = RunContextSpec {
-            factory: Arc::new(|| Box::new(Ctx::default()) as Box<dyn Any + Send>),
-            handler: Arc::new(TypedHandler::<Ctx, RunFinal>::new(RunFinal)),
-        };
-        let stack = build_tool_stack::<DefaultEnv>(
-            tool,
-            RunContextLayer::new(Some(run_spec)),
-            AgentContextLayer::new(None),
-        );
-        let req = ToolRequest {
-            env: DefaultEnv,
-            run_id: "r".into(),
-            agent: "A".into(),
-            tool_call_id: "t1".into(),
-            tool_name: "uppercase".into(),
-            arguments: serde_json::json!({"input": "x"}),
-        };
-        let resp = stack.oneshot(req).await.unwrap();
-        assert!(resp.error.is_none());
-        assert_eq!(resp.output, serde_json::json!("stop"));
-        matches!(resp.effect, Effect::Final(_));
     }
 
     #[tokio::test]

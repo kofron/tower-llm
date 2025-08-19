@@ -10,8 +10,7 @@ use std::sync::{Arc, Mutex};
 use tracing::{debug, info};
 
 use crate::agent::Agent;
-// use crate::context::ContextDecision; // no longer used directly
-use crate::context::ContextualAgent;
+
 use crate::error::{AgentsError, Result};
 use crate::guardrail::GuardrailRunner;
 use crate::items::{
@@ -20,7 +19,7 @@ use crate::items::{
 use crate::memory::Session;
 use crate::model::ModelProvider;
 use crate::result::{RunResult, StreamEvent, StreamingRunResult};
-use crate::service::{AgentContextLayer, DefaultEnv, Effect, RunContextLayer, ToolRequest};
+use crate::service::{DefaultEnv, Effect, ToolRequest};
 use crate::tracing::{AgentSpan, GenerationSpan, ToolSpan, TracingContext};
 use crate::usage::UsageStats;
 use futures::future::join_all;
@@ -140,13 +139,6 @@ pub struct RunConfig {
     /// in test environments.
     pub model_provider: Option<Arc<dyn ModelProvider>>,
 
-    /// Optional run-scoped context handler that applies across all agents in this run.
-    ///
-    /// When set via [`RunConfig::with_run_context`], the handler will receive every
-    /// tool output (or error) across the entire run, including after handoffs.
-    /// Its decisions are applied before any per-agent context handler.
-    pub run_context: Option<crate::context::RunContextSpec>,
-
     /// Whether to execute tool calls in parallel within a single turn.
     /// Defaults to true.
     pub parallel_tools: bool,
@@ -167,7 +159,6 @@ impl std::fmt::Debug for RunConfig {
             .field("stream", &self.stream)
             .field("session", &self.session.is_some())
             .field("model_provider", &self.model_provider.is_some())
-            .field("run_context", &self.run_context.is_some())
             .finish()
     }
 }
@@ -179,7 +170,7 @@ impl Default for RunConfig {
             stream: false,
             session: None,
             model_provider: None,
-            run_context: None,
+
             parallel_tools: true,
             max_concurrency: None,
             run_layers: Vec::new(),
@@ -194,21 +185,8 @@ impl RunConfig {
     /// It can forward, rewrite, or finalize the run via a [`ContextDecision`].
     /// The context value is constructed once per run using the provided factory
     /// and evolves across turns and handoffs.
-    pub fn with_run_context<C, H, F>(mut self, factory_fn: F, handler: H) -> Self
-    where
-        C: Send + Sync + 'static,
-        H: crate::context::ToolContext<C> + Send + Sync + 'static,
-        F: Fn() -> C + Send + Sync + 'static,
-    {
-        let factory = std::sync::Arc::new(move || Box::new(factory_fn()) as Box<dyn Any + Send>);
-        let erased: std::sync::Arc<dyn crate::context::ErasedToolContextHandler> =
-            std::sync::Arc::new(crate::context::TypedHandler::<C, H>::new(handler));
-        self.run_context = Some(crate::context::RunContextSpec {
-            factory,
-            handler: erased,
-        });
-        self
-    }
+    // Context handlers have been removed in favor of Tower layers
+    // Use layers attached to tools, agents, or runs instead
 
     /// Convenience: set a model provider.
     pub fn with_model_provider(mut self, provider: Option<Arc<dyn ModelProvider>>) -> Self {
@@ -332,105 +310,10 @@ impl Runner {
         Ok(result)
     }
 
-    /// Executes a typed contextual agent and returns the result along with the final context value.
-    pub async fn run_with_context<C>(
-        agent: ContextualAgent<C>,
-        input: impl Into<String>,
-        config: RunConfig,
-    ) -> Result<crate::result::RunResultWithContext<C>>
-    where
-        C: Send + Sync + 'static,
-    {
-        let input = input.into();
-        let agent = agent.into_inner();
-        info!(agent = %agent.name(), "Starting agent run (typed context)");
+    // Context-based run methods have been removed in favor of Tower layers
 
-        let context = Arc::new(Mutex::new(TracingContext::new()));
-        let _trace_id = context.lock().unwrap().trace_id().to_string();
-
-        if !agent.config.input_guardrails.is_empty() {
-            GuardrailRunner::check_input(&agent.config.input_guardrails, &input).await?;
-        }
-
-        let mut messages = vec![agent.build_system_message()];
-        if let Some(session) = &config.session {
-            let history = session.get_messages(None).await?;
-            messages.extend(history);
-        }
-        messages.push(Message::user(input));
-
-        // Run loop and capture final context state
-        let (result, state, _run_state) =
-            Self::run_loop(agent.clone(), messages, config.clone(), context.clone()).await?;
-
-        if let Some(session) = &config.session {
-            session.add_items(result.items.clone()).await?;
-        }
-
-        let state =
-            state.ok_or_else(|| AgentsError::Other("No contextual state present".to_string()))?;
-        let typed = state
-            .downcast::<C>()
-            .map_err(|_| AgentsError::Other("Context type mismatch".to_string()))?;
-        Ok(crate::result::RunResultWithContext {
-            result,
-            context: *typed,
-        })
-    }
-
-    /// Executes an agent with a run-scoped context and returns the result along with the final run context value.
-    ///
-    /// This is a convenience around attaching a run-scoped handler to the
-    /// [`RunConfig`] and invoking the regular runner. It ensures the final
-    /// typed context is only available once the run completes.
-    pub async fn run_with_run_context<C>(
-        agent: Agent,
-        input: impl Into<String>,
-        mut config: RunConfig,
-        factory: impl Fn() -> C + Send + Sync + 'static,
-        handler: impl crate::context::ToolContext<C> + 'static,
-    ) -> Result<crate::result::RunResultWithContext<C>>
-    where
-        C: Send + Sync + 'static,
-    {
-        // Attach run-scoped context
-        config = config.with_run_context(factory, handler);
-
-        let input = input.into();
-        info!(agent = %agent.name(), "Starting agent run (run-scoped context)");
-
-        let context = Arc::new(Mutex::new(TracingContext::new()));
-        let _trace_id = context.lock().unwrap().trace_id().to_string();
-
-        if !agent.config.input_guardrails.is_empty() {
-            GuardrailRunner::check_input(&agent.config.input_guardrails, &input).await?;
-        }
-
-        let mut messages = vec![agent.build_system_message()];
-        if let Some(session) = &config.session {
-            let history = session.get_messages(None).await?;
-            messages.extend(history);
-        }
-        messages.push(Message::user(input));
-
-        // Run loop and capture final run-scoped context state
-        let (result, _state, run_state) =
-            Self::run_loop(agent.clone(), messages, config.clone(), context.clone()).await?;
-
-        if let Some(session) = &config.session {
-            session.add_items(result.items.clone()).await?;
-        }
-
-        let state = run_state
-            .ok_or_else(|| AgentsError::Other("No run-scoped context present".to_string()))?;
-        let typed = state
-            .downcast::<C>()
-            .map_err(|_| AgentsError::Other("Run context type mismatch".to_string()))?;
-        Ok(crate::result::RunResultWithContext {
-            result,
-            context: *typed,
-        })
-    }
+    // Context-based run methods have been removed in favor of Tower layers
+    // Use layers attached to tools, agents, or runs instead
 
     /// Executes an agent synchronously and blocks until the result is available.
     ///
@@ -517,9 +400,7 @@ impl Runner {
             }
         });
 
-        // Build Tower context layers (stateful inside the layers)
-        let run_layer = RunContextLayer::new(config.run_context.clone());
-        let mut agent_layer = AgentContextLayer::new(agent.config.tool_context.clone());
+        // Tower layers will be applied per tool
 
         loop {
             turn_count += 1;
@@ -590,8 +471,9 @@ impl Runner {
                         agent_span.complete();
 
                         let trace_id = context.lock().unwrap().trace_id().to_string();
-                        let contextual_state = agent_layer.take_state();
-                        let run_scoped_state = run_layer.take_state();
+                        // Context state removed - use layers instead
+                        let contextual_state: Option<Box<dyn Any + Send>> = None;
+                        let run_scoped_state: Option<Box<dyn Any + Send>> = None;
                         return Ok((
                             RunResult::success(
                                 serde_json::Value::String(final_content),
@@ -687,7 +569,7 @@ impl Runner {
                             format_messages_for_log(&messages)
                         );
                         agent = handoff.agent().clone();
-                        agent_layer = AgentContextLayer::new(agent.config.tool_context.clone());
+
                         continue; // next turn
                     }
                 }
@@ -718,11 +600,17 @@ impl Runner {
                         let id = tool_call.id.clone();
                         if let Some(tool) = tool_opt {
                             let span = ToolSpan::new(context.clone(), name.clone(), args.clone());
-                            let mut stack = crate::service::build_tool_stack::<DefaultEnv>(
-                                tool,
-                                run_layer.clone(),
-                                agent_layer.clone(),
-                            );
+
+                            // Check if this is a LayeredTool and extract its layers
+                            let tool_layers = if let Some(layered) =
+                                tool.as_any().downcast_ref::<crate::tool::LayeredTool>()
+                            {
+                                layered.layers().to_vec()
+                            } else {
+                                Vec::new()
+                            };
+
+                            let mut stack = crate::service::build_tool_stack::<DefaultEnv>(tool);
                             // Apply dynamic layers: run-scope then agent-scope (Agent wraps Run)
                             for l in &config.run_layers {
                                 stack = l.layer_boxed(stack);
@@ -731,10 +619,9 @@ impl Runner {
                             for l in &agent_layers {
                                 stack = l.layer_boxed(stack);
                             }
-                            if let Some(tls) = agent.config.tool_layers.get(&name) {
-                                for l in tls {
-                                    stack = l.layer_boxed(stack);
-                                }
+                            // Apply tool's own layers (from LayeredTool)
+                            for l in &tool_layers {
+                                stack = l.layer_boxed(stack);
                             }
                             let req = ToolRequest::<DefaultEnv> {
                                 env: DefaultEnv,
@@ -780,8 +667,9 @@ impl Runner {
                                         agent_span.complete();
                                         let trace_id =
                                             context.lock().unwrap().trace_id().to_string();
-                                        let contextual_state = agent_layer.take_state();
-                                        let run_scoped_state = run_layer.take_state();
+                                        // Context state removed - use layers instead
+                                        let contextual_state: Option<Box<dyn Any + Send>> = None;
+                                        let run_scoped_state: Option<Box<dyn Any + Send>> = None;
                                         return Ok((
                                             RunResult::success(
                                                 final_val,
@@ -829,7 +717,6 @@ impl Runner {
                         .map(|n| std::sync::Arc::new(Semaphore::new(n)));
                     let run_layers_clone = config.run_layers.clone();
                     let agent_layers_clone_outer = agent.config.agent_layers.clone();
-                    let tool_layers_clone_outer = agent.config.tool_layers.clone();
                     let futures_vec = response
                         .tool_calls
                         .iter()
@@ -839,8 +726,7 @@ impl Runner {
                                 .iter()
                                 .find(|t| t.name() == tool_call.name)
                                 .cloned();
-                            let run_layer = run_layer.clone();
-                            let agent_layer = agent_layer.clone();
+                            // Layers are now attached to tools directly
                             let name = tool_call.name.clone();
                             let args = tool_call.arguments.clone();
                             let id = tool_call.id.clone();
@@ -850,7 +736,6 @@ impl Runner {
                             let semaphore = semaphore.clone();
                             let run_layers_clone = run_layers_clone.clone();
                             let agent_layers_clone = agent_layers_clone_outer.clone();
-                            let tool_layers_clone = tool_layers_clone_outer.clone();
                             async move {
                                 let _permit = if let Some(sem) = semaphore {
                                     Some(sem.acquire_owned().await.expect("semaphore"))
@@ -860,21 +745,27 @@ impl Runner {
                                 if let Some(tool) = tool_opt {
                                     let span =
                                         ToolSpan::new(context.clone(), name.clone(), args.clone());
-                                    let mut stack = crate::service::build_tool_stack::<DefaultEnv>(
-                                        tool,
-                                        run_layer,
-                                        agent_layer,
-                                    );
+
+                                    // Check if this is a LayeredTool and extract its layers
+                                    let tool_layers = if let Some(layered) =
+                                        tool.as_any().downcast_ref::<crate::tool::LayeredTool>()
+                                    {
+                                        layered.layers().to_vec()
+                                    } else {
+                                        Vec::new()
+                                    };
+
+                                    let mut stack =
+                                        crate::service::build_tool_stack::<DefaultEnv>(tool);
                                     for l in &run_layers_clone {
                                         stack = l.layer_boxed(stack);
                                     }
                                     for l in &agent_layers_clone {
                                         stack = l.layer_boxed(stack);
                                     }
-                                    if let Some(tls) = tool_layers_clone.get(&name) {
-                                        for l in tls {
-                                            stack = l.layer_boxed(stack);
-                                        }
+                                    // Apply tool's own layers (from LayeredTool)
+                                    for l in &tool_layers {
+                                        stack = l.layer_boxed(stack);
                                     }
                                     let req = ToolRequest::<DefaultEnv> {
                                         env: DefaultEnv,
@@ -965,8 +856,9 @@ impl Runner {
                 if let Some(final_val) = finalize_with {
                     agent_span.complete();
                     let trace_id = context.lock().unwrap().trace_id().to_string();
-                    let contextual_state = agent_layer.take_state();
-                    let run_scoped_state = run_layer.take_state();
+                    // Context state removed - use layers instead
+                    let contextual_state: Option<Box<dyn Any + Send>> = None;
+                    let run_scoped_state: Option<Box<dyn Any + Send>> = None;
                     return Ok((
                         RunResult::success(
                             final_val,
@@ -990,7 +882,7 @@ impl Runner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::context::{ContextStep, ToolContext};
+    // Context imports removed - using Tower layers instead
     use crate::items::ToolCall as MsgToolCall;
     use crate::layers;
     use crate::model::MockProvider;
@@ -2274,7 +2166,7 @@ mod tests {
     #[tokio::test]
     async fn test_tool_scope_timeout_layer_times_out() {
         // Slow tool that sleeps 50ms
-        let slow = Arc::new(FunctionTool::new(
+        let slow = FunctionTool::new(
             "slow".to_string(),
             "Sleeps".to_string(),
             serde_json::json!({"type":"object"}),
@@ -2282,11 +2174,10 @@ mod tests {
                 std::thread::sleep(std::time::Duration::from_millis(50));
                 Ok(serde_json::json!("ok"))
             },
-        ));
+        )
+        .layer(layers::boxed_timeout_secs(0));
 
-        let agent = Agent::simple("TimeoutAgent", "Use tools")
-            .with_tool(slow)
-            .with_tool_layers("slow", vec![layers::boxed_timeout_secs(0)]);
+        let agent = Agent::simple("TimeoutAgent", "Use tools").with_tool(Arc::new(slow));
 
         let tc = MsgToolCall {
             id: uuid::Uuid::new_v4().to_string(),
