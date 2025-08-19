@@ -184,6 +184,18 @@ impl Agent {
     }
 
     /// Attach dynamic agent-scope policy layers.
+    /// 
+    /// **Deprecated**: Use `.layer()` instead for type-safe composition.
+    /// 
+    /// # Migration
+    /// ```rust,ignore
+    /// // Old: 
+    /// agent.with_agent_layers(vec![layers::boxed_timeout_secs(30)])
+    /// 
+    /// // New:
+    /// agent.layer(TimeoutLayer::secs(30))
+    /// ```
+    #[deprecated(since = "0.2.0", note = "Use `.layer()` for typed composition instead")]
     pub fn with_agent_layers(mut self, layers: Vec<Arc<dyn ErasedToolLayer>>) -> Self {
         self.config.agent_layers = layers;
         self
@@ -329,6 +341,109 @@ impl Agent {
         }
 
         Message::system(content)
+    }
+    /// Apply a typed layer to this agent, returning a typed wrapper.
+    /// 
+    /// This is the preferred API over `with_agent_layers()` as it provides
+    /// compile-time type safety and follows Tower's fluent composition pattern.
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// use openai_agents_rs::{Agent, service::{TimeoutLayer, RetryLayer}};
+    /// use std::time::Duration;
+    /// 
+    /// let agent = Agent::simple("Assistant", "Be helpful")
+    ///     .layer(TimeoutLayer::new(Duration::from_secs(30)))
+    ///     .layer(RetryLayer::times(3));
+    /// ```
+    pub fn layer<L>(self, layer: L) -> LayeredAgent<L, Self> {
+        LayeredAgent::new(layer, self)
+    }
+}
+
+/// A typed wrapper for an agent with layers applied.
+/// 
+/// This follows Tower's `Layered` pattern, providing compile-time type safety
+/// for layer composition while maintaining the agent interface.
+#[derive(Clone)]
+pub struct LayeredAgent<L, A> {
+    layer: L,
+    inner: A,
+}
+
+impl<L, A> LayeredAgent<L, A> {
+    /// Create a new layered agent.
+    pub fn new(layer: L, inner: A) -> Self {
+        Self { layer, inner }
+    }
+    
+    /// Apply another layer, returning a new typed wrapper.
+    pub fn layer<L2>(self, layer: L2) -> LayeredAgent<L2, Self> {
+        LayeredAgent::new(layer, self)
+    }
+}
+
+impl<L, A> LayeredAgent<L, A>
+where
+    A: AgentLike + Clone,
+{
+    /// Get the underlying agent configuration.
+    /// This allows the layered agent to be used anywhere an Agent is expected.
+    pub fn inner_agent(&self) -> A {
+        self.inner.clone()
+    }
+}
+
+/// Trait to allow both Agent and LayeredAgent to be used interchangeably
+pub trait AgentLike {
+    fn config(&self) -> &AgentConfig;
+    fn name(&self) -> &str;
+    fn instructions(&self) -> &str;
+    fn tools(&self) -> &[Arc<dyn Tool>];
+    fn handoffs(&self) -> &[Handoff];
+}
+
+impl AgentLike for Agent {
+    fn config(&self) -> &AgentConfig {
+        &self.config
+    }
+    
+    fn name(&self) -> &str {
+        &self.config.name
+    }
+    
+    fn instructions(&self) -> &str {
+        &self.config.instructions
+    }
+    
+    fn tools(&self) -> &[Arc<dyn Tool>] {
+        &self.config.tools
+    }
+    
+    fn handoffs(&self) -> &[Handoff] {
+        &self.config.handoffs
+    }
+}
+
+impl<L, A: AgentLike> AgentLike for LayeredAgent<L, A> {
+    fn config(&self) -> &AgentConfig {
+        self.inner.config()
+    }
+    
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+    
+    fn instructions(&self) -> &str {
+        self.inner.instructions()
+    }
+    
+    fn tools(&self) -> &[Arc<dyn Tool>] {
+        self.inner.tools()
+    }
+    
+    fn handoffs(&self) -> &[Handoff] {
+        self.inner.handoffs()
     }
 }
 

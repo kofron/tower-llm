@@ -201,12 +201,146 @@ impl RunConfig {
     }
 
     /// Attach dynamic run-scope policy layers (scope-agnostic, applied at run scope).
+    /// 
+    /// **Deprecated**: Use `.layer()` instead for type-safe composition.
+    /// 
+    /// # Migration
+    /// ```rust,ignore
+    /// // Old: 
+    /// RunConfig::default().with_run_layers(vec![layers::boxed_timeout_secs(30)])
+    /// 
+    /// // New:
+    /// RunConfig::default().layer(TimeoutLayer::secs(30))
+    /// ```
+    #[deprecated(since = "0.2.0", note = "Use `.layer()` for typed composition instead")]
     pub fn with_run_layers(
         mut self,
         layers: Vec<Arc<dyn crate::service::ErasedToolLayer>>,
     ) -> Self {
         self.run_layers = layers;
         self
+    }
+
+    /// Apply a typed layer to this run config, returning a typed wrapper.
+    /// 
+    /// This is the preferred API over `with_run_layers()` as it provides
+    /// compile-time type safety and follows Tower's fluent composition pattern.
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// use openai_agents_rs::{runner::RunConfig, service::{TimeoutLayer, RetryLayer}};
+    /// use std::time::Duration;
+    /// 
+    /// let config = RunConfig::default()
+    ///     .layer(TimeoutLayer::new(Duration::from_secs(30)))
+    ///     .layer(RetryLayer::times(3));
+    /// ```
+    pub fn layer<L>(self, layer: L) -> LayeredRunConfig<L, Self> {
+        LayeredRunConfig::new(layer, self)
+    }
+}
+
+/// A typed wrapper for a run config with layers applied.
+/// 
+/// This follows Tower's `Layered` pattern, providing compile-time type safety
+/// for layer composition while maintaining the RunConfig interface.
+#[derive(Clone)]
+pub struct LayeredRunConfig<L, R> {
+    layer: L,
+    inner: R,
+}
+
+impl<L, R> LayeredRunConfig<L, R> {
+    /// Create a new layered run config.
+    pub fn new(layer: L, inner: R) -> Self {
+        Self { layer, inner }
+    }
+    
+    /// Apply another layer, returning a new typed wrapper.
+    pub fn layer<L2>(self, layer: L2) -> LayeredRunConfig<L2, Self> {
+        LayeredRunConfig::new(layer, self)
+    }
+}
+
+impl<L, R> LayeredRunConfig<L, R>
+where
+    R: RunConfigLike + Clone,
+{
+    /// Get the underlying run config.
+    /// This allows the layered config to be used anywhere a RunConfig is expected.
+    pub fn inner_config(&self) -> R {
+        self.inner.clone()
+    }
+}
+
+/// Trait to allow both RunConfig and LayeredRunConfig to be used interchangeably
+pub trait RunConfigLike {
+    fn max_turns(&self) -> Option<usize>;
+    fn stream(&self) -> bool;
+    fn session(&self) -> &Option<Arc<dyn crate::memory::Session>>;
+    fn model_provider(&self) -> &Option<Arc<dyn crate::model::ModelProvider>>;
+    fn parallel_tools(&self) -> bool;
+    fn max_concurrency(&self) -> Option<usize>;
+    fn run_layers(&self) -> &Vec<Arc<dyn crate::service::ErasedToolLayer>>;
+}
+
+impl RunConfigLike for RunConfig {
+    fn max_turns(&self) -> Option<usize> {
+        self.max_turns
+    }
+    
+    fn stream(&self) -> bool {
+        self.stream
+    }
+    
+    fn session(&self) -> &Option<Arc<dyn crate::memory::Session>> {
+        &self.session
+    }
+    
+    fn model_provider(&self) -> &Option<Arc<dyn crate::model::ModelProvider>> {
+        &self.model_provider
+    }
+    
+    fn parallel_tools(&self) -> bool {
+        self.parallel_tools
+    }
+    
+    fn max_concurrency(&self) -> Option<usize> {
+        self.max_concurrency
+    }
+    
+    fn run_layers(&self) -> &Vec<Arc<dyn crate::service::ErasedToolLayer>> {
+        &self.run_layers
+    }
+}
+
+impl<L, R: RunConfigLike> RunConfigLike for LayeredRunConfig<L, R> {
+    fn max_turns(&self) -> Option<usize> {
+        self.inner.max_turns()
+    }
+    
+    fn stream(&self) -> bool {
+        self.inner.stream()
+    }
+    
+    fn session(&self) -> &Option<Arc<dyn crate::memory::Session>> {
+        self.inner.session()
+    }
+    
+    fn model_provider(&self) -> &Option<Arc<dyn crate::model::ModelProvider>> {
+        self.inner.model_provider()
+    }
+    
+    fn parallel_tools(&self) -> bool {
+        self.inner.parallel_tools()
+    }
+    
+    fn max_concurrency(&self) -> Option<usize> {
+        self.inner.max_concurrency()
+    }
+    
+    fn run_layers(&self) -> &Vec<Arc<dyn crate::service::ErasedToolLayer>> {
+        self.inner.run_layers()
     }
 }
 

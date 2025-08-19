@@ -1,4 +1,10 @@
-use openai_agents_rs::{layers, runner::RunConfig, Agent, FunctionTool, Runner};
+use openai_agents_rs::{
+    service::BoxedApprovalLayer, 
+    runner::RunConfig, 
+    Agent, 
+    FunctionTool, 
+    Runner
+};
 use std::sync::Arc;
 
 #[tokio::main]
@@ -10,10 +16,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_tool(safe)
         .with_tool(danger);
 
-    // Deny the tool named "danger"
-    let cfg = RunConfig::default().with_run_layers(vec![layers::boxed_approval_with(
-        |_agent, tool, _args| tool != "danger",
-    )]);
+    // Deny the tool named "danger" - using vector API until runner supports typed layers
+    let cfg = RunConfig::default().with_run_layers(vec![
+        Arc::new(BoxedApprovalLayer::new(|_agent, tool, _args| tool != "danger"))
+    ]);
 
     let _ = Runner::run(agent, "Try some tools", cfg).await?;
     Ok(())
