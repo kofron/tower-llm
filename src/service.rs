@@ -9,7 +9,7 @@ use serde_json::Value;
 use tokio::time::{sleep, timeout};
 use tower::{service_fn, util::BoxService, BoxError, Layer, Service};
 
-use crate::tool::{Tool, ToolResult};
+use crate::tool::Tool;
 use crate::usage::Usage;
 use crate::{items::Message, model::ModelProvider};
 
@@ -64,60 +64,6 @@ impl ToolResponse {
     }
 }
 
-/// Base tool executor adapting `dyn Tool` to a Tower Service.
-#[derive(Clone)]
-pub struct BaseToolService {
-    tool: Arc<dyn Tool>,
-}
-
-impl BaseToolService {
-    pub fn new(tool: Arc<dyn Tool>) -> Self {
-        Self { tool }
-    }
-}
-
-impl<E: crate::env::Env> Service<ToolRequest<E>> for BaseToolService {
-    type Response = ToolResponse;
-    type Error = BoxError;
-    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
-
-    fn poll_ready(
-        &mut self,
-        _cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<(), Self::Error>> {
-        std::task::Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, req: ToolRequest<E>) -> Self::Future {
-        let tool = self.tool.clone();
-        Box::pin(async move {
-            match tool.execute(req.arguments.clone()).await {
-                Ok(ToolResult {
-                    output,
-                    is_final,
-                    error,
-                }) => {
-                    if let Some(err) = error {
-                        Ok(ToolResponse {
-                            output: Value::Null,
-                            error: Some(err),
-                            effect: Effect::Continue,
-                        })
-                    } else if is_final {
-                        Ok(ToolResponse {
-                            output: output.clone(),
-                            error: None,
-                            effect: Effect::Final(output),
-                        })
-                    } else {
-                        Ok(ToolResponse::success(output))
-                    }
-                }
-                Err(e) => Ok(ToolResponse::error(e.to_string())),
-            }
-        })
-    }
-}
 
 // =============================
 // Erased policy layer for boxed tool services
@@ -348,16 +294,6 @@ impl Service<ModelRequest> for ModelService {
     }
 }
 
-/// Utility to build a boxed service stack for a given tool.
-pub fn build_tool_stack<E: crate::env::Env>(
-    tool: Arc<dyn Tool>,
-) -> BoxService<ToolRequest<E>, ToolResponse, BoxError> {
-    // Default lenient schema validation
-    let schema = tool.parameters_schema();
-    let base = BaseToolService::new(tool);
-    let with_schema = InputSchemaLayer::lenient(schema).layer(base);
-    BoxService::new(with_schema)
-}
 
 /// Input schema validation layer. Scope-agnostic; validates req.arguments.
 #[derive(Clone, Debug)]
@@ -679,14 +615,79 @@ mod tests {
     // use crate::model::MockProvider; // replaced with local mock in tests below
     use crate::tool::FunctionTool;
     use std::sync::Arc;
-    use tower::ServiceExt;
+    
+    /// Helper function for tests: create a service from a tool without using BaseToolService
+    fn create_tool_service<E: crate::env::Env + 'static>(
+        tool: Arc<dyn crate::tool::Tool>
+    ) -> impl tower::Service<ToolRequest<E>, Response = ToolResponse, Error = BoxError, Future = Pin<Box<dyn Future<Output = Result<ToolResponse, BoxError>> + Send>>> + Clone {
+        use std::future::Future;
+        use std::pin::Pin;
+        use crate::tool::ToolResult;
+        
+        #[derive(Clone)]
+        struct ToolService {
+            tool: Arc<dyn crate::tool::Tool>,
+        }
+        
+        impl<E: crate::env::Env + 'static> tower::Service<ToolRequest<E>> for ToolService {
+            type Response = ToolResponse;
+            type Error = BoxError;
+            type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+            fn poll_ready(&mut self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
+                std::task::Poll::Ready(Ok(()))
+            }
+
+            fn call(&mut self, req: ToolRequest<E>) -> Self::Future {
+                let tool = self.tool.clone();
+                Box::pin(async move {
+                    match tool.execute(req.arguments.clone()).await {
+                        Ok(ToolResult { output, is_final, error }) => {
+                            if let Some(err) = error {
+                                Ok(ToolResponse {
+                                    output: Value::Null,
+                                    error: Some(err),
+                                    effect: Effect::Continue,
+                                })
+                            } else {
+                                let effect = if is_final {
+                                    Effect::Final(output.clone())
+                                } else {
+                                    Effect::Continue
+                                };
+                                Ok(ToolResponse {
+                                    output,
+                                    error: None,
+                                    effect,
+                                })
+                            }
+                        },
+                        Err(e) => {
+                            Ok(ToolResponse {
+                                output: Value::Null,
+                                error: Some(e.to_string()),
+                                effect: Effect::Continue,
+                            })
+                        }
+                    }
+                })
+            }
+        }
+        
+        ToolService { tool }
+    }
 
     #[tokio::test]
-    async fn base_tool_service_executes() {
+    async fn service_tool_executes() {
         let tool = Arc::new(FunctionTool::simple("uppercase", "Upper", |s: String| {
             s.to_uppercase()
         }));
-        let stack = build_tool_stack::<DefaultEnv>(tool);
+        
+        // Use service-based approach with schema validation
+        use tower::Layer;
+        let schema = tool.parameters_schema();
+        let base_service = create_tool_service::<DefaultEnv>(tool);
+        let mut stack = InputSchemaLayer::lenient(schema).layer(base_service);
         let req = ToolRequest {
             env: DefaultEnv,
             run_id: "r".into(),
@@ -696,7 +697,7 @@ mod tests {
             arguments: serde_json::json!({"input": "abc"}),
         };
 
-        let resp = stack.oneshot(req).await.unwrap();
+        let resp = stack.call(req).await.unwrap();
         assert!(resp.error.is_none());
         assert_eq!(resp.output, serde_json::json!("ABC"));
         matches!(resp.effect, Effect::Continue);
@@ -704,6 +705,7 @@ mod tests {
 
     #[tokio::test]
     async fn timeout_layer_times_out() {
+        use tower::Layer;
         // Tool that blocks >50ms
         let tool = Arc::new(FunctionTool::new(
             "block".to_string(),
@@ -714,8 +716,8 @@ mod tests {
                 Ok(Value::String("done".into()))
             },
         ));
-        let base = BaseToolService::new(tool);
-        let svc = TimeoutLayer::from_duration(Duration::from_millis(50)).layer(base);
+        let base = create_tool_service::<DefaultEnv>(tool);
+        let mut svc = TimeoutLayer::from_duration(Duration::from_millis(50)).layer(base);
         let req = ToolRequest {
             env: DefaultEnv,
             run_id: "r".into(),
@@ -724,13 +726,14 @@ mod tests {
             tool_name: "block".into(),
             arguments: Value::Null,
         };
-        let resp = svc.oneshot(req).await.unwrap();
+        let resp = svc.call(req).await.unwrap();
         assert!(resp.error.is_some());
         assert_eq!(resp.error.unwrap(), "timeout");
     }
 
     #[tokio::test]
     async fn input_schema_layer_strict_rejects_invalid() {
+        use tower::Layer;
         let tool = Arc::new(FunctionTool::new(
             "echo".to_string(),
             "Echo".to_string(),
@@ -741,13 +744,13 @@ mod tests {
             }),
             |args| Ok(args.get("input").cloned().unwrap_or(Value::Null)),
         ));
-        let base = BaseToolService::new(tool);
+        let base = create_tool_service::<DefaultEnv>(tool);
         let schema = serde_json::json!({
             "type": "object",
             "properties": {"input": {"type":"string"}},
             "required": ["input"]
         });
-        let svc = InputSchemaLayer::strict(schema).layer(base);
+        let mut svc = InputSchemaLayer::strict(schema).layer(base);
         let req = ToolRequest {
             env: DefaultEnv,
             run_id: "r".into(),
@@ -756,12 +759,13 @@ mod tests {
             tool_name: "echo".into(),
             arguments: serde_json::json!({}),
         };
-        let resp = svc.oneshot(req).await.unwrap();
+        let resp = svc.call(req).await.unwrap();
         assert!(resp.error.is_some());
     }
 
     #[tokio::test]
     async fn input_schema_layer_lenient_allows_invalid() {
+        use tower::Layer;
         let tool = Arc::new(FunctionTool::new(
             "echo".to_string(),
             "Echo".to_string(),
@@ -772,13 +776,13 @@ mod tests {
             }),
             |_args| Ok(Value::String("ok".into())),
         ));
-        let base = BaseToolService::new(tool);
+        let base = create_tool_service::<DefaultEnv>(tool);
         let schema = serde_json::json!({
             "type": "object",
             "properties": {"input": {"type":"string"}},
             "required": ["input"]
         });
-        let svc = InputSchemaLayer::lenient(schema).layer(base);
+        let mut svc = InputSchemaLayer::lenient(schema).layer(base);
         let req = ToolRequest {
             env: DefaultEnv,
             run_id: "r".into(),
@@ -787,7 +791,7 @@ mod tests {
             tool_name: "echo".into(),
             arguments: serde_json::json!({}),
         };
-        let resp = svc.oneshot(req).await.unwrap();
+        let resp = svc.call(req).await.unwrap();
         assert!(resp.error.is_none());
         assert_eq!(resp.output, Value::String("ok".into()));
     }
@@ -795,6 +799,7 @@ mod tests {
     #[tokio::test]
     async fn retry_layer_succeeds_after_failure() {
         use std::sync::atomic::{AtomicBool, Ordering};
+        use tower::Layer;
         static FIRST_FAIL: AtomicBool = AtomicBool::new(true);
 
         let tool = Arc::new(FunctionTool::new(
@@ -811,8 +816,8 @@ mod tests {
                 }
             },
         ));
-        let base = BaseToolService::new(tool);
-        let svc = RetryLayer::times(2).layer(base);
+        let base = create_tool_service::<DefaultEnv>(tool);
+        let mut svc = RetryLayer::times(2).layer(base);
         let req = ToolRequest {
             env: DefaultEnv,
             run_id: "r".into(),
@@ -821,13 +826,14 @@ mod tests {
             tool_name: "flaky".into(),
             arguments: Value::Null,
         };
-        let resp = svc.oneshot(req).await.unwrap();
+        let resp = svc.call(req).await.unwrap();
         assert!(resp.error.is_none());
         assert_eq!(resp.output, Value::String("ok".into()));
     }
 
     #[tokio::test]
     async fn retry_layer_exhausts_and_errors() {
+        use tower::Layer;
         let tool = Arc::new(FunctionTool::new(
             "always_fail".to_string(),
             "Always fail".to_string(),
@@ -838,8 +844,8 @@ mod tests {
                 })
             },
         ));
-        let base = BaseToolService::new(tool);
-        let svc = RetryLayer::times(2).layer(base);
+        let base = create_tool_service::<DefaultEnv>(tool);
+        let mut svc = RetryLayer::times(2).layer(base);
         let req = ToolRequest {
             env: DefaultEnv,
             run_id: "r".into(),
@@ -848,7 +854,7 @@ mod tests {
             tool_name: "always_fail".into(),
             arguments: Value::Null,
         };
-        let resp = svc.oneshot(req).await; // last attempt returns service Ok with error payload or Err; both acceptable as failure
+        let resp = svc.call(req).await; // last attempt returns service Ok with error payload or Err; both acceptable as failure
         if let Ok(r) = resp {
             assert!(r.error.is_some());
         }
@@ -856,6 +862,7 @@ mod tests {
 
     #[tokio::test]
     async fn approval_layer_denies_without_approval() {
+        use tower::Layer;
         #[derive(Clone, Default)]
         struct Deny;
         impl HasApproval for Deny {
@@ -870,8 +877,8 @@ mod tests {
         }
 
         let tool = Arc::new(FunctionTool::simple("echo", "Echo", |s: String| s));
-        let base = BaseToolService::new(tool);
-        let svc = ApprovalLayer.layer(base);
+        let base = create_tool_service::<Deny>(tool);
+        let mut svc = ApprovalLayer.layer(base);
         let req = ToolRequest {
             env: Deny,
             run_id: "r".into(),
@@ -880,7 +887,7 @@ mod tests {
             tool_name: "echo".into(),
             arguments: serde_json::json!({"input":"x"}),
         };
-        let resp = svc.oneshot(req).await.unwrap();
+        let resp = svc.call(req).await.unwrap();
         assert!(resp.error.is_some());
         assert_eq!(resp.error.unwrap(), "not approved");
     }

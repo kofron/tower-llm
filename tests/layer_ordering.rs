@@ -6,6 +6,7 @@
 use openai_agents_rs::{
     service::{Effect, ErasedToolLayer, ToolBoxService, ToolRequest, ToolResponse},
     tool::FunctionTool,
+    Tool,
 };
 use serde_json::json;
 use std::sync::{Arc, Mutex};
@@ -72,8 +73,9 @@ async fn test_cross_scope_layer_ordering() {
     // This test directly composes a tool service stack to verify layer ordering
     // without requiring OpenAI API calls
     
-    use openai_agents_rs::service::{build_tool_stack, DefaultEnv, ToolRequest};
-    use tower::ServiceExt;
+    use openai_agents_rs::service::{DefaultEnv, ToolRequest, InputSchemaLayer};
+    use openai_agents_rs::tool_service::IntoToolService;
+    use tower::{ServiceExt, Layer, util::BoxService};
 
     // Shared log to capture execution order
     let log: ProbeLog = Arc::new(Mutex::new(VecDeque::new()));
@@ -85,8 +87,11 @@ async fn test_cross_scope_layer_ordering() {
         |_s: String| "processed".to_string()
     ));
 
-    // Build the tool stack manually like the runner does
-    let mut stack = build_tool_stack::<DefaultEnv>(tool);
+    // Build the tool stack manually like the runner does using service-based approach
+    let tool_service = <FunctionTool as Clone>::clone(&tool).into_service::<DefaultEnv>();
+    let schema = tool.parameters_schema();
+    let base_stack = InputSchemaLayer::lenient(schema).layer(tool_service);
+    let mut stack = BoxService::new(base_stack);
     
     // Apply layers in the fixed order: Tool → Agent → Run (inner-to-outer)
     // Tool layers applied first (innermost, closest to base)
@@ -140,8 +145,9 @@ async fn test_final_effect_precedence() {
     // Test that run-scope finalization takes precedence over tool-scope
     // by directly composing tool stacks
 
-    use openai_agents_rs::service::{build_tool_stack, DefaultEnv, ToolRequest};
-    use tower::ServiceExt;
+    use openai_agents_rs::service::{DefaultEnv, ToolRequest, InputSchemaLayer};
+    use openai_agents_rs::tool_service::IntoToolService;
+    use tower::{ServiceExt, Layer, util::BoxService};
 
     /// A layer that produces a final effect with a specific value
     #[derive(Clone)]
@@ -188,8 +194,11 @@ async fn test_final_effect_precedence() {
         |_s: String| "base response".to_string()
     ));
 
-    // Build the tool stack manually 
-    let mut stack = build_tool_stack::<DefaultEnv>(tool);
+    // Build the tool stack manually using service-based approach
+    let tool_service = <FunctionTool as Clone>::clone(&tool).into_service::<DefaultEnv>();
+    let schema = tool.parameters_schema();
+    let base_stack = InputSchemaLayer::lenient(schema).layer(tool_service);
+    let mut stack = BoxService::new(base_stack);
     
     // Apply layers in the fixed order: Tool → Agent → Run (inner-to-outer)
     // Tool layer that finalizes (innermost)

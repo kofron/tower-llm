@@ -1,8 +1,6 @@
 use openai_agents_rs::env::Env;
-use openai_agents_rs::service::HasApproval;
-use openai_agents_rs::service::ToolResponse;
-use openai_agents_rs::{layers::ApprovalLayer, service::BaseToolService, service::ToolRequest};
-use openai_agents_rs::{layers::InputSchemaLayer, layers::RetryLayer, tool::FunctionTool, Tool};
+use openai_agents_rs::service::{HasApproval, ApprovalLayer, InputSchemaLayer, RetryLayer, ToolRequest, ToolResponse};
+use openai_agents_rs::{tool::FunctionTool, tool_service::IntoToolService, Tool};
 use std::sync::Arc;
 use tower::{Layer, ServiceExt};
 
@@ -26,9 +24,9 @@ impl HasApproval for EnvAllowSafe {
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let safe = Arc::new(FunctionTool::simple("safe", "ok", |s: String| s));
 
-    // Compose a typed stack manually (advanced)
-    // Approval → Retry → InputSchema → BaseTool
-    let base = BaseToolService::new(safe.clone());
+    // Compose a typed stack manually (advanced) using service-based tools
+    // Approval → Retry → InputSchema → ServiceTool
+    let base = <FunctionTool as Clone>::clone(&safe).into_service::<EnvAllowSafe>();
     let stack = ApprovalLayer.layer(
         RetryLayer::times(2).layer(InputSchemaLayer::lenient(safe.parameters_schema()).layer(base)),
     );

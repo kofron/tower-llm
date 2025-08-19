@@ -738,7 +738,56 @@ impl Runner {
                                 Vec::new()
                             };
 
-                            let mut stack = crate::service::build_tool_stack::<DefaultEnv>(tool);
+                            let mut stack = {
+                                // Replace build_tool_stack with service-based approach
+                                use tower::{service_fn, util::BoxService, Layer};
+                                use crate::service::{ToolRequest, ToolResponse, InputSchemaLayer};
+                                use crate::tool::ToolResult;
+                                use crate::env::DefaultEnv;
+                                
+                                let tool_clone = tool.clone();
+                                let schema = tool.parameters_schema();
+                                
+                                // Create service directly without BaseToolService adapter
+                                let tool_service = service_fn(move |req: ToolRequest<DefaultEnv>| {
+                                    let tool = tool_clone.clone();
+                                    async move {
+                                        match tool.execute(req.arguments.clone()).await {
+                                            Ok(ToolResult { output, is_final, error }) => {
+                                                if let Some(err) = error {
+                                                    Ok(ToolResponse {
+                                                        output: serde_json::Value::Null,
+                                                        error: Some(err),
+                                                        effect: crate::service::Effect::Continue,
+                                                    })
+                                                } else {
+                                                    let effect = if is_final {
+                                                        crate::service::Effect::Final(output.clone())
+                                                    } else {
+                                                        crate::service::Effect::Continue
+                                                    };
+                                                    Ok(ToolResponse {
+                                                        output,
+                                                        error: None,
+                                                        effect,
+                                                    })
+                                                }
+                                            },
+                                            Err(e) => {
+                                                Ok(ToolResponse {
+                                                    output: serde_json::Value::Null,
+                                                    error: Some(e.to_string()),
+                                                    effect: crate::service::Effect::Continue,
+                                                })
+                                            }
+                                        }
+                                    }
+                                });
+                                
+                                // Add default schema validation (to be moved to tool constructors in Step 6)
+                                let with_schema = InputSchemaLayer::lenient(schema).layer(tool_service);
+                                BoxService::new(with_schema)
+                            };
                             // Apply layers Tool → Agent → Run (inner-to-outer) for runtime order Run → Agent → Tool → Base
                             // Tool layers applied first (innermost, closest to base)
                             for l in &tool_layers {
@@ -885,8 +934,56 @@ impl Runner {
                                         Vec::new()
                                     };
 
-                                    let mut stack =
-                                        crate::service::build_tool_stack::<DefaultEnv>(tool);
+                                    let mut stack = {
+                                        // Replace build_tool_stack with service-based approach
+                                        use tower::{service_fn, util::BoxService, Layer};
+                                        use crate::service::{ToolRequest, ToolResponse, InputSchemaLayer};
+                                        use crate::tool::ToolResult;
+                                        use crate::env::DefaultEnv;
+                                        
+                                        let tool_clone = tool.clone();
+                                        let schema = tool.parameters_schema();
+                                        
+                                        // Create service directly without BaseToolService adapter
+                                        let tool_service = service_fn(move |req: ToolRequest<DefaultEnv>| {
+                                            let tool = tool_clone.clone();
+                                            async move {
+                                                match tool.execute(req.arguments.clone()).await {
+                                                    Ok(ToolResult { output, is_final, error }) => {
+                                                        if let Some(err) = error {
+                                                            Ok(ToolResponse {
+                                                                output: serde_json::Value::Null,
+                                                                error: Some(err),
+                                                                effect: crate::service::Effect::Continue,
+                                                            })
+                                                        } else {
+                                                            let effect = if is_final {
+                                                                crate::service::Effect::Final(output.clone())
+                                                            } else {
+                                                                crate::service::Effect::Continue
+                                                            };
+                                                            Ok(ToolResponse {
+                                                                output,
+                                                                error: None,
+                                                                effect,
+                                                            })
+                                                        }
+                                                    },
+                                                    Err(e) => {
+                                                        Ok(ToolResponse {
+                                                            output: serde_json::Value::Null,
+                                                            error: Some(e.to_string()),
+                                                            effect: crate::service::Effect::Continue,
+                                                        })
+                                                    }
+                                                }
+                                            }
+                                        });
+                                        
+                                        // Add default schema validation (to be moved to tool constructors in Step 6)
+                                        let with_schema = InputSchemaLayer::lenient(schema).layer(tool_service);
+                                        BoxService::new(with_schema)
+                                    };
                                     // Apply layers Tool → Agent → Run (inner-to-outer) for runtime order Run → Agent → Tool → Base
                                     // Tool layers applied first (innermost, closest to base)
                                     for l in &tool_layers {
@@ -908,7 +1005,7 @@ impl Runner {
                                         tool_name: name.clone(),
                                         arguments: args.clone(),
                                     };
-                                    let out = stack.oneshot(req).await;
+                                    let out: std::result::Result<crate::service::ToolResponse, tower::BoxError> = stack.oneshot(req).await;
                                     match &out {
                                         Ok(_) => span.success(),
                                         Err(e) => span.error(e.to_string()),
