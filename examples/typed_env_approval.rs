@@ -34,6 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         tool_name: "safe".into(),
         arguments: serde_json::json!({"input":"ok"}),
     };
+
     let resp: ToolResponse = stack.oneshot(req).await?;
     println!("response: error={:?} output={}", resp.error, resp.output);
     Ok(())

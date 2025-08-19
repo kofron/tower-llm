@@ -21,6 +21,60 @@ use crate::error::Result;
 use crate::items::{Message, ModelResponse, ToolCall};
 use crate::tool::Tool;
 use crate::usage::Usage;
+fn map_messages_to_openai(
+    messages: Vec<Message>,
+) -> crate::error::Result<Vec<ChatCompletionRequestMessage>> {
+    let mut req_messages: Vec<ChatCompletionRequestMessage> = Vec::with_capacity(messages.len());
+    for m in messages {
+        match m.role {
+            crate::items::Role::System => {
+                let msg = ChatCompletionRequestSystemMessageArgs::default()
+                    .content(m.content)
+                    .build()
+                    .map_err(|e| crate::error::AgentsError::Other(e.to_string()))?;
+                req_messages.push(msg.into());
+            }
+            crate::items::Role::User => {
+                let msg = ChatCompletionRequestUserMessageArgs::default()
+                    .content(m.content)
+                    .build()
+                    .map_err(|e| crate::error::AgentsError::Other(e.to_string()))?;
+                req_messages.push(msg.into());
+            }
+            crate::items::Role::Assistant => {
+                let mut builder = ChatCompletionRequestAssistantMessageArgs::default();
+                if let Some(tool_calls) = m.tool_calls {
+                    let mapped = tool_calls
+                        .into_iter()
+                        .map(|tc| async_openai::types::ChatCompletionMessageToolCall {
+                            id: tc.id,
+                            r#type: ChatCompletionToolType::Function,
+                            function: async_openai::types::FunctionCall {
+                                name: tc.name,
+                                arguments: tc.arguments.to_string(),
+                            },
+                        })
+                        .collect::<Vec<_>>();
+                    builder.tool_calls(mapped);
+                }
+                builder.content(m.content);
+                let msg = builder
+                    .build()
+                    .map_err(|e| crate::error::AgentsError::Other(e.to_string()))?;
+                req_messages.push(msg.into());
+            }
+            crate::items::Role::Tool => {
+                let msg = ChatCompletionRequestToolMessageArgs::default()
+                    .content(m.content)
+                    .tool_call_id(m.tool_call_id.unwrap_or_default())
+                    .build()
+                    .map_err(|e| crate::error::AgentsError::Other(e.to_string()))?;
+                req_messages.push(msg.into());
+            }
+        }
+    }
+    Ok(req_messages)
+}
 
 /// A trait that defines the interface for a Language Model (LLM) provider.
 #[async_trait]
@@ -73,44 +127,7 @@ impl ModelProvider for OpenAIProvider {
         max_tokens: Option<u32>,
     ) -> Result<(ModelResponse, Usage)> {
         // Map messages
-        let mut req_messages: Vec<ChatCompletionRequestMessage> =
-            Vec::with_capacity(messages.len());
-        for m in messages {
-            match m.role {
-                crate::items::Role::System => {
-                    let msg = ChatCompletionRequestSystemMessageArgs::default()
-                        .content(m.content)
-                        .build()
-                        .map_err(|e| crate::error::AgentsError::Other(e.to_string()))?;
-                    req_messages.push(msg.into());
-                }
-                crate::items::Role::User => {
-                    let msg = ChatCompletionRequestUserMessageArgs::default()
-                        .content(m.content)
-                        .build()
-                        .map_err(|e| crate::error::AgentsError::Other(e.to_string()))?;
-                    req_messages.push(msg.into());
-                }
-                crate::items::Role::Assistant => {
-                    // For request messages we only forward assistant content.
-                    // Replaying previous tool_calls is not required for correctness here.
-                    let mut builder = ChatCompletionRequestAssistantMessageArgs::default();
-                    builder.content(m.content);
-                    let msg = builder
-                        .build()
-                        .map_err(|e| crate::error::AgentsError::Other(e.to_string()))?;
-                    req_messages.push(msg.into());
-                }
-                crate::items::Role::Tool => {
-                    let msg = ChatCompletionRequestToolMessageArgs::default()
-                        .content(m.content)
-                        .tool_call_id(m.tool_call_id.unwrap_or_default())
-                        .build()
-                        .map_err(|e| crate::error::AgentsError::Other(e.to_string()))?;
-                    req_messages.push(msg.into());
-                }
-            }
-        }
+        let req_messages = map_messages_to_openai(messages)?;
 
         // Map tools
         let mut tool_specs: Vec<ChatCompletionTool> = Vec::with_capacity(tools.len());
@@ -242,5 +259,60 @@ impl ModelProvider for MockProvider {
 
     fn model_name(&self) -> &str {
         &self.model
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::items::{ItemHelpers, MessageItem, Role, RunItem, ToolCallItem, ToolOutputItem};
+    use chrono::Utc;
+
+    #[test]
+    fn preserves_assistant_tool_calls_before_tool_output() {
+        let items = vec![
+            RunItem::Message(MessageItem {
+                id: "m1".into(),
+                role: Role::User,
+                content: "hi".into(),
+                created_at: Utc::now(),
+            }),
+            RunItem::ToolCall(ToolCallItem {
+                id: "call_1".into(),
+                tool_name: "calc".into(),
+                arguments: serde_json::json!({"x":1}),
+                created_at: Utc::now(),
+            }),
+            RunItem::ToolOutput(ToolOutputItem {
+                id: "o1".into(),
+                tool_call_id: "call_1".into(),
+                output: serde_json::json!({"ok":true}),
+                error: None,
+                created_at: Utc::now(),
+            }),
+        ];
+        let messages = ItemHelpers::to_messages(&items);
+        assert!(messages
+            .get(1)
+            .and_then(|m| m.tool_calls.as_ref())
+            .is_some());
+
+        let mapped = map_messages_to_openai(messages).expect("map ok");
+        assert_eq!(mapped.len(), 3);
+        match &mapped[1] {
+            async_openai::types::ChatCompletionRequestMessage::Assistant(a) => {
+                assert!(
+                    a.tool_calls.is_some(),
+                    "assistant tool_calls must be forwarded"
+                );
+            }
+            other => panic!("expected assistant, got {:?}", other),
+        }
+        match &mapped[2] {
+            async_openai::types::ChatCompletionRequestMessage::Tool(t) => {
+                assert!(!t.tool_call_id.is_empty());
+            }
+            other => panic!("expected tool, got {:?}", other),
+        }
     }
 }
