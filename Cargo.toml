@@ -8,68 +8,7 @@ readme = "README.md"
 repository = "https://github.com/kofron/openai-agents-rs"
 keywords = ["openai", "agents", "llm", "ai", "multi-agent"]
 
-# Basic hello-world example
-[[example]]
-name = "hello_world"
-path = "examples/hello_world.rs"
-
-# Example of an agent using a tool
-[[example]]
-name = "tool_example"
-path = "examples/tool_example.rs"
-
-# Advanced multi-tool calculator agent
-[[example]]
-name = "calculator"
-path = "examples/calculator.rs"
-
-# Advanced multi-agent research system with handoffs
-[[example]]
-name = "multi_agent_research"
-path = "examples/multi_agent_research.rs"
-
-# Example of using session memory and guardrails
-[[example]]
-name = "session_with_guardrails"
-path = "examples/session_with_guardrails.rs"
-
-# Example of persistent sessions with SQLite
-[[example]]
-name = "persistent_session"
-path = "examples/persistent_session.rs"
-
-# Example of parallel tool execution
-[[example]]
-name = "parallel_tools"
-path = "examples/parallel_tools.rs"
-
-[[example]]
-name = "rpn_calculator"
-path = "examples/rpn_calculator.rs"
-
-[[example]]
-name = "db_migrator"
-path = "examples/db_migrator.rs"
-
-[[example]]
-name = "next_step_steer"
-path = "examples/next_step_steer.rs"
-
-[[example]]
-name = "next_agent_loop"
-path = "examples/next_agent_loop.rs"
-
-[[example]]
-name = "next_layers_example"
-path = "examples/next_layers_example.rs"
-
-[[example]]
-name = "next_services_example"
-path = "examples/next_services_example.rs"
-
-[[example]]
-name = "next_utils_example"
-path = "examples/next_utils_example.rs"
+# Examples are auto-discovered from examples/ directory
 
 
 [dependencies]
