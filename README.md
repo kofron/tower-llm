@@ -1,6 +1,6 @@
-# OpenAI Agents SDK for Rust
+# Tower LLM
 
-A Rust implementation of the OpenAI Agents SDK, providing a lightweight yet powerful framework for building multi-agent workflows. This SDK wraps the `async-openai` crate for LLM interactions.
+A Tower-based LLM framework for Rust, providing a lightweight yet powerful framework for building multi-agent workflows. This SDK wraps the `async-openai` crate for LLM interactions.
 
 > Note: The library has fully cut over to a Tower-driven execution path for tools and policies. Upgrade across minor versions to adopt the new behavior.
 

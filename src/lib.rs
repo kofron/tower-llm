@@ -1,4 +1,4 @@
-//! # OpenAI Agents SDK for Rust
+//! # Tower LLM
 //!
 //! A powerful Tower-based framework for building multi-agent workflows with OpenAI LLMs.
 //! This SDK provides composable, type-safe components using Tower's service architecture

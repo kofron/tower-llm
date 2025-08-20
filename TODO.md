@@ -173,7 +173,7 @@ Acceptance criteria:
 Phase 10 — Ergonomics and optional typed Env APIs
 Deliverables:
 
-- [x] Derive macros for tool input/output types to generate schema + serde: attribute macros `#[tool_args]`, `#[tool_output]` in new `openai-agents-derive` crate.
+- [x] Derive macros for tool input/output types to generate schema + serde: attribute macros `#[tool_args]`, `#[tool_output]` in new `tower-llm-derive` crate.
 - [x] A `TypedFunctionTool<Input, Output>` wrapper adapting typed functions to `Value` + schema.
 - [x] Introduce optional typed Env and capability traits for advanced users (generic APIs), keeping the core Tower runner unaffected.
 - [x] Examples showing typed tools and, optionally, typed Env usage.
