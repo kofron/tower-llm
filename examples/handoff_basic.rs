@@ -26,7 +26,7 @@ use tower_llm::{
     groups::{GroupBuilder, MultiExplicitHandoffPolicy, PickRequest},
     policies, Agent, AgentSvc, CompositePolicy,
 };
-use tracing::{info, debug};
+use tracing::info;
 
 // Math-focused calculator tool
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -145,7 +145,7 @@ fn create_math_agent(client: Arc<Client<OpenAIConfig>>) -> AgentSvc {
         },
     );
 
-    let agent = Agent::builder(client)
+    Agent::builder(client)
         .model("gpt-4o-mini")
         .temperature(0.2) // Lower temperature for mathematical precision
         .tool(calculator)
@@ -153,9 +153,7 @@ fn create_math_agent(client: Arc<Client<OpenAIConfig>>) -> AgentSvc {
             policies::until_no_tool_calls(),
             policies::max_steps(3),
         ]))
-        .build();
-
-    agent
+        .build()
 }
 
 fn create_writer_agent(client: Arc<Client<OpenAIConfig>>) -> AgentSvc {
@@ -189,7 +187,7 @@ fn create_writer_agent(client: Arc<Client<OpenAIConfig>>) -> AgentSvc {
         },
     );
 
-    let agent = Agent::builder(client)
+    Agent::builder(client)
         .model("gpt-4o-mini")
         .temperature(0.7) // Higher temperature for creativity
         .tool(text_analyzer)
@@ -197,22 +195,18 @@ fn create_writer_agent(client: Arc<Client<OpenAIConfig>>) -> AgentSvc {
             policies::until_no_tool_calls(),
             policies::max_steps(3),
         ]))
-        .build();
-
-    agent
+        .build()
 }
 
 fn create_general_agent(client: Arc<Client<OpenAIConfig>>) -> AgentSvc {
-    let agent = Agent::builder(client)
+    Agent::builder(client)
         .model("gpt-4o-mini")
         .temperature(0.5)
         .policy(CompositePolicy::new(vec![
             policies::until_no_tool_calls(),
             policies::max_steps(2),
         ]))
-        .build();
-
-    agent
+        .build()
 }
 
 #[tokio::main]

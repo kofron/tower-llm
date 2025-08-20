@@ -29,6 +29,7 @@ use tower_llm::{
 #[derive(Debug, Deserialize, JsonSchema)]
 struct WebSearchArgs {
     query: String,
+    #[allow(dead_code)]
     max_results: Option<u32>,
 }
 

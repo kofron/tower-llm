@@ -64,6 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     struct TimeArgs {
         // OpenAI requires at least empty properties, so we add an optional field
         #[serde(default)]
+        #[allow(dead_code)]
         timezone: Option<String>,
     }
 
@@ -133,10 +134,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("Stop reason: {:?}\n", result3.stop);
 
     // Extract the final assistant message
-    if let Some(last_msg) = result3.messages.last() {
-        if let async_openai::types::ChatCompletionRequestMessage::Assistant(asst) = last_msg {
-            println!("Final Answer: {:?}", asst.content);
-        }
+    if let Some(async_openai::types::ChatCompletionRequestMessage::Assistant(asst)) =
+        result3.messages.last()
+    {
+        println!("Final Answer: {:?}", asst.content);
     }
 
     println!("\n=== Summary ===");

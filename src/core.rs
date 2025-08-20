@@ -2,6 +2,8 @@
 
 use std::{future::Future, pin::Pin, sync::Arc};
 
+use crate::groups::HandoffPolicy;
+use crate::provider::{ModelService, OpenAIProvider, ProviderResponse};
 use async_openai::{
     config::OpenAIConfig,
     types::{
@@ -17,7 +19,21 @@ use futures::future::BoxFuture;
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use tower::{util::BoxService, BoxError, Layer, Service, ServiceExt};
+use tokio::sync::Semaphore;
+use tower::{
+    util::{BoxCloneService, BoxService},
+    BoxError, Layer, Service, ServiceExt,
+};
+
+/// Join policy for parallel tool execution
+#[derive(Debug, Clone, Copy, Default)]
+pub enum ToolJoinPolicy {
+    /// Return error on the first failing tool; pending tools are cancelled
+    #[default]
+    FailFast,
+    /// Run all tools to completion; if any fail, surface an aggregated error at the end
+    JoinAll,
+}
 
 // =============================
 // Tool service modeling
@@ -39,7 +55,7 @@ pub struct ToolOutput {
 }
 
 /// Boxed tool service type alias.
-pub type ToolSvc = BoxService<ToolInvocation, ToolOutput, BoxError>;
+pub type ToolSvc = BoxCloneService<ToolInvocation, ToolOutput, BoxError>;
 
 /// Definition of a tool: function spec (for OpenAI) + service implementation.
 pub struct ToolDef {
@@ -79,7 +95,7 @@ impl ToolDef {
             name,
             description,
             parameters_schema,
-            service: BoxService::new(svc),
+            service: BoxCloneService::new(svc),
         }
     }
 
@@ -131,6 +147,7 @@ where
 }
 
 /// Simple router service over tools using a name → index table.
+#[derive(Clone)]
 pub struct ToolRouter {
     name_to_index: std::collections::HashMap<&'static str, usize>,
     services: Vec<ToolSvc>, // index 0 is the unknown-tool fallback
@@ -140,7 +157,7 @@ impl ToolRouter {
     pub fn new(tools: Vec<ToolDef>) -> (Self, Vec<ChatCompletionTool>) {
         use std::collections::HashMap;
 
-        let unknown = BoxService::new(tower::service_fn(|inv: ToolInvocation| async move {
+        let unknown = BoxCloneService::new(tower::service_fn(|inv: ToolInvocation| async move {
             Err::<ToolOutput, BoxError>(format!("unknown tool: {}", inv.name).into())
         }));
 
@@ -188,7 +205,7 @@ impl Service<ToolInvocation> for ToolRouter {
         let svc: &mut ToolSvc = &mut self.services[idx];
         // Call selected service and forward its future
         let fut = svc.call(req);
-        Box::pin(async move { fut.await })
+        Box::pin(fut)
     }
 }
 
@@ -221,29 +238,35 @@ pub enum StepOutcome {
 }
 
 /// One-step agent service parameterized by a routed tool service `S`.
-pub struct Step<S> {
-    client: Arc<Client<OpenAIConfig>>,
+pub struct Step<S, P> {
+    provider: Arc<tokio::sync::Mutex<P>>,
     model: String,
     temperature: Option<f32>,
     max_tokens: Option<u32>,
-    tools: Arc<tokio::sync::Mutex<S>>,
+    tools: S,
     tool_specs: Arc<Vec<ChatCompletionTool>>, // supplied to requests if missing
+    parallel_tools: bool,
+    tool_concurrency_limit: Option<usize>,
+    join_policy: ToolJoinPolicy,
 }
 
-impl<S> Step<S> {
+impl<S, P> Step<S, P> {
     pub fn new(
-        client: Arc<Client<OpenAIConfig>>,
+        provider: P,
         model: impl Into<String>,
         tools: S,
         tool_specs: Vec<ChatCompletionTool>,
     ) -> Self {
         Self {
-            client,
+            provider: Arc::new(tokio::sync::Mutex::new(provider)),
             model: model.into(),
             temperature: None,
             max_tokens: None,
-            tools: Arc::new(tokio::sync::Mutex::new(tools)),
+            tools,
             tool_specs: Arc::new(tool_specs),
+            parallel_tools: false,
+            tool_concurrency_limit: None,
+            join_policy: ToolJoinPolicy::FailFast,
         }
     }
 
@@ -254,31 +277,48 @@ impl<S> Step<S> {
 
     pub fn max_tokens(mut self, mt: u32) -> Self {
         self.max_tokens = Some(mt);
+        self
+    }
+
+    pub fn enable_parallel_tools(mut self, enabled: bool) -> Self {
+        self.parallel_tools = enabled;
+        self
+    }
+
+    pub fn tool_concurrency_limit(mut self, limit: usize) -> Self {
+        self.tool_concurrency_limit = Some(limit);
+        self
+    }
+
+    pub fn tool_join_policy(mut self, policy: ToolJoinPolicy) -> Self {
+        self.join_policy = policy;
         self
     }
 }
 
 /// Layer that lifts a routed tool service `S` into a `Step<S>` service.
-pub struct StepLayer {
-    client: Arc<Client<OpenAIConfig>>,
+pub struct StepLayer<P> {
+    provider: P,
     model: String,
     temperature: Option<f32>,
     max_tokens: Option<u32>,
     tool_specs: Arc<Vec<ChatCompletionTool>>,
+    parallel_tools: bool,
+    tool_concurrency_limit: Option<usize>,
+    join_policy: ToolJoinPolicy,
 }
 
-impl StepLayer {
-    pub fn new(
-        client: Arc<Client<OpenAIConfig>>,
-        model: impl Into<String>,
-        tool_specs: Vec<ChatCompletionTool>,
-    ) -> Self {
+impl<P> StepLayer<P> {
+    pub fn new(provider: P, model: impl Into<String>, tool_specs: Vec<ChatCompletionTool>) -> Self {
         Self {
-            client,
+            provider,
             model: model.into(),
             temperature: None,
             max_tokens: None,
             tool_specs: Arc::new(tool_specs),
+            parallel_tools: false,
+            tool_concurrency_limit: None,
+            join_policy: ToolJoinPolicy::FailFast,
         }
     }
 
@@ -291,28 +331,51 @@ impl StepLayer {
         self.max_tokens = Some(mt);
         self
     }
+
+    pub fn parallel_tools(mut self, enabled: bool) -> Self {
+        self.parallel_tools = enabled;
+        self
+    }
+
+    pub fn tool_concurrency_limit(mut self, limit: usize) -> Self {
+        self.tool_concurrency_limit = Some(limit);
+        self
+    }
+
+    pub fn tool_join_policy(mut self, policy: ToolJoinPolicy) -> Self {
+        self.join_policy = policy;
+        self
+    }
 }
 
-impl<S> Layer<S> for StepLayer {
-    type Service = Step<S>;
+impl<S, P> Layer<S> for StepLayer<P>
+where
+    P: Clone,
+{
+    type Service = Step<S, P>;
 
     fn layer(&self, tools: S) -> Self::Service {
         let mut s = Step::new(
-            self.client.clone(),
+            self.provider.clone(),
             self.model.clone(),
             tools,
             (*self.tool_specs).clone(),
         );
         s.temperature = self.temperature;
         s.max_tokens = self.max_tokens;
+        s.parallel_tools = self.parallel_tools;
+        s.tool_concurrency_limit = self.tool_concurrency_limit;
+        s.join_policy = self.join_policy;
         s
     }
 }
 
-impl<S> Service<CreateChatCompletionRequest> for Step<S>
+impl<S, P> Service<CreateChatCompletionRequest> for Step<S, P>
 where
-    S: Service<ToolInvocation, Response = ToolOutput, Error = BoxError> + Send + 'static,
+    S: Service<ToolInvocation, Response = ToolOutput, Error = BoxError> + Clone + Send + 'static,
     S::Future: Send + 'static,
+    P: ModelService + Send + 'static,
+    P::Future: Send + 'static,
 {
     type Response = StepOutcome;
     type Error = BoxError;
@@ -327,12 +390,15 @@ where
     }
 
     fn call(&mut self, req: CreateChatCompletionRequest) -> Self::Future {
-        let client = self.client.clone();
+        let provider = self.provider.clone();
         let model = self.model.clone();
         let temperature = self.temperature;
         let max_tokens = self.max_tokens;
         let tools = self.tools.clone();
         let tool_specs = self.tool_specs.clone();
+        let parallel_tools = self.parallel_tools;
+        let _tool_concurrency_limit = self.tool_concurrency_limit;
+        let join_policy = self.join_policy;
 
         Box::pin(async move {
             // Rebuild request using builder to avoid deprecated field access
@@ -364,19 +430,18 @@ where
             let mut messages = rebuilt_req.messages.clone();
 
             // Single OpenAI call
-            let resp = client.chat().create(rebuilt_req).await?;
-            let usage = resp.usage.clone().unwrap_or_default();
+            // Provider call
+            let mut p = provider.lock().await;
+            let ProviderResponse {
+                assistant,
+                prompt_tokens,
+                completion_tokens,
+            } = ServiceExt::ready(&mut *p).await?.call(rebuilt_req).await?;
             let mut aux = StepAux {
-                prompt_tokens: usage.prompt_tokens as usize,
-                completion_tokens: usage.completion_tokens as usize,
+                prompt_tokens,
+                completion_tokens,
                 tool_invocations: 0,
             };
-
-            let choice = resp
-                .choices
-                .first()
-                .ok_or_else(|| "no choices".to_string())?;
-            let assistant = choice.message.clone();
 
             // Append assistant message by constructing request-side equivalent
             let mut asst_builder = ChatCompletionRequestAssistantMessageArgs::default();
@@ -400,25 +465,123 @@ where
             }
 
             let mut invoked_names: Vec<String> = Vec::with_capacity(tool_calls.len());
-            for tc in tool_calls {
-                let name = tc.function.name;
-                let args: Value = serde_json::from_str(&tc.function.arguments)?;
-                let inv = ToolInvocation {
-                    id: tc.id.clone(),
-                    name: name.clone(),
-                    arguments: args,
-                };
-                invoked_names.push(name);
-                let mut guard = tools.lock().await;
-                let ToolOutput { id, result } = guard.ready().await?.call(inv).await?;
-                aux.tool_invocations += 1;
+            let invocations: Vec<ToolInvocation> = tool_calls
+                .into_iter()
+                .map(|tc| {
+                    let name = tc.function.name;
+                    invoked_names.push(name.clone());
+                    let args: Value =
+                        serde_json::from_str(&tc.function.arguments).unwrap_or(Value::Null);
+                    ToolInvocation {
+                        id: tc.id,
+                        name,
+                        arguments: args,
+                    }
+                })
+                .collect();
 
-                // Append tool role message
-                let tool_msg = ChatCompletionRequestToolMessageArgs::default()
-                    .content(result.to_string())
-                    .tool_call_id(id)
-                    .build()?;
-                messages.push(tool_msg.into());
+            if invocations.len() > 1 && parallel_tools {
+                // Fire in parallel, preserve order
+                let sem = _tool_concurrency_limit.map(|n| Arc::new(Semaphore::new(n)));
+                match join_policy {
+                    ToolJoinPolicy::FailFast => {
+                        let futures: Vec<_> = invocations
+                            .into_iter()
+                            .map(|inv| {
+                                let mut svc = tools.clone();
+                                let sem_cl = sem.clone();
+                                async move {
+                                    let _permit = match &sem_cl {
+                                        Some(s) => Some(
+                                            s.clone().acquire_owned().await.expect("semaphore"),
+                                        ),
+                                        None => None,
+                                    };
+                                    let ToolOutput { id, result } =
+                                        ServiceExt::ready(&mut svc).await?.call(inv).await?;
+                                    Ok::<(String, Value), BoxError>((id, result))
+                                }
+                            })
+                            .collect();
+                        let outputs: Vec<(String, Value)> =
+                            futures::future::try_join_all(futures).await?;
+                        for (id, result) in outputs {
+                            aux.tool_invocations += 1;
+                            let tool_msg = ChatCompletionRequestToolMessageArgs::default()
+                                .content(result.to_string())
+                                .tool_call_id(id)
+                                .build()?;
+                            messages.push(tool_msg.into());
+                        }
+                    }
+                    ToolJoinPolicy::JoinAll => {
+                        let futures: Vec<_> =
+                            invocations
+                                .into_iter()
+                                .enumerate()
+                                .map(|(idx, inv)| {
+                                    let mut svc = tools.clone();
+                                    let sem_cl = sem.clone();
+                                    async move {
+                                        let _permit = match &sem_cl {
+                                            Some(s) => Some(
+                                                s.clone().acquire_owned().await.expect("semaphore"),
+                                            ),
+                                            None => None,
+                                        };
+                                        let res =
+                                            ServiceExt::ready(&mut svc).await?.call(inv).await;
+                                        match res {
+                                            Ok(ToolOutput { id, result }) => Ok::<
+                                                Result<(usize, String, Value), BoxError>,
+                                                BoxError,
+                                            >(
+                                                Ok((idx, id, result)),
+                                            ),
+                                            Err(e) => Ok(Err(e)),
+                                        }
+                                    }
+                                })
+                                .collect();
+                        let results = futures::future::join_all(futures).await;
+                        let mut successes: Vec<(usize, String, Value)> = Vec::new();
+                        let mut errors: Vec<String> = Vec::new();
+                        for item in results.into_iter() {
+                            match item {
+                                Ok(Ok((idx, id, result))) => successes.push((idx, id, result)),
+                                Ok(Err(e)) => errors.push(format!("{}", e)),
+                                Err(e) => errors.push(format!("{}", e)),
+                            }
+                        }
+                        successes.sort_by_key(|(idx, _, _)| *idx);
+                        for (_idx, id, result) in successes.into_iter() {
+                            aux.tool_invocations += 1;
+                            let tool_msg = ChatCompletionRequestToolMessageArgs::default()
+                                .content(result.to_string())
+                                .tool_call_id(id)
+                                .build()?;
+                            messages.push(tool_msg.into());
+                        }
+                        if !errors.is_empty() {
+                            return Err(
+                                format!("one or more tools failed: {}", errors.join("; ")).into()
+                            );
+                        }
+                    }
+                }
+            } else {
+                // Sequential
+                for inv in invocations {
+                    let mut svc = tools.clone();
+                    let ToolOutput { id, result } =
+                        ServiceExt::ready(&mut svc).await?.call(inv).await?;
+                    aux.tool_invocations += 1;
+                    let tool_msg = ChatCompletionRequestToolMessageArgs::default()
+                        .content(result.to_string())
+                        .tool_call_id(id)
+                        .build()?;
+                    messages.push(tool_msg.into());
+                }
             }
 
             Ok(StepOutcome::Next {
@@ -514,6 +677,18 @@ pub struct AgentBuilder {
     max_tokens: Option<u32>,
     tools: Vec<ToolDef>,
     policy: CompositePolicy,
+    handoff: Option<crate::groups::AnyHandoffPolicy>,
+    provider: Option<
+        tower::util::BoxCloneService<
+            CreateChatCompletionRequest,
+            crate::provider::ProviderResponse,
+            BoxError,
+        >,
+    >,
+    enable_parallel_tools: bool,
+    tool_concurrency_limit: Option<usize>,
+    tool_join_policy: ToolJoinPolicy,
+    agent_service_map: Option<Arc<dyn Fn(AgentSvc) -> AgentSvc + Send + Sync + 'static>>, // optional final wrapper
 }
 
 impl Agent {
@@ -525,6 +700,12 @@ impl Agent {
             max_tokens: None,
             tools: Vec::new(),
             policy: CompositePolicy::default(),
+            handoff: None,
+            provider: None,
+            enable_parallel_tools: false,
+            tool_concurrency_limit: None,
+            tool_join_policy: ToolJoinPolicy::FailFast,
+            agent_service_map: None,
         }
     }
 }
@@ -555,14 +736,153 @@ impl AgentBuilder {
         self
     }
 
+    /// Enable handoff-aware tool interception and advertise handoff tools
+    pub fn handoff_policy(mut self, policy: crate::groups::AnyHandoffPolicy) -> Self {
+        self.handoff = Some(policy);
+        self
+    }
+
+    /// Override the non-streaming provider (useful for testing with a fixed/mocked model)
+    pub fn with_provider<P>(mut self, provider: P) -> Self
+    where
+        P: crate::provider::ModelService + Clone + Send + 'static,
+        P::Future: Send + 'static,
+    {
+        self.provider = Some(tower::util::BoxCloneService::new(provider));
+        self
+    }
+
+    /// Enable or disable parallel tool execution within a step
+    pub fn parallel_tools(mut self, enabled: bool) -> Self {
+        self.enable_parallel_tools = enabled;
+        self
+    }
+
+    /// Set an optional concurrency limit for parallel tool execution
+    pub fn tool_concurrency_limit(mut self, limit: usize) -> Self {
+        self.tool_concurrency_limit = Some(limit);
+        self
+    }
+
+    /// Configure how parallel tool errors are handled (fail fast or join all)
+    pub fn tool_join_policy(mut self, policy: ToolJoinPolicy) -> Self {
+        self.tool_join_policy = policy;
+        self
+    }
+
+    /// Optional: wrap the final built agent service with a custom function.
+    /// This enables applying Tower layers at the agent boundary.
+    pub fn map_agent_service<F>(mut self, f: F) -> Self
+    where
+        F: Fn(AgentSvc) -> AgentSvc + Send + Sync + 'static,
+    {
+        self.agent_service_map = Some(Arc::new(f));
+        self
+    }
+
     pub fn build(self) -> AgentSvc {
-        let (router, specs) = ToolRouter::new(self.tools);
-        let step = StepLayer::new(self.client, self.model, specs)
+        let (router, mut specs) = ToolRouter::new(self.tools);
+        // If handoff policy provided, wrap router and extend tool specs
+        let routed: ToolSvc = if let Some(policy) = &self.handoff {
+            let hand_spec = policy.handoff_tools();
+            if !hand_spec.is_empty() {
+                specs.extend(hand_spec);
+            }
+            crate::groups::layer_tool_router_with_handoff(router, policy.clone())
+        } else {
+            // No handoff layer; clonable box of the router
+            BoxCloneService::new(router)
+        };
+
+        let base_provider: tower::util::BoxCloneService<
+            CreateChatCompletionRequest,
+            crate::provider::ProviderResponse,
+            BoxError,
+        > = if let Some(p) = self.provider {
+            p
+        } else {
+            tower::util::BoxCloneService::new(OpenAIProvider::new(self.client))
+        };
+        let mut step_layer = StepLayer::new(base_provider, self.model, specs)
             .temperature(self.temperature.unwrap_or(0.0))
             .max_tokens(self.max_tokens.unwrap_or(512))
-            .layer(router);
+            .parallel_tools(self.enable_parallel_tools)
+            .tool_join_policy(self.tool_join_policy);
+        if let Some(lim) = self.tool_concurrency_limit {
+            step_layer = step_layer.tool_concurrency_limit(lim);
+        }
+        let step = step_layer.layer(routed);
         let agent = AgentLoopLayer::new(self.policy).layer(step);
-        BoxService::new(agent)
+        let boxed = BoxService::new(agent);
+        match &self.agent_service_map {
+            Some(map) => (map)(boxed),
+            None => boxed,
+        }
+    }
+
+    /// Build an agent service wrapped with session memory persistence
+    pub fn build_with_session<Ls, Ss>(
+        self,
+        load: Arc<Ls>,
+        save: Arc<Ss>,
+        session_id: crate::sessions::SessionId,
+    ) -> AgentSvc
+    where
+        Ls: Service<
+                crate::sessions::LoadSession,
+                Response = crate::sessions::History,
+                Error = BoxError,
+            > + Send
+            + Sync
+            + Clone
+            + 'static,
+        Ls::Future: Send + 'static,
+        Ss: Service<crate::sessions::SaveSession, Response = (), Error = BoxError>
+            + Send
+            + Sync
+            + Clone
+            + 'static,
+        Ss::Future: Send + 'static,
+    {
+        let (router, mut specs) = ToolRouter::new(self.tools);
+        let routed: ToolSvc = if let Some(policy) = &self.handoff {
+            let hand_spec = policy.handoff_tools();
+            if !hand_spec.is_empty() {
+                specs.extend(hand_spec);
+            }
+            crate::groups::layer_tool_router_with_handoff(router, policy.clone())
+        } else {
+            BoxCloneService::new(router)
+        };
+
+        let base_provider: tower::util::BoxCloneService<
+            CreateChatCompletionRequest,
+            crate::provider::ProviderResponse,
+            BoxError,
+        > = if let Some(p) = self.provider {
+            p
+        } else {
+            tower::util::BoxCloneService::new(OpenAIProvider::new(self.client))
+        };
+        let mut step_layer = StepLayer::new(base_provider, self.model, specs)
+            .temperature(self.temperature.unwrap_or(0.0))
+            .max_tokens(self.max_tokens.unwrap_or(512))
+            .parallel_tools(self.enable_parallel_tools)
+            .tool_join_policy(self.tool_join_policy);
+        if let Some(lim) = self.tool_concurrency_limit {
+            step_layer = step_layer.tool_concurrency_limit(lim);
+        }
+        let step = step_layer.layer(routed);
+
+        // Attach memory layer
+        let mem_layer = crate::sessions::MemoryLayer::new(load, save, session_id);
+        let step_with_mem = mem_layer.layer(step);
+        let agent = AgentLoopLayer::new(self.policy).layer(step_with_mem);
+        let boxed = BoxService::new(agent);
+        match &self.agent_service_map {
+            Some(map) => (map)(boxed),
+            None => boxed,
+        }
     }
 }
 
@@ -586,6 +906,7 @@ pub trait AgentPolicy: Send + Sync {
 
 /// Function-backed policy for ergonomic composition.
 #[derive(Clone)]
+#[allow(clippy::type_complexity)]
 pub struct PolicyFn(
     pub Arc<dyn Fn(&LoopState, &StepOutcome) -> Option<AgentStopReason> + Send + Sync + 'static>,
 );

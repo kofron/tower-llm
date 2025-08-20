@@ -90,6 +90,9 @@ pub use core::{
     ToolSvc,
 };
 
+// Re-export join policy for tool execution configuration
+pub use core::ToolJoinPolicy;
+
 // Public re-exports for convenience
 pub use error::{AgentsError, Result};
 pub use memory::Session;

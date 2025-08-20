@@ -4,8 +4,7 @@
 use std::sync::Arc;
 
 use async_openai::types::{ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequestArgs};
-use async_openai::{config::OpenAIConfig, Client};
-use tower::{Layer, Service, ServiceExt};
+use tower::Layer;
 
 // Import the next module and its submodules
 // Core module is now at root level

@@ -219,16 +219,14 @@ mod tests {
         static MAX_OBSERVED: AtomicUsize = AtomicUsize::new(0);
         let router = service_fn(|inv: ToolInvocation| async move {
             let now = CURRENT.fetch_add(1, Ordering::SeqCst) + 1;
-            loop {
-                let max = MAX_OBSERVED.load(Ordering::SeqCst);
-                if now > max {
-                    MAX_OBSERVED
-                        .compare_exchange(max, now, Ordering::SeqCst, Ordering::SeqCst)
-                        .ok();
-                } else {
-                    break;
-                }
-                break;
+            let max = MAX_OBSERVED.load(Ordering::SeqCst);
+            if now > max {
+                let _ = MAX_OBSERVED.compare_exchange(
+                    max,
+                    now,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                );
             }
             sleep(Duration::from_millis(10)).await;
             CURRENT.fetch_sub(1, Ordering::SeqCst);

@@ -42,6 +42,7 @@ struct ContentGenerateArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct EditorialReviewArgs {
     /// Content to review
+    #[allow(dead_code)]
     content: String,
     /// Type of review (grammar, style, technical)
     review_type: String,
@@ -51,6 +52,7 @@ struct EditorialReviewArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct SeoOptimizeArgs {
     /// Content to optimize
+    #[allow(dead_code)]
     content: String,
     /// Target keywords
     keywords: Vec<String>,
