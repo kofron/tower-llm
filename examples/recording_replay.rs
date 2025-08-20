@@ -111,7 +111,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         println!("  ✅ Replayed run returned {} messages", messages.len());
 
         // Verify it matches the original
-        if let tower_llm::StepOutcome::Done { messages: original, .. } = outcome {
+        if let tower_llm::StepOutcome::Done {
+            messages: original, ..
+        } = outcome
+        {
             if messages.len() == original.len() {
                 println!("  ✅ Replay matches original perfectly!");
             } else {

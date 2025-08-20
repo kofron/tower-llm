@@ -239,7 +239,6 @@ pub fn items_to_messages(items: &[RunItem]) -> Vec<ChatCompletionRequestMessage>
 mod tests {
     use super::*;
     use async_openai::types::ChatCompletionRequestMessage as ReqMsg;
-    
 
     fn assistant_with_calls(name: &str, args: Value, id: &str) -> ReqMsg {
         let tc = async_openai::types::ChatCompletionMessageToolCall {

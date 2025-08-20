@@ -21,7 +21,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use tower::{Service, ServiceExt};
 use tower_llm::{
-    groups::{GroupBuilder, SequentialHandoffPolicy, PickRequest},
+    groups::{GroupBuilder, PickRequest, SequentialHandoffPolicy},
     policies, Agent, AgentSvc, CompositePolicy,
 };
 
@@ -113,11 +113,12 @@ fn create_analysis_agent(client: Arc<Client<OpenAIConfig>>) -> AgentSvc {
         "analyze_data",
         "Analyze data for insights",
         |args: AnalysisArgs| async move {
-            println!("  📊 Analyzing: {} (type: {})", 
-                &args.data[..args.data.len().min(50)], 
+            println!(
+                "  📊 Analyzing: {} (type: {})",
+                &args.data[..args.data.len().min(50)],
                 args.analysis_type
             );
-            
+
             let result = match args.analysis_type.as_str() {
                 "sentiment" => json!({
                     "sentiment": "positive",
@@ -135,9 +136,9 @@ fn create_analysis_agent(client: Arc<Client<OpenAIConfig>>) -> AgentSvc {
                         "25% average productivity gains"
                     ]
                 }),
-                _ => json!({"error": "Unknown analysis type"})
+                _ => json!({"error": "Unknown analysis type"}),
             };
-            
+
             Ok::<_, tower::BoxError>(result)
         },
     );
@@ -181,7 +182,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .init();
 
     println!("=== Sequential Handoff Example with Real LLM Agents ===\n");
-    
+
     println!("This example demonstrates sequential workflow orchestration:");
     println!("• Picker: Always routes to research_agent (workflow entry point)");
     println!("• Policy: Enforces Research → Analysis → Report sequence");
@@ -229,7 +230,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .build()?;
 
     let start_time = std::time::Instant::now();
-    
+
     match coordinator.ready().await?.call(req).await {
         Ok(result) => {
             let duration = start_time.elapsed();
@@ -238,7 +239,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             println!("   - Total messages: {}", result.messages.len());
             println!("   - Total steps: {}", result.steps);
             println!("   - Duration: {:?}", duration);
-            
+
             println!("\n📝 Workflow progression:");
             for (i, msg) in result.messages.iter().enumerate() {
                 if let ChatCompletionRequestMessage::Assistant(assistant_msg) = msg {
@@ -247,16 +248,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             async_openai::types::ChatCompletionRequestAssistantMessageContent::Text(t) => t.as_str(),
                             _ => "(non-text content)",
                         };
-                        
+
                         // Identify which agent this is from based on content patterns
-                        let agent = if i == 0 || text.contains("research") || text.contains("found") {
+                        let agent = if i == 0 || text.contains("research") || text.contains("found")
+                        {
                             "Research"
                         } else if text.contains("analysis") || text.contains("insights") {
                             "Analysis"
                         } else {
                             "Report"
                         };
-                        
+
                         let preview = if text.len() > 150 {
                             format!("{}...", &text[..150])
                         } else {
@@ -266,19 +268,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     }
                 }
             }
-            
+
             // Show the final report
             if let Some(ChatCompletionRequestMessage::Assistant(msg)) = result.messages.last() {
                 if let Some(content) = &msg.content {
                     let text = match content {
-                        async_openai::types::ChatCompletionRequestAssistantMessageContent::Text(t) => t,
+                        async_openai::types::ChatCompletionRequestAssistantMessageContent::Text(
+                            t,
+                        ) => t,
                         _ => "(non-text content)",
                     };
                     println!("\n=== Final Report ===");
                     println!("{}", text);
                 }
             }
-        },
+        }
         Err(e) => println!("❌ Workflow failed: {}", e),
     }
 

@@ -8,9 +8,8 @@
 use async_openai::{
     config::OpenAIConfig,
     types::{
-        ChatCompletionRequestMessage, ChatCompletionRequestUserMessageArgs,
-        ChatCompletionRequestSystemMessageArgs,
-        CreateChatCompletionRequestArgs,
+        ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs,
+        ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequestArgs,
     },
     Client,
 };
@@ -138,7 +137,7 @@ fn create_math_agent(client: Arc<Client<OpenAIConfig>>) -> AgentSvc {
             };
 
             println!("  🧮 Calculator: {} {} {} = {}", args.a, op_str, args.b, result);
-            Ok::<_, tower::BoxError>(json!({ 
+            Ok::<_, tower::BoxError>(json!({
                 "result": result,
                 "expression": format!("{} {} {} = {}", args.a, op_str, args.b, result)
             }))
@@ -168,9 +167,12 @@ fn create_writer_agent(client: Arc<Client<OpenAIConfig>>) -> AgentSvc {
                     json!({ "word_count": count })
                 }
                 "complexity" => {
-                    let avg_word_len: f64 = args.text.split_whitespace()
+                    let avg_word_len: f64 = args
+                        .text
+                        .split_whitespace()
                         .map(|w| w.len() as f64)
-                        .sum::<f64>() / args.text.split_whitespace().count() as f64;
+                        .sum::<f64>()
+                        / args.text.split_whitespace().count() as f64;
                     json!({ "average_word_length": avg_word_len })
                 }
                 "readability" => {
@@ -179,9 +181,9 @@ fn create_writer_agent(client: Arc<Client<OpenAIConfig>>) -> AgentSvc {
                     let avg_sentence_len = words as f64 / sentences as f64;
                     json!({ "average_sentence_length": avg_sentence_len })
                 }
-                _ => json!({ "error": "Unknown analysis type" })
+                _ => json!({ "error": "Unknown analysis type" }),
             };
-            
+
             println!("  📝 Text Analyzer: {} = {:?}", args.analysis_type, result);
             Ok::<_, tower::BoxError>(result)
         },
@@ -243,7 +245,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut handoffs = HashMap::new();
     handoffs.insert("handoff_to_math".to_string(), "math_agent".to_string());
     handoffs.insert("handoff_to_writer".to_string(), "writer_agent".to_string());
-    handoffs.insert("handoff_to_general".to_string(), "general_agent".to_string());
+    handoffs.insert(
+        "handoff_to_general".to_string(),
+        "general_agent".to_string(),
+    );
     let handoff_policy = MultiExplicitHandoffPolicy::new(handoffs);
 
     // Create picker - defines WHO starts based on input
@@ -264,7 +269,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let system_message = async_openai::types::ChatCompletionRequestSystemMessageArgs::default()
         .content("You are a mathematics specialist. Use the calculator tool for calculations. For non-math tasks like writing, you can use the handoff_to_writer tool to delegate to the writing specialist.")
         .build()?;
-    
+
     let user_message1 = ChatCompletionRequestUserMessageArgs::default()
         .content("Calculate 25 * 4 + 15")
         .build()?;
@@ -273,13 +278,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .model("gpt-4o-mini")
         .messages(vec![
             ChatCompletionRequestMessage::System(system_message),
-            ChatCompletionRequestMessage::User(user_message1)
+            ChatCompletionRequestMessage::User(user_message1),
         ])
         .build()?;
 
     match coordinator.ready().await?.call(req1).await {
         Ok(result) => {
-            println!("\n✅ Result: {} messages, {} steps", result.messages.len(), result.steps);
+            println!(
+                "\n✅ Result: {} messages, {} steps",
+                result.messages.len(),
+                result.steps
+            );
             if let Some(ChatCompletionRequestMessage::Assistant(msg)) = result.messages.last() {
                 if let Some(content) = &msg.content {
                     let text = match content {
@@ -301,7 +310,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let system_message2 = ChatCompletionRequestSystemMessageArgs::default()
         .content("You are a writing specialist. Use the text_analyzer tool to analyze any text. For math calculations, use the handoff_to_math tool to delegate to the math specialist.")
         .build()?;
-    
+
     let user_message2 = ChatCompletionRequestUserMessageArgs::default()
         .content("Write a short poem about coding")
         .build()?;
@@ -310,13 +319,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .model("gpt-4o-mini")
         .messages(vec![
             ChatCompletionRequestMessage::System(system_message2),
-            ChatCompletionRequestMessage::User(user_message2)
+            ChatCompletionRequestMessage::User(user_message2),
         ])
         .build()?;
 
     match coordinator.ready().await?.call(req2).await {
         Ok(result) => {
-            println!("\n✅ Result: {} messages, {} steps", result.messages.len(), result.steps);
+            println!(
+                "\n✅ Result: {} messages, {} steps",
+                result.messages.len(),
+                result.steps
+            );
             if let Some(ChatCompletionRequestMessage::Assistant(msg)) = result.messages.last() {
                 if let Some(content) = &msg.content {
                     let text = match content {
@@ -338,7 +351,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let system_message3 = ChatCompletionRequestSystemMessageArgs::default()
         .content("You are a mathematics specialist. Use the calculator tool for any math calculations (the operation must be 'add', 'subtract', 'multiply', or 'divide'). For creative writing tasks like poems or haikus, use the handoff_to_writer tool to delegate to the writing specialist.")
         .build()?;
-    
+
     let user_message3 = ChatCompletionRequestUserMessageArgs::default()
         .content("Calculate 100 divided by 5, then write a haiku about the result (twenty)")
         .build()?;
@@ -347,13 +360,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .model("gpt-4o-mini")
         .messages(vec![
             ChatCompletionRequestMessage::System(system_message3),
-            ChatCompletionRequestMessage::User(user_message3)
+            ChatCompletionRequestMessage::User(user_message3),
         ])
         .build()?;
 
     match coordinator.ready().await?.call(req3).await {
         Ok(result) => {
-            println!("\n✅ Result: {} messages, {} steps", result.messages.len(), result.steps);
+            println!(
+                "\n✅ Result: {} messages, {} steps",
+                result.messages.len(),
+                result.steps
+            );
             println!("📊 Conversation flow:");
             for (i, msg) in result.messages.iter().enumerate() {
                 if let ChatCompletionRequestMessage::Assistant(assistant_msg) = msg {

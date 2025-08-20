@@ -8,9 +8,8 @@
 use async_openai::{
     config::OpenAIConfig,
     types::{
-        ChatCompletionRequestMessage, ChatCompletionRequestUserMessageArgs,
-        ChatCompletionRequestSystemMessageArgs,
-        CreateChatCompletionRequestArgs,
+        ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs,
+        ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequestArgs,
     },
     Client,
 };
@@ -24,8 +23,8 @@ use std::sync::Arc;
 use tower::{Service, ServiceExt};
 use tower_llm::{
     groups::{
-        GroupBuilder, MultiExplicitHandoffPolicy, SequentialHandoffPolicy, 
-        CompositeHandoffPolicy, AnyHandoffPolicy, PickRequest
+        AnyHandoffPolicy, CompositeHandoffPolicy, GroupBuilder, MultiExplicitHandoffPolicy,
+        PickRequest, SequentialHandoffPolicy,
     },
     policies, Agent, AgentSvc, CompositePolicy,
 };
@@ -93,23 +92,34 @@ impl Service<PickRequest> for SupportPicker {
                 .unwrap_or_default();
 
             // High-priority escalation keywords go straight to manager
-            if content.contains("lawsuit") || content.contains("lawyer") || 
-               content.contains("unacceptable") || content.contains("terrible service") {
+            if content.contains("lawsuit")
+                || content.contains("lawyer")
+                || content.contains("unacceptable")
+                || content.contains("terrible service")
+            {
                 println!("🚨 Picker: Critical issue detected → routing to manager_agent");
                 return Ok("manager_agent".to_string());
             }
 
             // Billing issues go to billing specialist
-            if content.contains("billing") || content.contains("refund") || 
-               content.contains("charge") || content.contains("payment") || content.contains("invoice") {
+            if content.contains("billing")
+                || content.contains("refund")
+                || content.contains("charge")
+                || content.contains("payment")
+                || content.contains("invoice")
+            {
                 println!("💳 Picker: Billing issue → routing to billing_agent");
                 return Ok("billing_agent".to_string());
             }
 
             // Technical issues go to technical specialist
-            if content.contains("api") || content.contains("technical") || 
-               content.contains("error") || content.contains("integration") || 
-               content.contains("bug") || content.contains("not working") {
+            if content.contains("api")
+                || content.contains("technical")
+                || content.contains("error")
+                || content.contains("integration")
+                || content.contains("bug")
+                || content.contains("not working")
+            {
                 println!("🔧 Picker: Technical issue → routing to technical_agent");
                 return Ok("technical_agent".to_string());
             }
@@ -156,8 +166,10 @@ fn create_billing_agent(client: Arc<Client<OpenAIConfig>>) -> AgentSvc {
         "process_refund",
         "Process a refund for a customer",
         |args: RefundArgs| async move {
-            println!("  💰 Processing refund: ${} for customer {} (reason: {})", 
-                args.amount, args.customer_id, args.reason);
+            println!(
+                "  💰 Processing refund: ${} for customer {} (reason: {})",
+                args.amount, args.customer_id, args.reason
+            );
             Ok::<_, tower::BoxError>(json!({
                 "refund_id": "REF-789012",
                 "customer_id": args.customer_id,
@@ -185,10 +197,12 @@ fn create_technical_agent(client: Arc<Client<OpenAIConfig>>) -> AgentSvc {
         "run_diagnostic",
         "Run technical diagnostics",
         |args: DiagnosticArgs| async move {
-            println!("  🔧 Running diagnostic: {} ({})", 
-                args.diagnostic_type, 
-                args.parameters.as_deref().unwrap_or("default"));
-            
+            println!(
+                "  🔧 Running diagnostic: {} ({})",
+                args.diagnostic_type,
+                args.parameters.as_deref().unwrap_or("default")
+            );
+
             let result = match args.diagnostic_type.as_str() {
                 "api" => json!({
                     "status": "operational",
@@ -208,9 +222,9 @@ fn create_technical_agent(client: Arc<Client<OpenAIConfig>>) -> AgentSvc {
                     "disk_io": "normal",
                     "recommendation": "System performance is optimal"
                 }),
-                _ => json!({"error": "Unknown diagnostic type"})
+                _ => json!({"error": "Unknown diagnostic type"}),
             };
-            
+
             Ok::<_, tower::BoxError>(result)
         },
     );
@@ -254,7 +268,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .init();
 
     println!("=== Composite Handoff Example with Real LLM Agents ===\n");
-    
+
     println!("This example demonstrates advanced multi-policy coordination:");
     println!("• Smart picker routes based on content analysis");
     println!("• Explicit policy handles specialist escalations");
@@ -272,17 +286,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // Create explicit handoff policy for specialist escalations
     let mut explicit_handoffs = HashMap::new();
-    explicit_handoffs.insert("escalate_to_billing".to_string(), "billing_agent".to_string());
-    explicit_handoffs.insert("escalate_to_technical".to_string(), "technical_agent".to_string());
-    explicit_handoffs.insert("escalate_to_manager".to_string(), "manager_agent".to_string());
+    explicit_handoffs.insert(
+        "escalate_to_billing".to_string(),
+        "billing_agent".to_string(),
+    );
+    explicit_handoffs.insert(
+        "escalate_to_technical".to_string(),
+        "technical_agent".to_string(),
+    );
+    explicit_handoffs.insert(
+        "escalate_to_manager".to_string(),
+        "manager_agent".to_string(),
+    );
     let explicit_policy = MultiExplicitHandoffPolicy::new(explicit_handoffs);
 
     // Create sequential policy for escalation workflow
     // This creates an automatic escalation path when agents can't resolve issues
-    let escalation_sequence = vec![
-        "tier1_agent".to_string(),
-        "manager_agent".to_string(),
-    ];
+    let escalation_sequence = vec!["tier1_agent".to_string(), "manager_agent".to_string()];
     let sequential_policy = SequentialHandoffPolicy::new(escalation_sequence);
 
     // Combine policies with CompositeHandoffPolicy
@@ -307,51 +327,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Test scenarios
     println!("--- Scenario 1: Basic Support Question ---");
     println!("User: 'How do I reset my password?'\n");
-    
+
     let system_msg = ChatCompletionRequestSystemMessageArgs::default()
         .content("You are a customer support agent. Help customers with their inquiries. For specialized issues, you can escalate to billing (escalate_to_billing), technical (escalate_to_technical), or manager (escalate_to_manager) using the appropriate tools.")
         .build()?;
-    
+
     let user_message1 = ChatCompletionRequestUserMessageArgs::default()
         .content("How do I reset my password?")
         .build()?;
-    
+
     let req1 = CreateChatCompletionRequestArgs::default()
         .model("gpt-4o-mini")
         .messages(vec![
             ChatCompletionRequestMessage::System(system_msg.clone()),
-            ChatCompletionRequestMessage::User(user_message1)
+            ChatCompletionRequestMessage::User(user_message1),
         ])
         .build()?;
 
     match coordinator.ready().await?.call(req1).await {
         Ok(result) => {
             println!("✅ Handled by Tier 1 support");
-            println!("   Messages: {}, Steps: {}\n", result.messages.len(), result.steps);
+            println!(
+                "   Messages: {}, Steps: {}\n",
+                result.messages.len(),
+                result.steps
+            );
         }
         Err(e) => println!("❌ Error: {}\n", e),
     }
 
     println!("--- Scenario 2: Billing Issue (Direct Route) ---");
     println!("User: 'I need a refund for the duplicate charge on my account'\n");
-    
+
     let user_message2 = ChatCompletionRequestUserMessageArgs::default()
         .content("I need a refund for the duplicate charge of $49.99 on my account")
         .build()?;
-    
+
     let req2 = CreateChatCompletionRequestArgs::default()
         .model("gpt-4o-mini")
         .messages(vec![
             ChatCompletionRequestMessage::System(system_msg.clone()),
-            ChatCompletionRequestMessage::User(user_message2)
+            ChatCompletionRequestMessage::User(user_message2),
         ])
         .build()?;
 
     match coordinator.ready().await?.call(req2).await {
         Ok(result) => {
             println!("✅ Routed directly to billing specialist");
-            println!("   Messages: {}, Steps: {}", result.messages.len(), result.steps);
-            
+            println!(
+                "   Messages: {}, Steps: {}",
+                result.messages.len(),
+                result.steps
+            );
+
             // Show if refund was processed
             for msg in &result.messages {
                 if let ChatCompletionRequestMessage::Assistant(assistant_msg) = msg {
@@ -373,51 +401,61 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     println!("--- Scenario 3: Technical Issue ---");
     println!("User: 'The API is returning 500 errors intermittently'\n");
-    
+
     let user_message3 = ChatCompletionRequestUserMessageArgs::default()
         .content("The API is returning 500 errors intermittently. Can you help diagnose the issue?")
         .build()?;
-    
+
     let req3 = CreateChatCompletionRequestArgs::default()
         .model("gpt-4o-mini")
         .messages(vec![
             ChatCompletionRequestMessage::System(system_msg.clone()),
-            ChatCompletionRequestMessage::User(user_message3)
+            ChatCompletionRequestMessage::User(user_message3),
         ])
         .build()?;
 
     match coordinator.ready().await?.call(req3).await {
         Ok(result) => {
             println!("✅ Routed to technical specialist");
-            println!("   Messages: {}, Steps: {}\n", result.messages.len(), result.steps);
+            println!(
+                "   Messages: {}, Steps: {}\n",
+                result.messages.len(),
+                result.steps
+            );
         }
         Err(e) => println!("❌ Error: {}\n", e),
     }
 
     println!("--- Scenario 4: Escalation to Manager ---");
     println!("User: 'This is unacceptable! I've been charged three times!'\n");
-    
+
     let user_message4 = ChatCompletionRequestUserMessageArgs::default()
         .content("This is unacceptable! I've been charged three times for the same service and no one is helping me!")
         .build()?;
-    
+
     let req4 = CreateChatCompletionRequestArgs::default()
         .model("gpt-4o-mini")
         .messages(vec![
             ChatCompletionRequestMessage::System(system_msg),
-            ChatCompletionRequestMessage::User(user_message4)
+            ChatCompletionRequestMessage::User(user_message4),
         ])
         .build()?;
 
     match coordinator.ready().await?.call(req4).await {
         Ok(result) => {
             println!("✅ Escalated directly to manager");
-            println!("   Messages: {}, Steps: {}", result.messages.len(), result.steps);
-            
+            println!(
+                "   Messages: {}, Steps: {}",
+                result.messages.len(),
+                result.steps
+            );
+
             if let Some(ChatCompletionRequestMessage::Assistant(msg)) = result.messages.last() {
                 if let Some(content) = &msg.content {
                     let text = match content {
-                        async_openai::types::ChatCompletionRequestAssistantMessageContent::Text(t) => t,
+                        async_openai::types::ChatCompletionRequestAssistantMessageContent::Text(
+                            t,
+                        ) => t,
                         _ => "(non-text content)",
                     };
                     let preview = if text.len() > 200 {

@@ -221,12 +221,7 @@ mod tests {
             let now = CURRENT.fetch_add(1, Ordering::SeqCst) + 1;
             let max = MAX_OBSERVED.load(Ordering::SeqCst);
             if now > max {
-                let _ = MAX_OBSERVED.compare_exchange(
-                    max,
-                    now,
-                    Ordering::SeqCst,
-                    Ordering::SeqCst,
-                );
+                let _ = MAX_OBSERVED.compare_exchange(max, now, Ordering::SeqCst, Ordering::SeqCst);
             }
             sleep(Duration::from_millis(10)).await;
             CURRENT.fetch_sub(1, Ordering::SeqCst);
