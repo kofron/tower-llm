@@ -646,7 +646,10 @@ mod tests {
             if let AgentEvent::RunComplete(run) = ev {
                 saw_run_complete = true;
                 assert_eq!(run.steps, 1);
-                assert!(matches!(run.stop, crate::next::AgentStopReason::DoneNoToolCalls));
+                assert!(matches!(
+                    run.stop,
+                    crate::next::AgentStopReason::DoneNoToolCalls
+                ));
             }
         }
         assert!(saw_run_complete);

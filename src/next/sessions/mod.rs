@@ -297,12 +297,15 @@ mod tests {
                 .into(),
         ];
         let mut save_clone = store.clone();
-        tower::Service::call(&mut save_clone, SaveSession {
+        tower::Service::call(
+            &mut save_clone,
+            SaveSession {
                 id: session_id.clone(),
                 history: prior.clone(),
-            })
-            .await
-            .unwrap();
+            },
+        )
+        .await
+        .unwrap();
 
         // Inner service echoes messages and returns them unchanged
         let inner =
@@ -322,9 +325,7 @@ mod tests {
             .build()
             .unwrap()
             .into()]);
-        let _resp = tower::Service::call(&mut svc, req)
-            .await
-            .unwrap();
+        let _resp = tower::Service::call(&mut svc, req).await.unwrap();
 
         // Verify store now contains prior + new
         let mut load = store.clone();
