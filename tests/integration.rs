@@ -104,12 +104,9 @@ fn test_composite_policy() {
 #[test]
 fn test_policy_builder() {
     use openai_agents_rs::Policy;
-    
-    let policy = Policy::new()
-        .or_max_steps(5)
-        .until_no_tool_calls()
-        .build();
-    
+
+    let policy = Policy::new().or_max_steps(5).until_no_tool_calls().build();
+
     // Test it's a valid composite policy
     let state = LoopState { steps: 5 };
     let outcome = StepOutcome::Next {
@@ -117,7 +114,7 @@ fn test_policy_builder() {
         aux: Default::default(),
         invoked_tools: vec![],
     };
-    
+
     let reason = policy.decide(&state, &outcome);
     assert!(matches!(reason, Some(AgentStopReason::MaxSteps)));
 }
