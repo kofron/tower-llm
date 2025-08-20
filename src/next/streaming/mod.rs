@@ -46,8 +46,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tower::{BoxError, Layer, Service, ServiceExt};
 
 use crate::next::{
-    AgentPolicy, AgentRun, LoopState, StepAux, StepOutcome, ToolInvocation,
-    ToolOutput,
+    AgentPolicy, AgentRun, LoopState, StepAux, StepOutcome, ToolInvocation, ToolOutput,
 };
 
 /// Streaming step-level items.
@@ -647,7 +646,7 @@ mod tests {
             if let AgentEvent::RunComplete(run) = ev {
                 saw_run_complete = true;
                 assert_eq!(run.steps, 1);
-                assert!(matches!(run.stop, AgentStopReason::DoneNoToolCalls));
+                assert!(matches!(run.stop, crate::next::AgentStopReason::DoneNoToolCalls));
             }
         }
         assert!(saw_run_complete);

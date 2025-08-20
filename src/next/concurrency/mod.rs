@@ -53,7 +53,7 @@ pub enum ToolJoinPolicy {
 }
 
 /// Wraps a tool router service `R` to execute batches of tool invocations concurrently.
-/// 
+///
 /// Note: The inner service R should be wrapped in tower::buffer::Buffer if it doesn't
 /// support concurrent access (e.g., if it doesn't implement Clone).
 #[derive(Clone)]
@@ -139,7 +139,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::time::{sleep, Duration};
     use tower::service_fn;
 
     #[tokio::test]

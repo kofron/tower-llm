@@ -38,9 +38,7 @@ use async_openai::types::{
 };
 use serde_json::Value;
 
-use openai_agents_rs::items::{
-    HandoffItem, MessageItem, Role, RunItem, ToolCallItem, ToolOutputItem,
-};
+use crate::items::{HandoffItem, MessageItem, Role, RunItem, ToolCallItem, ToolOutputItem};
 
 use chrono::Utc;
 use uuid::Uuid;

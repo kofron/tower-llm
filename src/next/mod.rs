@@ -375,13 +375,14 @@ where
                 builder.tools((*tool_specs).clone());
             }
 
-            let mut messages = builder
+            let rebuilt_req = builder
                 .build()
-                .map_err(|e| format!("request build error: {}", e))?
-                .messages;
+                .map_err(|e| format!("request build error: {}", e))?;
+
+            let mut messages = rebuilt_req.messages.clone();
 
             // Single OpenAI call
-            let resp = client.chat().create(req).await?;
+            let resp = client.chat().create(rebuilt_req).await?;
             let usage = resp.usage.clone().unwrap_or_default();
             let mut aux = StepAux {
                 prompt_tokens: usage.prompt_tokens as usize,

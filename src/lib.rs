@@ -77,6 +77,7 @@ pub mod handoff;
 pub mod items;
 pub mod memory;
 pub mod model;
+pub mod next;
 pub mod result;
 pub mod retry;
 pub mod runner;
@@ -104,7 +105,10 @@ pub use tool::{FunctionTool, Tool};
 // Public layer exports for DX (scope-agnostic policy layers)
 pub mod layers {
     pub use crate::service::{
-        ApprovalLayer, InputSchemaLayer, RetryLayer, TimeoutLayer,
+        ApprovalLayer,
+        InputSchemaLayer,
+        RetryLayer,
+        TimeoutLayer,
         // Step 8: ErasedToolLayer and boxed helpers removed
     };
 }

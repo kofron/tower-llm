@@ -60,10 +60,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         },
     );
 
+    #[derive(Debug, Deserialize, JsonSchema)]
+    struct TimeArgs {
+        // OpenAI requires at least empty properties, so we add an optional field
+        #[serde(default)]
+        timezone: Option<String>,
+    }
+
     let get_time = next::tool_typed(
         "get_current_time",
         "Get the current time in UTC",
-        |_args: serde_json::Value| async move {
+        |_args: TimeArgs| async move {
             let now = chrono::Utc::now();
             let time_str = now.format("%Y-%m-%d %H:%M:%S UTC").to_string();
             println!("  🕐 Time: {}", time_str);

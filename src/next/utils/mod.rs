@@ -25,7 +25,7 @@
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::next::simple_chat_request;
 
     #[test]
     fn simple_request_builds_two_messages() {

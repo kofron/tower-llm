@@ -62,55 +62,47 @@ impl Default for BudgetUsage {
 ///
 /// Internally maintains counters using interior mutability.
 pub fn budget_policy(b: Budget) -> PolicyFn {
-    let usage = Arc::new(tokio::sync::Mutex::new(BudgetUsage::default()));
+    let usage = Arc::new(std::sync::Mutex::new(BudgetUsage::default()));
     let usage_cl = usage.clone();
     PolicyFn(Arc::new(move |_state: &LoopState, last: &StepOutcome| {
         let usage = usage_cl.clone();
-        // Update usage from last step synchronously (block_on a tiny future)
-        // We avoid adding sync locks; using a very small async block here is acceptable
-        let res: Option<AgentStopReason> = tokio::task::block_in_place(|| {
-            // SAFETY: `block_in_place` requires a runtime; tests/examples run under #[tokio::test]
-            tokio::runtime::Handle::current().block_on(async {
-                let mut u = usage.lock().await;
-                match last {
-                    StepOutcome::Next { aux, .. } | StepOutcome::Done { aux, .. } => {
-                        u.prompt_tokens += aux.prompt_tokens;
-                        u.completion_tokens += aux.completion_tokens;
-                        u.tools += aux.tool_invocations;
-                    }
-                }
-                // Check time budget first
-                if let Some(max) = b.max_time {
-                    if u.start_time.elapsed() >= max {
-                        return Some(AgentStopReason::TimeBudgetExceeded);
-                    }
-                }
-                if let Some(max) = b.max_prompt_tokens {
-                    if u.prompt_tokens >= max {
-                        return Some(AgentStopReason::TokensBudgetExceeded);
-                    }
-                }
-                if let Some(max) = b.max_completion_tokens {
-                    if u.completion_tokens >= max {
-                        return Some(AgentStopReason::TokensBudgetExceeded);
-                    }
-                }
-                if let Some(max) = b.max_tool_invocations {
-                    if u.tools >= max {
-                        return Some(AgentStopReason::ToolBudgetExceeded);
-                    }
-                }
-                None
-            })
-        });
-        res
+        let mut u = usage.lock().unwrap();
+        match last {
+            StepOutcome::Next { aux, .. } | StepOutcome::Done { aux, .. } => {
+                u.prompt_tokens += aux.prompt_tokens;
+                u.completion_tokens += aux.completion_tokens;
+                u.tools += aux.tool_invocations;
+            }
+        }
+        // Check time budget first
+        if let Some(max) = b.max_time {
+            if u.start_time.elapsed() >= max {
+                return Some(AgentStopReason::TimeBudgetExceeded);
+            }
+        }
+        if let Some(max) = b.max_prompt_tokens {
+            if u.prompt_tokens >= max {
+                return Some(AgentStopReason::TokensBudgetExceeded);
+            }
+        }
+        if let Some(max) = b.max_completion_tokens {
+            if u.completion_tokens >= max {
+                return Some(AgentStopReason::TokensBudgetExceeded);
+            }
+        }
+        if let Some(max) = b.max_tool_invocations {
+            if u.tools >= max {
+                return Some(AgentStopReason::ToolBudgetExceeded);
+            }
+        }
+        None
     }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::next::{CompositePolicy, StepAux};
+    use crate::next::{AgentPolicy, CompositePolicy, StepAux};
 
     fn fake_next_step(prompt: usize, completion: usize, tools: usize) -> StepOutcome {
         StepOutcome::Next {
@@ -124,8 +116,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn stops_on_token_budget() {
+    #[tokio::test]
+    async fn stops_on_token_budget() {
         let budget = Budget {
             max_prompt_tokens: Some(10),
             ..Default::default()
@@ -142,8 +134,8 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn stops_on_tool_budget() {
+    #[tokio::test]
+    async fn stops_on_tool_budget() {
         let budget = Budget {
             max_tool_invocations: Some(2),
             ..Default::default()

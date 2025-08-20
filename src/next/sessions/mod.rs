@@ -297,10 +297,7 @@ mod tests {
                 .into(),
         ];
         let mut save_clone = store.clone();
-        ServiceExt::ready(&mut save_clone)
-            .await
-            .unwrap()
-            .call(SaveSession {
+        tower::Service::call(&mut save_clone, SaveSession {
                 id: session_id.clone(),
                 history: prior.clone(),
             })
@@ -325,19 +322,13 @@ mod tests {
             .build()
             .unwrap()
             .into()]);
-        let _resp = ServiceExt::ready(&mut svc)
-            .await
-            .unwrap()
-            .call(req)
+        let _resp = tower::Service::call(&mut svc, req)
             .await
             .unwrap();
 
         // Verify store now contains prior + new
         let mut load = store.clone();
-        let history = ServiceExt::ready(&mut load)
-            .await
-            .unwrap()
-            .call(LoadSession { id: session_id })
+        let history = tower::Service::call(&mut load, LoadSession { id: session_id })
             .await
             .unwrap();
         assert_eq!(history.len(), 3);

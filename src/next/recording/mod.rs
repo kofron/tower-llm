@@ -36,16 +36,23 @@ use async_openai::types::{CreateChatCompletionRequest, CreateChatCompletionReque
 use tokio::sync::Mutex;
 use tower::{BoxError, Layer, Service, ServiceExt};
 
+use crate::items::RunItem;
 use crate::next::codec::{items_to_messages, messages_to_items};
-use crate::next::{StepOutcome};
-use openai_agents_rs::items::RunItem;
+use crate::next::StepOutcome;
 
 #[derive(Debug, Clone)]
-pub struct WriteTrace { pub id: String, pub items: Vec<RunItem> }
+pub struct WriteTrace {
+    pub id: String,
+    pub items: Vec<RunItem>,
+}
 #[derive(Debug, Clone)]
-pub struct ReadTrace { pub id: String }
+pub struct ReadTrace {
+    pub id: String,
+}
 #[derive(Debug, Clone, Default)]
-pub struct Trace { pub items: Vec<RunItem> }
+pub struct Trace {
+    pub items: Vec<RunItem>,
+}
 
 /// Simple in-memory trace store for tests.
 #[derive(Default, Clone)]
@@ -55,11 +62,19 @@ impl Service<WriteTrace> for InMemoryTraceStore {
     type Response = ();
     type Error = BoxError;
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
-    fn poll_ready(&mut self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> { std::task::Poll::Ready(Ok(())) }
+    fn poll_ready(
+        &mut self,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
     fn call(&mut self, req: WriteTrace) -> Self::Future {
         let store = self.0.clone();
         Box::pin(async move {
-            store.lock().await.insert(req.id, Trace { items: req.items });
+            store
+                .lock()
+                .await
+                .insert(req.id, Trace { items: req.items });
             Ok(())
         })
     }
@@ -69,7 +84,12 @@ impl Service<ReadTrace> for InMemoryTraceStore {
     type Response = Trace;
     type Error = BoxError;
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
-    fn poll_ready(&mut self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> { std::task::Poll::Ready(Ok(())) }
+    fn poll_ready(
+        &mut self,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
     fn call(&mut self, req: ReadTrace) -> Self::Future {
         let store = self.0.clone();
         Box::pin(async move {
@@ -80,20 +100,44 @@ impl Service<ReadTrace> for InMemoryTraceStore {
 }
 
 /// Recorder layer that captures step outcomes into a trace writer.
-pub struct RecorderLayer<W> { writer: W, trace_id: String }
-impl<W> RecorderLayer<W> { pub fn new(writer: W, trace_id: impl Into<String>) -> Self { Self { writer, trace_id: trace_id.into() } } }
+pub struct RecorderLayer<W> {
+    writer: W,
+    trace_id: String,
+}
+impl<W> RecorderLayer<W> {
+    pub fn new(writer: W, trace_id: impl Into<String>) -> Self {
+        Self {
+            writer,
+            trace_id: trace_id.into(),
+        }
+    }
+}
 
-pub struct Recorder<S, W> { inner: S, writer: W, trace_id: String }
+pub struct Recorder<S, W> {
+    inner: S,
+    writer: W,
+    trace_id: String,
+}
 
 impl<S, W> Layer<S> for RecorderLayer<W>
-where W: Clone {
+where
+    W: Clone,
+{
     type Service = Recorder<S, W>;
-    fn layer(&self, inner: S) -> Self::Service { Recorder { inner, writer: self.writer.clone(), trace_id: self.trace_id.clone() } }
+    fn layer(&self, inner: S) -> Self::Service {
+        Recorder {
+            inner,
+            writer: self.writer.clone(),
+            trace_id: self.trace_id.clone(),
+        }
+    }
 }
 
 impl<S, W> Service<CreateChatCompletionRequest> for Recorder<S, W>
 where
-    S: Service<CreateChatCompletionRequest, Response = StepOutcome, Error = BoxError> + Send + 'static,
+    S: Service<CreateChatCompletionRequest, Response = StepOutcome, Error = BoxError>
+        + Send
+        + 'static,
     S::Future: Send + 'static,
     W: Service<WriteTrace, Response = (), Error = BoxError> + Clone + Send + 'static,
     W::Future: Send + 'static,
@@ -102,7 +146,12 @@ where
     type Error = BoxError;
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
-    fn poll_ready(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> { self.inner.poll_ready(cx) }
+    fn poll_ready(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
 
     fn call(&mut self, req: CreateChatCompletionRequest) -> Self::Future {
         let mut writer = self.writer.clone();
@@ -110,17 +159,39 @@ where
         let fut = self.inner.call(req);
         Box::pin(async move {
             let out = fut.await?;
-            let messages = match &out { StepOutcome::Next { messages, .. } | StepOutcome::Done { messages, .. } => messages.clone() };
+            let messages = match &out {
+                StepOutcome::Next { messages, .. } | StepOutcome::Done { messages, .. } => {
+                    messages.clone()
+                }
+            };
             let items = messages_to_items(&messages).map_err(|e| format!("codec: {}", e))?;
-            ServiceExt::ready(&mut writer).await?.call(WriteTrace { id: trace_id, items }).await?;
+            ServiceExt::ready(&mut writer)
+                .await?
+                .call(WriteTrace {
+                    id: trace_id,
+                    items,
+                })
+                .await?;
             Ok(out)
         })
     }
 }
 
 /// Service that replays a stored trace as a `StepOutcome::Done` using codec reconstruction.
-pub struct ReplayService<R> { reader: R, trace_id: String, model: String }
-impl<R> ReplayService<R> { pub fn new(reader: R, trace_id: impl Into<String>, model: impl Into<String>) -> Self { Self { reader, trace_id: trace_id.into(), model: model.into() } } }
+pub struct ReplayService<R> {
+    reader: R,
+    trace_id: String,
+    model: String,
+}
+impl<R> ReplayService<R> {
+    pub fn new(reader: R, trace_id: impl Into<String>, model: impl Into<String>) -> Self {
+        Self {
+            reader,
+            trace_id: trace_id.into(),
+            model: model.into(),
+        }
+    }
+}
 
 impl<R> Service<CreateChatCompletionRequest> for ReplayService<R>
 where
@@ -131,7 +202,12 @@ where
     type Error = BoxError;
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
-    fn poll_ready(&mut self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> { std::task::Poll::Ready(Ok(())) }
+    fn poll_ready(
+        &mut self,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
 
     fn call(&mut self, _req: CreateChatCompletionRequest) -> Self::Future {
         let mut reader = self.reader.clone();
@@ -140,9 +216,15 @@ where
         Box::pin(async move {
             let trace = Service::call(&mut reader, ReadTrace { id: trace_id }).await?;
             let messages = items_to_messages(&trace.items);
-            let _req = CreateChatCompletionRequestArgs::default().model(model).messages(messages.clone()).build()?;
+            let _req = CreateChatCompletionRequestArgs::default()
+                .model(model)
+                .messages(messages.clone())
+                .build()?;
             // Return Done with reconstructed messages
-            Ok(StepOutcome::Done { messages, aux: Default::default() })
+            Ok(StepOutcome::Done {
+                messages,
+                aux: Default::default(),
+            })
         })
     }
 }
@@ -150,21 +232,40 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_openai::types::{ChatCompletionRequestUserMessageArgs};
+    use async_openai::types::ChatCompletionRequestUserMessageArgs;
     use tower::service_fn;
 
     fn req_with_user(s: &str) -> CreateChatCompletionRequest {
-        let msg = ChatCompletionRequestUserMessageArgs::default().content(s).build().unwrap();
-        CreateChatCompletionRequestArgs::default().model("gpt-4o").messages(vec![msg.into()]).build().unwrap()
+        let msg = ChatCompletionRequestUserMessageArgs::default()
+            .content(s)
+            .build()
+            .unwrap();
+        CreateChatCompletionRequestArgs::default()
+            .model("gpt-4o")
+            .messages(vec![msg.into()])
+            .build()
+            .unwrap()
     }
 
     #[tokio::test]
     async fn records_trace_on_step_done() {
         let writer = InMemoryTraceStore::default();
-        let inner = service_fn(|req: CreateChatCompletionRequest| async move { Ok::<_, BoxError>(StepOutcome::Done { messages: req.messages, aux: Default::default() }) });
+        let inner = service_fn(|req: CreateChatCompletionRequest| async move {
+            Ok::<_, BoxError>(StepOutcome::Done {
+                messages: req.messages,
+                aux: Default::default(),
+            })
+        });
         let mut svc = RecorderLayer::new(writer.clone(), "t1").layer(inner);
-        let _ = ServiceExt::ready(&mut svc).await.unwrap().call(req_with_user("hi")).await.unwrap();
-        let trace = ServiceExt::ready(&mut writer.clone()).await.unwrap().call(ReadTrace { id: "t1".into() }).await.unwrap();
+        let _ = ServiceExt::ready(&mut svc)
+            .await
+            .unwrap()
+            .call(req_with_user("hi"))
+            .await
+            .unwrap();
+        let trace = tower::Service::call(&mut writer.clone(), ReadTrace { id: "t1".into() })
+            .await
+            .unwrap();
         assert!(!trace.items.is_empty());
     }
 
@@ -174,11 +275,26 @@ mod tests {
         // Write a trace
         let msgs = req_with_user("hi").messages;
         let items = messages_to_items(&msgs).unwrap();
-        ServiceExt::ready(&mut store.clone()).await.unwrap().call(WriteTrace { id: "t2".into(), items }).await.unwrap();
+        tower::Service::call(
+            &mut store.clone(),
+            WriteTrace {
+                id: "t2".into(),
+                items,
+            },
+        )
+        .await
+        .unwrap();
         // Replay
         let mut replay = ReplayService::new(store.clone(), "t2", "gpt-4o");
-        let out = ServiceExt::ready(&mut replay).await.unwrap().call(req_with_user("ignored")).await.unwrap();
-        match out { StepOutcome::Done { messages, .. } => assert!(!messages.is_empty()), _ => panic!("expected done") }
+        let out = ServiceExt::ready(&mut replay)
+            .await
+            .unwrap()
+            .call(req_with_user("ignored"))
+            .await
+            .unwrap();
+        match out {
+            StepOutcome::Done { messages, .. } => assert!(!messages.is_empty()),
+            _ => panic!("expected done"),
+        }
     }
 }
-

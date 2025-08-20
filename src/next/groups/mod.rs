@@ -122,8 +122,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_openai::types::{ChatCompletionRequestMessage, CreateChatCompletionRequestArgs};
+    use async_openai::types::{
+        ChatCompletionRequestMessage, CreateChatCompletionRequest, CreateChatCompletionRequestArgs,
+    };
     use serde_json::json;
+    use tower::util::BoxService;
 
     #[tokio::test]
     async fn routes_to_named_agent() {

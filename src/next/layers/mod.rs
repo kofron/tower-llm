@@ -40,6 +40,7 @@ pub use crate::next::policies;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::next::AgentPolicy;
 
     #[test]
     fn policy_until_no_tool_calls_stops_on_done() {

@@ -2,7 +2,7 @@
 //! Shows how to limit agent runs based on token usage, tool invocations, and time.
 
 use next::AgentPolicy;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 // Import the next module and its submodules
 #[path = "../src/next/mod.rs"]

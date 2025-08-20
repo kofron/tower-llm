@@ -59,6 +59,7 @@ impl StepProvider for SequenceProvider {
 mod tests {
     use super::*;
     use async_openai::types::CreateChatCompletionRequestArgs;
+    use futures::StreamExt;
 
     #[tokio::test]
     async fn sequence_provider_streams_items() {
