@@ -51,6 +51,26 @@ path = "examples/rpn_calculator.rs"
 name = "db_migrator"
 path = "examples/db_migrator.rs"
 
+[[example]]
+name = "next_step_steer"
+path = "examples/next_step_steer.rs"
+
+[[example]]
+name = "next_agent_loop"
+path = "examples/next_agent_loop.rs"
+
+[[example]]
+name = "next_layers_example"
+path = "examples/next_layers_example.rs"
+
+[[example]]
+name = "next_services_example"
+path = "examples/next_services_example.rs"
+
+[[example]]
+name = "next_utils_example"
+path = "examples/next_utils_example.rs"
+
 
 [dependencies]
 async-openai = "0.29.0"
@@ -74,7 +94,7 @@ sqlx = { version = "0.8", features = [
     "uuid",
 ] }
 rusqlite = "0.31"
-tower = { version = "0.5.2", features = ["util"] }
+tower = { version = "0.5.2", features = ["util", "steer", "buffer"] }
 jsonschema = "0.32.1"
 openai-agents-derive = { path = "openai-agents-derive" }
 
