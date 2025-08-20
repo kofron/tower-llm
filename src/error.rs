@@ -20,7 +20,7 @@
 //! ### Example: Using the Custom `Result` Type
 //!
 //! ```rust
-//! use openai_agents_rs::error::{Result, AgentsError};
+//! use tower_llm::error::{Result, AgentsError};
 //!
 //! fn check_input(input: &str) -> Result<()> {
 //!     if input.is_empty() {
