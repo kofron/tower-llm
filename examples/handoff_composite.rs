@@ -240,10 +240,17 @@ fn create_manager_agent(client: Arc<Client<OpenAIConfig>>) -> AgentSvc {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Initialize tracing for visibility
+    // Initialize tracing with human-readable output
     tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
         .with_target(false)
+        .with_thread_ids(false)
+        .with_thread_names(false)
+        .with_file(false)
+        .with_line_number(false)
         .with_level(true)
+        .with_ansi(true)
+        .compact()
         .init();
 
     println!("=== Composite Handoff Example with Real LLM Agents ===\n");

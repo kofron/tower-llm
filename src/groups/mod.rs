@@ -66,6 +66,7 @@ use async_openai::types::{ChatCompletionTool, CreateChatCompletionRequest};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tower::{BoxError, Layer, Service, ServiceExt};
+use tracing::{debug, info, warn, error, instrument, trace};
 
 use crate::core::{AgentRun, AgentStopReason, AgentSvc, LoopState, StepOutcome, ToolInvocation, ToolOutput};
 
@@ -316,6 +317,7 @@ where
         std::task::Poll::Ready(Ok(()))
     }
 
+    #[instrument(skip_all, fields(request_id = %uuid::Uuid::new_v4()))]
     fn call(&mut self, mut request: CreateChatCompletionRequest) -> Self::Future {
         let agents = self.agents.clone();
         let mut picker = self.picker.clone();
@@ -329,10 +331,14 @@ where
             let mut all_messages = Vec::new();
             let mut total_steps = 0;
             
+            info!("🚀 Starting handoff coordinator");
+            debug!("Initial request has {} messages", request.messages.len());
+            
             // Store the original request messages
             let original_messages = request.messages.clone();
             
             // Pick the initial agent
+            debug!("Invoking picker to determine initial agent");
             let initial_pick = ServiceExt::ready(&mut picker)
                 .await?
                 .call(PickRequest {
@@ -341,6 +347,7 @@ where
                 })
                 .await?;
             
+            info!("📍 Initial agent selected: {}", initial_pick);
             let mut current_agent_name = initial_pick;
             
             // Update current agent tracking
@@ -353,18 +360,30 @@ where
             loop {
                 // Check handoff limit
                 if handoff_count >= MAX_HANDOFFS {
+                    error!("❌ Maximum handoffs exceeded ({})", MAX_HANDOFFS);
                     return Err("Maximum handoffs exceeded".into());
                 }
+                
+                info!("🤖 Executing agent: {} (handoff #{}/{})", 
+                    current_agent_name, handoff_count + 1, MAX_HANDOFFS);
                 
                 // Get the current agent
                 let mut agents_guard = agents.lock().await;
                 let agent = agents_guard
                     .get_mut(&current_agent_name)
-                    .ok_or_else(|| format!("Unknown agent: {}", current_agent_name))?;
+                    .ok_or_else(|| {
+                        error!("Agent not found: {}", current_agent_name);
+                        format!("Unknown agent: {}", current_agent_name)
+                    })?;
                 
                 // Inject handoff tools into the request
                 let handoff_tools = handoff_policy.handoff_tools();
                 if !handoff_tools.is_empty() {
+                    debug!("Injecting {} handoff tools into request", handoff_tools.len());
+                    trace!("Handoff tools: {:?}", handoff_tools.iter()
+                        .map(|t| &t.function.name)
+                        .collect::<Vec<_>>());
+                    
                     // Add handoff tools to the request if not already present
                     if request.tools.is_none() {
                         request.tools = Some(handoff_tools);
@@ -375,10 +394,15 @@ where
                 }
                 
                 // Execute the current agent
+                debug!("Calling agent with {} messages", request.messages.len());
                 let agent_run = ServiceExt::ready(agent)
                     .await?
                     .call(request.clone())
                     .await?;
+                
+                info!("✅ Agent {} completed: {} messages, {} steps, stop reason: {:?}", 
+                    current_agent_name, agent_run.messages.len(), 
+                    agent_run.steps, agent_run.stop);
                 
                 // Add messages from this run
                 all_messages.extend(agent_run.messages.clone());
@@ -388,22 +412,38 @@ where
                 let mut handoff_requested = None;
                 
                 // Look for handoff tool calls in the response messages
+                debug!("Checking for handoff tool calls in agent response");
                 for message in &agent_run.messages {
                     if let async_openai::types::ChatCompletionRequestMessage::Assistant(msg) = message {
                         if let Some(tool_calls) = &msg.tool_calls {
+                            trace!("Found {} tool calls in message", tool_calls.len());
                             for tool_call in tool_calls {
                                 if handoff_policy.is_handoff_tool(&tool_call.function.name) {
+                                    info!("🔄 Handoff tool detected: {}", tool_call.function.name);
+                                    
                                     // Parse the handoff request from the tool call
                                     let invocation = ToolInvocation {
                                         id: tool_call.id.clone(),
                                         name: tool_call.function.name.clone(),
                                         arguments: serde_json::from_str(&tool_call.function.arguments)
-                                            .unwrap_or_else(|_| serde_json::json!({})),
+                                            .unwrap_or_else(|e| {
+                                                warn!("Failed to parse handoff tool arguments: {}", e);
+                                                serde_json::json!({})
+                                            }),
                                     };
                                     
-                                    if let Ok(handoff_req) = handoff_policy.handle_handoff_tool(&invocation) {
-                                        handoff_requested = Some(handoff_req);
-                                        break;
+                                    match handoff_policy.handle_handoff_tool(&invocation) {
+                                        Ok(handoff_req) => {
+                                            info!("📋 Handoff request: {} → {} (reason: {:?})", 
+                                                current_agent_name, 
+                                                handoff_req.target_agent,
+                                                handoff_req.reason);
+                                            handoff_requested = Some(handoff_req);
+                                            break;
+                                        }
+                                        Err(e) => {
+                                            warn!("Failed to handle handoff tool: {}", e);
+                                        }
                                     }
                                 }
                             }
@@ -416,6 +456,8 @@ where
                 
                 // If no explicit handoff via tool, check policy for automatic handoff
                 if handoff_requested.is_none() {
+                    debug!("No explicit handoff tool called, checking policy for automatic handoff");
+                    
                     // Create a LoopState for the policy check
                     let loop_state = LoopState { steps: total_steps };
                     
@@ -433,12 +475,22 @@ where
                         }
                     };
                     
-                    handoff_requested = handoff_policy.should_handoff(&loop_state, &step_outcome);
+                    if let Some(handoff) = handoff_policy.should_handoff(&loop_state, &step_outcome) {
+                        info!("🔀 Automatic handoff triggered by policy: {} → {} (reason: {:?})",
+                            current_agent_name, handoff.target_agent, handoff.reason);
+                        handoff_requested = Some(handoff);
+                    } else {
+                        debug!("No automatic handoff triggered");
+                    }
                 }
                 
                 // Handle handoff if requested
                 if let Some(handoff) = handoff_requested {
+                    info!("🚦 Processing handoff: {} → {}", 
+                        current_agent_name, handoff.target_agent);
+                    
                     // Update the current agent
+                    let previous_agent = current_agent_name.clone();
                     current_agent_name = handoff.target_agent.clone();
                     handoff_count += 1;
                     
@@ -452,17 +504,25 @@ where
                     {
                         let mut context = conversation_context.lock().await;
                         context.extend(agent_run.messages.clone());
+                        debug!("Updated conversation context with {} messages", 
+                            agent_run.messages.len());
                     }
                     
                     // Prepare request for next agent with accumulated context
                     request.messages = original_messages.clone();
                     request.messages.extend(all_messages.clone());
                     
+                    info!("🔗 Handoff complete: {} → {} (total handoffs: {})", 
+                        previous_agent, current_agent_name, handoff_count);
+                    
                     // Continue to next iteration with new agent
                     continue;
                 }
                 
                 // No handoff, we're done
+                info!("🎯 Workflow complete: {} total messages, {} steps, final agent: {}",
+                    all_messages.len(), total_steps, current_agent_name);
+                
                 return Ok(AgentRun {
                     messages: all_messages,
                     steps: total_steps,
@@ -516,11 +576,14 @@ impl ExplicitHandoffPolicy {
 }
 
 impl HandoffPolicy for ExplicitHandoffPolicy {
+    #[instrument(skip(self))]
     fn handoff_tools(&self) -> Vec<ChatCompletionTool> {
         let tool_name = self.tool_name();
         let description = self.description.as_ref()
             .map(|d| d.clone())
             .unwrap_or_else(|| format!("Hand off the conversation to {}", self.target_agent));
+        
+        debug!("ExplicitHandoffPolicy generating tool: {} → {}", tool_name, self.target_agent);
         
         vec![ChatCompletionTool {
             r#type: async_openai::types::ChatCompletionToolType::Function,
@@ -601,26 +664,42 @@ impl SequentialHandoffPolicy {
 }
 
 impl HandoffPolicy for SequentialHandoffPolicy {
+    #[instrument(skip(self))]
     fn handoff_tools(&self) -> Vec<ChatCompletionTool> {
         // Sequential handoffs are automatic, no tools needed
+        debug!("SequentialHandoffPolicy: no tools (automatic handoffs only)");
         vec![]
     }
     
+    #[instrument(skip(self, invocation))]
     fn handle_handoff_tool(&self, invocation: &ToolInvocation) -> Result<HandoffRequest, BoxError> {
+        warn!("Sequential policy received unexpected handoff tool call: {}", invocation.name);
         Err(format!("Sequential policy has no handoff tools: {}", invocation.name).into())
     }
     
+    #[instrument(skip(self, _state, outcome))]
     fn should_handoff(&self, _state: &LoopState, outcome: &StepOutcome) -> Option<HandoffRequest> {
         match outcome {
             StepOutcome::Done { .. } => {
                 // When agent completes without tool calls, move to next agent
-                self.next_agent().map(|target| HandoffRequest {
-                    target_agent: target,
-                    context: None,
-                    reason: Some("Sequential workflow step complete".to_string()),
-                })
+                if let Some(target) = self.next_agent() {
+                    let current_idx = self.current_index.load(Ordering::SeqCst);
+                    info!("📈 Sequential handoff: step {}/{} → {}", 
+                        current_idx, self.agents.len(), target);
+                    Some(HandoffRequest {
+                        target_agent: target,
+                        context: None,
+                        reason: Some("Sequential workflow step complete".to_string()),
+                    })
+                } else {
+                    debug!("Sequential workflow complete (all steps finished)");
+                    None
+                }
             }
-            _ => None,
+            _ => {
+                trace!("Sequential policy: no handoff (agent not done)");
+                None
+            }
         }
     }
     
@@ -650,8 +729,11 @@ impl MultiExplicitHandoffPolicy {
 }
 
 impl HandoffPolicy for MultiExplicitHandoffPolicy {
+    #[instrument(skip(self))]
     fn handoff_tools(&self) -> Vec<ChatCompletionTool> {
+        debug!("MultiExplicitHandoffPolicy generating {} handoff tools", self.handoffs.len());
         self.handoffs.iter().map(|(tool_name, target_agent)| {
+            trace!("  Tool: {} → {}", tool_name, target_agent);
             ChatCompletionTool {
                 r#type: async_openai::types::ChatCompletionToolType::Function,
                 function: async_openai::types::FunctionObject {

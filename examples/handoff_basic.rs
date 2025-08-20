@@ -26,6 +26,7 @@ use tower_llm::{
     groups::{GroupBuilder, MultiExplicitHandoffPolicy, PickRequest},
     policies, Agent, AgentSvc, CompositePolicy,
 };
+use tracing::{info, debug};
 
 // Math-focused calculator tool
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -100,7 +101,7 @@ impl Service<PickRequest> for TopicPicker {
                 || content.contains("*")
                 || content.contains("/")
             {
-                println!("🎯 Picker: Routing to math_agent (detected mathematical content)");
+                info!("🎯 Picker: Routing to math_agent (detected mathematical content)");
                 Ok("math_agent".to_string())
             } else if content.contains("write")
                 || content.contains("explain")
@@ -108,10 +109,10 @@ impl Service<PickRequest> for TopicPicker {
                 || content.contains("essay")
                 || content.contains("story")
             {
-                println!("🎯 Picker: Routing to writer_agent (detected writing task)");
+                info!("🎯 Picker: Routing to writer_agent (detected writing task)");
                 Ok("writer_agent".to_string())
             } else {
-                println!("🎯 Picker: Routing to general_agent (general query)");
+                info!("🎯 Picker: Routing to general_agent (general query)");
                 Ok("general_agent".to_string())
             }
         })
@@ -216,10 +217,17 @@ fn create_general_agent(client: Arc<Client<OpenAIConfig>>) -> AgentSvc {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Initialize tracing for visibility
+    // Initialize tracing with human-readable output
     tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
         .with_target(false)
+        .with_thread_ids(false)
+        .with_thread_names(false)
+        .with_file(false)
+        .with_line_number(false)
         .with_level(true)
+        .with_ansi(true)
+        .compact()
         .init();
 
     println!("=== Basic Handoff Example with Real LLM Agents ===\n");
