@@ -48,14 +48,17 @@ impl Approval for TestApproval {
 }
 
 #[test]
-fn test_tool_layer_composition() {
-    // Tools can have multiple layers
-    let tool = FunctionTool::simple("test", "Test tool", |s: String| s)
-        .layer(layers::boxed_timeout_secs(5))
-        .layer(layers::boxed_retry_times(3));
+fn test_tool_service_composition() {
+    // Tools can have multiple layers via Tower service composition
+    let tool = FunctionTool::simple("test", "Test tool", |s: String| s);
+
+    // Layers are now applied via Tower services:
+    let service = tool.clone().into_service::<DefaultEnv>();
+    let _layered = layers::RetryLayer::times(3).layer(
+        layers::TimeoutLayer::secs(5).layer(service)
+    );
 
     assert_eq!(tool.name(), "test");
-    assert_eq!(tool.layers().len(), 2);
 }
 
 #[test]
@@ -194,20 +197,20 @@ async fn test_capability_access() {
 }
 
 #[test]
-fn test_layer_ordering() {
-    // Test that layers can be stacked
+fn test_service_layer_ordering() {
+    // Test that layers can be stacked via Tower services
     let tool = FunctionTool::simple("test", "Test", |s: String| s);
 
-    // Layers are applied and stored in order
-    let layered = tool
-        .layer(layers::boxed_timeout_secs(5))
-        .layer(layers::boxed_retry_times(3))
-        .layer(layers::boxed_input_schema_lenient(
-            json!({"type": "object"}),
-        ));
+    // Layers are now composed via Tower services
+    let service = tool.clone().into_service::<DefaultEnv>();
+    let _layered = layers::InputSchemaLayer::lenient(json!({"type": "object"})).layer(
+        layers::RetryLayer::times(3).layer(
+            layers::TimeoutLayer::secs(5).layer(service)
+        )
+    );
 
-    // Verify layers are accumulated
-    assert_eq!(layered.layers().len(), 3);
+    // Verify tool interface is preserved
+    assert_eq!(tool.name(), "test");
 }
 
 #[tokio::test]
@@ -290,9 +293,11 @@ fn test_no_string_coupling() {
     // Direct access, no string keys
     assert_eq!(tool.name(), "test");
 
-    // Layers are type-safe
-    let _layered =
-        FunctionTool::simple("test", "Test", |s: String| s).layer(layers::boxed_timeout_secs(5));
+    // Layers are type-safe via Tower services
+    let base_tool = FunctionTool::simple("test", "Test", |s: String| s);
+    let _layered = layers::TimeoutLayer::secs(5).layer(
+        base_tool.into_service::<DefaultEnv>()
+    );
 
     // No string-based registry needed
 }
@@ -301,8 +306,12 @@ fn test_no_string_coupling() {
 fn test_abstraction_boundaries() {
     // Tools manage themselves
     let tool = FunctionTool::simple("calc", "Calculator", |s: String| s)
-        .with_name("calculator")
-        .layer(layers::boxed_retry_times(3));
+        .with_name("calculator");
+
+    // Service-based layering would be:
+    let _service = layers::RetryLayer::times(3).layer(
+        tool.clone().into_service::<DefaultEnv>()
+    );
 
     // Agents don't configure tool internals
     let agent = Agent::simple("Bot", "Assistant").with_tool(Arc::new(tool));

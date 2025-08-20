@@ -15,7 +15,7 @@ A Rust implementation of the OpenAI Agents SDK, providing a lightweight yet powe
 - ✅ **Tracing**: Built-in observability using the `tracing` crate
 - ✅ **Async/Sync Support**: Both async and blocking execution modes
 - ✅ **Streaming**: Real-time event streaming for long-running operations
-- ✅ **Contextual Runs**: Per-run context that can rewrite tool outputs or finalize early
+- ✅ **Tower Layers**: Composable middleware for cross-cutting concerns (timeouts, retries, validation)
 
 ## Getting Started
 
@@ -101,7 +101,7 @@ The `examples/` directory contains a rich set of demonstrations. Follow this pro
 - **Composing Agents**
   - `group_no_shared.rs`: Compose multiple agents with explicit handoffs, no shared state
 - **Managing State**
-  - `group_shared.rs`: Share run-scoped context across a group to accumulate state
+  - `group_shared.rs`: Share state across a group using stateful Tower layers
 - **Advanced Concepts**
   - `persistent_session.rs`: SQLite-backed persistent conversation history
   - `session_with_guardrails.rs`: Session memory with safety guardrails
@@ -110,10 +110,10 @@ The `examples/` directory contains a rich set of demonstrations. Follow this pro
   - `typed_tool.rs`: Strongly-typed tool inputs/outputs using `TypedFunctionTool`
   - `typed_tool_derive.rs`: Derive macros `#[tool_args]`, `#[tool_output]` for typed tools
   - `typed_env_approval.rs`: Advanced typed Env approval using `ApprovalLayer`
-  - `approval.rs`: Predicate-based approval policy via `boxed_approval_with`
+  - `approval.rs`: Capability-based approval policy using Tower layers
   - `calculator.rs`: Multi-tool calculator with step-by-step reasoning
-  - `db_migrator.rs`: Transactional DB migrator with run-context commit/rollback
-  - `rpn_calculator.rs`: RPN calculator with handler-managed execution stack
+  - `db_migrator.rs`: Transactional DB migrator with stateful layer commit/rollback
+  - `rpn_calculator.rs`: RPN calculator with stateful execution stack layers
 - **Case Study**
   - `multi_agent_research.rs`: Multi-agent research system with specialized roles
 
@@ -137,7 +137,7 @@ The SDK follows these design principles:
 2. **Type Safety**: Leverages Rust's type system for correctness
 3. **Async-First**: Built on Tokio for efficient async operations
 4. **Extensible**: Easy to add custom tools, guardrails, and model providers
-5. **Context-aware**: Optional per-run context hook for tool output shaping
+5. **Composable**: Tower-based middleware for cross-cutting concerns
 
 ### Tower-based execution and layers
 
@@ -151,7 +151,7 @@ Tools execute through a Tower stack with fixed ordering: Run layers → Agent la
 - Context ordering: run-scoped context processes outputs before per-agent context. Outermost `Final` short-circuits the run.
 - Errors are carried internally in typed form and stringified only at the message/protocol boundary.
 
-Note: Legacy direct context handlers in `context.rs` remain internally wired but should be considered deprecated in favor of Tower layers. Public deprecation notes will follow.
+Note: All policy and cross-cutting concerns are now handled through Tower layers for uniform, type-safe composition.
 
 Minimal usage remains unchanged:
 
@@ -177,24 +177,15 @@ let config = RunConfig::default()
 let result = Runner::run(agent, "hello", config).await?;
 ```
 
-Attach scope-agnostic policy layers dynamically (run-scope example):
+Compose typed layers fluently at run-scope:
 
 ```rust
 use openai_agents_rs::{runner::RunConfig, layers};
 
-let layers_vec = vec![
-  layers::boxed_timeout_secs(10),
-  layers::boxed_retry_times(3),
-  layers::boxed_input_schema_lenient(serde_json::json!({
-    "type": "object",
-    "properties": {"input": {"type":"string"}},
-    "required": ["input"]
-  })),
-];
-
 let config = RunConfig::default()
   .with_parallel_tools(true)
-  .with_run_layers(layers_vec);
+  .layer(layers::TimeoutLayer::secs(10))
+  .layer(layers::RetryLayer::times(3));
 ```
 
 Attach layers at agent-scope (wraps run-scope):
@@ -203,59 +194,65 @@ Attach layers at agent-scope (wraps run-scope):
 use openai_agents_rs::{Agent, layers};
 
 let agent = Agent::simple("CityInfoAgent", "...")
-  .with_agent_layers(vec![
-    layers::boxed_timeout_secs(5),
-    layers::boxed_retry_times(2),
-  ]);
+  .layer(layers::TimeoutLayer::secs(5))
+  .layer(layers::RetryLayer::times(2));
 ```
 
 The runner preserves reply order even when executing tools concurrently per turn.
 
-### DX cheatsheet: attaching policy layers
+### DX cheatsheet: composing typed policy layers
 
 ```rust
 use openai_agents_rs::{layers, runner::RunConfig, Agent, FunctionTool, Runner};
 use std::sync::Arc;
 
-// Define a tool
-let tool = Arc::new(FunctionTool::simple("uppercase", "Upper", |s: String| s.to_uppercase()));
+// Define a tool with explicit schema validation
+let tool = Arc::new(
+    FunctionTool::simple("uppercase", "Upper", |s: String| s.to_uppercase())
+        .layer(layers::InputSchemaLayer::strict(serde_json::json!({
+            "type": "object", 
+            "properties": {"input": {"type": "string"}},
+            "required": ["input"]
+        })))
+);
 
 // Agent-scope layers (wrap run-scope)
 let agent = Agent::simple("Writer", "Be helpful")
-  .with_tool(tool.clone())
-  .with_agent_layers(vec![
-    layers::boxed_timeout_secs(10),
-    layers::boxed_retry_times(3),
-  ])
-  // Tool-scope layers (wrap agent/run for this tool)
-  .with_tool_layers("uppercase", vec![ layers::boxed_input_schema_lenient(serde_json::json!({
-    "type": "object",
-    "properties": {"input": {"type":"string"}},
-    "required": ["input"]
-  })) ]);
+  .with_tool(tool)
+  .layer(layers::TimeoutLayer::secs(10))
+  .layer(layers::RetryLayer::times(3));
 
-// Run-scope layers
-let cfg = RunConfig::default().with_run_layers(vec![
-  layers::boxed_timeout_secs(5),
-]);
+// Run-scope layers (outermost)
+let cfg = RunConfig::default()
+  .layer(layers::TimeoutLayer::secs(5));
 
 let _result = Runner::run(agent, "hello", cfg).await?;
 ```
 
-#### Approval policy layer (predicate-based)
+#### Approval policy layer (capability-based)
 
 ```rust
-use openai_agents_rs::{layers, Agent, FunctionTool, Runner, runner::RunConfig};
+use openai_agents_rs::{layers, Agent, FunctionTool, Runner, runner::RunConfig, env::EnvBuilder};
 use std::sync::Arc;
 
-let safe = Arc::new(FunctionTool::simple("safe", "ok", |s: String| s));
-let danger = Arc::new(FunctionTool::simple("danger", "", |s: String| s));
-let agent = Agent::simple("Approve", "Use tools").with_tool(safe).with_tool(danger);
+// Custom approval implementation
+#[derive(Default)]
+struct SafetyApproval;
+impl openai_agents_rs::env::Approval for SafetyApproval {
+    fn request_approval(&self, operation: &str, details: &str) -> bool {
+        !operation.contains("danger") // Deny dangerous operations
+    }
+}
 
-let cfg = RunConfig::default().with_run_layers(vec![
-  // Deny the tool named "danger"; allow all others
-  layers::boxed_approval_with(|_agent, tool, _args| tool != "danger"),
-]);
+let safe = Arc::new(FunctionTool::simple("safe", "ok", |s: String| s));
+let agent = Agent::simple("Approve", "Use tools").with_tool(safe);
+
+let env = EnvBuilder::new()
+    .with_capability(Arc::new(openai_agents_rs::env::ApprovalCapability::new(SafetyApproval)))
+    .build();
+
+let cfg = RunConfig::default()
+    .layer(layers::ApprovalLayer);
 
 let _ = Runner::run(agent, "run", cfg).await?;
 ```
@@ -285,12 +282,12 @@ let tool = TypedFunctionTool::new("add", "Adds two numbers", schema, |a: AddArgs
 - Parallel tool execution can significantly reduce end-to-end latency when the model emits multiple tool calls per turn. In a synthetic benchmark with 8 slow tools (10ms each), sequential execution took ~111ms vs parallel ~15ms on a Mac (M-series). Your numbers will vary.
 - Use `RunConfig::with_parallel_tools(true)` to enable parallel execution (default is true). To limit concurrency, set `with_max_concurrency(n)`.
 - Reply ordering is preserved regardless of parallelism; the runner always appends tool replies in the provider-specified order.
-- Consider applying per-tool timeouts with `layers::boxed_timeout_secs` to guard slow or unreliable tools.
+- Consider applying timeouts via Tower services: `tool.into_service().layer(TimeoutLayer::secs(30))` to guard slow or unreliable tools.
 
 Locking guidance:
 
-- Run/Agent context layers are stateful and guarded by internal `Mutex`es for correctness across parallel calls. Keep work inside handlers minimal and non-blocking; prefer cloning small state and doing heavier work in tools instead.
-- If you attach additional boxed layers that serialize access (e.g., via `tokio::sync::Mutex`), be mindful of throughput under high parallelism; use `with_max_concurrency(...)` to tune.
+- Stateful Tower layers are thread-safe and can maintain state across tool executions. Keep work inside layers minimal and non-blocking; prefer cloning small state and doing heavier work in tools instead.
+- Custom layers that serialize access (e.g., via `tokio::sync::Mutex`) should be mindful of throughput under high parallelism; use `with_max_concurrency(...)` to tune.
 
 #### Common policy layers (scope-agnostic)
 
@@ -302,134 +299,93 @@ use openai_agents_rs::{layers, runner::RunConfig};
 // Public helpers to attach layers at run/agent/tool scopes are planned.
 ```
 
-### Typed Env (advanced)
+### Advanced Tower Service Composition
 
-For advanced users, compose Tower layers directly with a typed Env that implements capability traits (e.g., `HasApproval`). This does not affect the default runner.
+For advanced users, compose Tower layers directly with tools using the service-based approach:
 
 ```rust,no_run
-use openai_agents_rs::{layers::ApprovalLayer, service::BaseToolService, service::ToolRequest};
-use openai_agents_rs::{layers::InputSchemaLayer, layers::RetryLayer, tool::FunctionTool};
-use openai_agents_rs::service::HasApproval;
+use openai_agents_rs::{
+    layers::{ApprovalLayer, InputSchemaLayer, RetryLayer}, 
+    service::ToolRequest,
+    tool::FunctionTool,
+    tool_service::IntoToolService,
+    env::{EnvBuilder, ApprovalCapability}
+};
 use std::sync::Arc;
 use tower::{Layer, ServiceExt};
 
-#[derive(Clone, Default)]
-struct EnvAllowSafe;
-impl HasApproval for EnvAllowSafe {
-    fn approve(&self, _agent: &str, tool: &str, _args: &serde_json::Value) -> bool {
-        tool != "danger"
-    }
+// Custom approval capability
+#[derive(Default)]
+struct SafetyApproval;
+impl openai_agents_rs::env::Approval for SafetyApproval {
+    fn request_approval(&self, _operation: &str, _details: &str) -> bool { true }
 }
 
-let safe = Arc::new(FunctionTool::simple("safe", "ok", |s: String| s));
-let base = BaseToolService::new(safe.clone());
-let stack = ApprovalLayer.layer(RetryLayer::times(2).layer(InputSchemaLayer::lenient(
-    safe.parameters_schema(),
-).layer(base))));
+let env = EnvBuilder::new()
+    .with_capability(Arc::new(ApprovalCapability::new(SafetyApproval)))
+    .build();
 
-let req = ToolRequest::<EnvAllowSafe> {
-    env: EnvAllowSafe,
+let safe = Arc::new(FunctionTool::simple("safe", "ok", |s: String| s));
+let tool_service = <FunctionTool as Clone>::clone(&safe).into_service::<_>();
+let stack = ApprovalLayer.layer(
+    RetryLayer::times(2).layer(
+        InputSchemaLayer::lenient(safe.parameters_schema()).layer(tool_service)
+    )
+);
+
+let req = ToolRequest {
+    env: env.clone(),
     run_id: "r".into(), agent: "A".into(), tool_call_id: "id1".into(),
     tool_name: "safe".into(), arguments: serde_json::json!({"input":"ok"})
 };
 let resp = stack.oneshot(req).await?;
 ```
 
-You can attach the same layers at agent- or tool-scope if you want more granular behavior.
+Tools can have their own layers applied directly during construction for self-contained behavior.
 
-Attach layers at tool-scope (wraps agent/run for a specific tool name):
+### Stateful Layers (Advanced)
 
-```rust
-use openai_agents_rs::{Agent, layers};
+For cross-cutting concerns that require state, implement custom Tower layers:
 
-let agent = Agent::simple("Writer", "...")
-  .with_tool_layers(
-    "uppercase",
-    vec![layers::boxed_timeout_secs(2)],
-  );
-```
+```rust,no_run
+use openai_agents_rs::{service::{ToolRequest, ToolResponse}, layers};
+use tower::{Layer, Service};
+use std::sync::{Arc, Mutex};
 
-### Context and Contextual Runs
+// Custom stateful layer that counts tool calls
+#[derive(Clone)]
+pub struct CallCounterLayer {
+    counter: Arc<Mutex<usize>>,
+}
 
-Attach a context to observe and shape tool outputs. There are two complementary ways to do this:
+impl CallCounterLayer {
+    pub fn new() -> Self {
+        Self { counter: Arc::new(Mutex::new(0)) }
+    }
+    
+    pub fn get_count(&self) -> usize {
+        *self.counter.lock().unwrap()
+    }
+}
 
-#### Per-agent context
-
-- Attach at agent construction time
-- Applies only while that agent is active
-
-```rust
-use openai_agents_rs::{Agent, ToolContext, ContextStep};
-use serde_json::Value;
-
-#[derive(Clone, Default)]
-struct MyCtx;
-struct MyHandler;
-
-impl ToolContext<MyCtx> for MyHandler {
-    fn on_tool_output(
-        &self,
-        ctx: MyCtx,
-        tool_name: &str,
-        arguments: &Value,
-        result: Result<Value, String>,
-    ) -> openai_agents_rs::Result<ContextStep<MyCtx>> {
-        let _ = (tool_name, arguments);
-        match result {
-            Ok(v) => Ok(ContextStep::rewrite(ctx, v)),
-            Err(_e) => Ok(ContextStep::final_output(ctx, serde_json::json!("stopped"))),
+impl<S> Layer<S> for CallCounterLayer {
+    type Service = CallCounterService<S>;
+    
+    fn layer(&self, service: S) -> Self::Service {
+        CallCounterService {
+            inner: service,
+            counter: self.counter.clone(),
         }
     }
 }
 
-let agent = Agent::simple("Ctx", "...")
-    .with_context_factory(|| MyCtx::default(), MyHandler);
+// Apply to agents, tools, or runs as needed
+let counter = CallCounterLayer::new();
+let agent = Agent::simple("Counter", "Uses tools")
+    .layer(counter.clone());
 ```
 
-#### Run-scoped context (spans handoffs)
-
-- Attach at run time so it applies across all agents, including handoffs
-- Runs before any per-agent handler; its rewrite/final decisions take precedence
-
-```rust,no_run
-use openai_agents_rs::{Agent, Runner, runner::RunConfig, ContextStep, ToolContext, RunResultWithContext};
-use serde_json::Value;
-
-#[derive(Clone, Default)]
-struct RunCtx { calls: usize }
-struct RunHandler;
-
-impl ToolContext<RunCtx> for RunHandler {
-    fn on_tool_output(
-        &self,
-        mut ctx: RunCtx,
-        _tool: &str,
-        _args: &Value,
-        result: Result<Value, String>,
-    ) -> openai_agents_rs::Result<ContextStep<RunCtx>> {
-        ctx.calls += 1;
-        Ok(ContextStep::rewrite(ctx, result.unwrap_or(Value::Null)))
-    }
-}
-
-let agent = Agent::simple("Planner", "Use tools and possibly hand off …");
-let config = RunConfig::default();
-let out: RunResultWithContext<RunCtx> = Runner::run_with_run_context(
-    agent,
-    "Do the thing",
-    config,
-    || RunCtx::default(),
-    RunHandler,
-).await?;
-assert!(out.result.is_success());
-println!("run-scoped calls: {}", out.context.calls);
-```
-
-Notes:
-
-- Run-scoped context spans handoffs automatically
-- Ordering: run-scoped handler runs first, then any per-agent handler
-- Finalization: either handler can return `Final` to stop the run immediately
+This provides type-safe, composable state management using standard Tower patterns.
 
 ## Testing
 

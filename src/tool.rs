@@ -19,7 +19,6 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use crate::error::Result;
-use crate::service::ErasedToolLayer;
 
 /// Represents the result of a tool's execution.
 ///
@@ -71,82 +70,8 @@ impl ToolResult {
 
 // NOTE: ToolCall definition removed; use crate::items::ToolCall
 
-/// A tool with attached layers.
-///
-/// This wrapper allows tools to carry their own layers, which will be applied
-/// when the tool is executed. This enables tools to be self-contained and
-/// manage their own cross-cutting concerns.
-pub struct LayeredTool {
-    tool: Arc<dyn Tool>,
-    layers: Vec<Arc<dyn ErasedToolLayer>>,
-}
-
-impl LayeredTool {
-    /// Create a new layered tool from a base tool.
-    pub fn new(tool: Arc<dyn Tool>) -> Self {
-        Self {
-            tool,
-            layers: Vec::new(),
-        }
-    }
-
-    /// Add a layer to this tool.
-    ///
-    /// Layers are applied in the order they are added, wrapping from outside-in
-    /// following Tower's pattern.
-    pub fn layer(mut self, layer: Arc<dyn ErasedToolLayer>) -> Self {
-        self.layers.push(layer);
-        self
-    }
-
-    /// Get the underlying tool.
-    pub fn inner(&self) -> &Arc<dyn Tool> {
-        &self.tool
-    }
-
-    /// Get the layers attached to this tool.
-    pub fn layers(&self) -> &[Arc<dyn ErasedToolLayer>] {
-        &self.layers
-    }
-}
-
-impl Debug for LayeredTool {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LayeredTool")
-            .field("tool", &self.tool.name())
-            .field("layers_count", &self.layers.len())
-            .finish()
-    }
-}
-
-#[async_trait]
-impl Tool for LayeredTool {
-    fn name(&self) -> &str {
-        self.tool.name()
-    }
-
-    fn description(&self) -> &str {
-        self.tool.description()
-    }
-
-    fn parameters_schema(&self) -> Value {
-        self.tool.parameters_schema()
-    }
-
-    async fn execute(&self, arguments: Value) -> Result<ToolResult> {
-        // For now, just delegate to the inner tool
-        // The layers will be applied by the runner when it builds the service stack
-        self.tool.execute(arguments).await
-    }
-
-    fn requires_approval(&self) -> bool {
-        self.tool.requires_approval()
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-}
+// LayeredTool removed in Step 8: Tools now use uniform Tower service composition
+// via .into_service::<E>().layer(...) instead of storing erased layers
 
 /// Defines the interface for all tools that can be used by an agent.
 ///
@@ -262,13 +187,8 @@ impl FunctionTool {
         self
     }
 
-    /// Add a layer to this tool, returning a LayeredTool.
-    ///
-    /// This consumes the tool and returns a LayeredTool that can have
-    /// additional layers added to it.
-    pub fn layer(self, layer: Arc<dyn ErasedToolLayer>) -> LayeredTool {
-        LayeredTool::new(Arc::new(self)).layer(layer)
-    }
+    // .layer() method removed in Step 8: Use .into_service::<E>().layer(...) instead
+    // for uniform Tower service composition
 }
 
 #[async_trait]
@@ -382,13 +302,8 @@ where
         self
     }
 
-    /// Add a layer to this tool, returning a LayeredTool.
-    ///
-    /// This consumes the tool and returns a LayeredTool that can have
-    /// additional layers added to it.
-    pub fn layer(self, layer: Arc<dyn ErasedToolLayer>) -> LayeredTool {
-        LayeredTool::new(Arc::new(self)).layer(layer)
-    }
+    // .layer() method removed in Step 8: Use .into_service::<E>().layer(...) instead
+    // for uniform Tower service composition
 }
 
 #[async_trait]

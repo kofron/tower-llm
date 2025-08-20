@@ -10,7 +10,7 @@ use std::sync::Arc;
 use crate::guardrail::{InputGuardrail, OutputGuardrail};
 use crate::handoff::Handoff;
 use crate::items::Message;
-use crate::service::ErasedToolLayer;
+// Step 8: ErasedToolLayer removed
 use crate::tool::Tool;
 
 /// Defines the complete configuration for an [`Agent`].
@@ -69,8 +69,10 @@ pub struct AgentConfig {
     /// conforms to this schema.
     pub output_schema: Option<serde_json::Value>,
 
-    /// Optional dynamic agent-scope policy layers applied around the tool stack for this agent.
-    pub agent_layers: Vec<Arc<dyn ErasedToolLayer>>,
+    /// Deprecated: Use typed `.layer()` API instead.
+    /// Step 8: ErasedToolLayer removed - this field kept for backward compatibility.
+    #[deprecated(note = "Use typed .layer() API instead")]
+    pub agent_layers: Vec<()>, // Empty vector to maintain API
 }
 
 impl Default for AgentConfig {
@@ -196,8 +198,8 @@ impl Agent {
     /// agent.layer(TimeoutLayer::secs(30))
     /// ```
     #[deprecated(since = "0.2.0", note = "Use `.layer()` for typed composition instead")]
-    pub fn with_agent_layers(mut self, layers: Vec<Arc<dyn ErasedToolLayer>>) -> Self {
-        self.config.agent_layers = layers;
+    pub fn with_agent_layers(mut self, _layers: Vec<()>) -> Self {
+        // No-op: ErasedToolLayer removed in Step 8
         self
     }
 

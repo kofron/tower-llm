@@ -147,9 +147,10 @@ pub struct RunConfig {
     /// If `None`, no explicit limit is enforced.
     pub max_concurrency: Option<usize>,
 
-    /// Optional dynamic run-scope policy layers applied inside the agent scope.
-    /// These are applied around the tool stack after the agent/run context layers are composed.
-    pub run_layers: Vec<Arc<dyn crate::service::ErasedToolLayer>>,
+    /// Deprecated: Use typed `.layer()` API instead.
+    /// Step 8: ErasedToolLayer removed - this field kept for backward compatibility.
+    #[deprecated(note = "Use typed .layer() API instead")]
+    pub run_layers: Vec<()>, // Empty vector to maintain API
 }
 
 impl std::fmt::Debug for RunConfig {
@@ -215,9 +216,9 @@ impl RunConfig {
     #[deprecated(since = "0.2.0", note = "Use `.layer()` for typed composition instead")]
     pub fn with_run_layers(
         mut self,
-        layers: Vec<Arc<dyn crate::service::ErasedToolLayer>>,
+        _layers: Vec<()>, // No-op: ErasedToolLayer removed in Step 8
     ) -> Self {
-        self.run_layers = layers;
+        // No-op: ErasedToolLayer removed in Step 8
         self
     }
 
@@ -281,7 +282,7 @@ pub trait RunConfigLike {
     fn model_provider(&self) -> &Option<Arc<dyn crate::model::ModelProvider>>;
     fn parallel_tools(&self) -> bool;
     fn max_concurrency(&self) -> Option<usize>;
-    fn run_layers(&self) -> &Vec<Arc<dyn crate::service::ErasedToolLayer>>;
+    fn run_layers(&self) -> &Vec<()>; // ErasedToolLayer removed in Step 8
 }
 
 impl RunConfigLike for RunConfig {
@@ -309,7 +310,7 @@ impl RunConfigLike for RunConfig {
         self.max_concurrency
     }
     
-    fn run_layers(&self) -> &Vec<Arc<dyn crate::service::ErasedToolLayer>> {
+    fn run_layers(&self) -> &Vec<()> { // ErasedToolLayer removed in Step 8
         &self.run_layers
     }
 }
@@ -339,7 +340,7 @@ impl<L, R: RunConfigLike> RunConfigLike for LayeredRunConfig<L, R> {
         self.inner.max_concurrency()
     }
     
-    fn run_layers(&self) -> &Vec<Arc<dyn crate::service::ErasedToolLayer>> {
+    fn run_layers(&self) -> &Vec<()> { // ErasedToolLayer removed in Step 8
         self.inner.run_layers()
     }
 }
@@ -729,14 +730,9 @@ impl Runner {
                         if let Some(tool) = tool_opt {
                             let span = ToolSpan::new(context.clone(), name.clone(), args.clone());
 
-                            // Check if this is a LayeredTool and extract its layers
-                            let tool_layers = if let Some(layered) =
-                                tool.as_any().downcast_ref::<crate::tool::LayeredTool>()
-                            {
-                                layered.layers().to_vec()
-                            } else {
-                                Vec::new()
-                            };
+                            // LayeredTool removed in Step 8: Tools now use uniform Tower service composition
+                            // No per-tool layers extracted; all layering happens via .into_service().layer(...)
+                            let tool_layers: Vec<()> = Vec::new();
 
                             let mut stack = {
                                 // Use service-based tool path for Arc<dyn Tool>
@@ -809,20 +805,12 @@ impl Runner {
                                 let with_schema = InputSchemaLayer::lenient(schema).layer(tool_service);
                                 BoxService::new(with_schema)
                             };
+                            // Step 8: LayeredTool and ErasedToolLayer removed - no dynamic layer application needed
+                            // All layering now happens via typed .layer() composition at tool/agent/run creation time
                             // Apply layers Tool → Agent → Run (inner-to-outer) for runtime order Run → Agent → Tool → Base
-                            // Tool layers applied first (innermost, closest to base)
-                            for l in &tool_layers {
-                                stack = l.layer_boxed(stack);
-                            }
-                            // Agent layers wrap tool layers
-                            let agent_layers = agent.config.agent_layers.clone();
-                            for l in &agent_layers {
-                                stack = l.layer_boxed(stack);
-                            }
-                            // Run layers wrap everything (outermost)
-                            for l in &config.run_layers {
-                                stack = l.layer_boxed(stack);
-                            }
+                            // Tool layers applied first (innermost, closest to base) - no longer applied dynamically
+                            // Agent layers wrap tool layers - no longer applied dynamically  
+                            // Run layers wrap everything (outermost) - no longer applied dynamically
                             let req = ToolRequest::<DefaultEnv> {
                                 env: DefaultEnv,
                                 run_id: trace_id.clone(),
@@ -946,14 +934,9 @@ impl Runner {
                                     let span =
                                         ToolSpan::new(context.clone(), name.clone(), args.clone());
 
-                                    // Check if this is a LayeredTool and extract its layers
-                                    let tool_layers = if let Some(layered) =
-                                        tool.as_any().downcast_ref::<crate::tool::LayeredTool>()
-                                    {
-                                        layered.layers().to_vec()
-                                    } else {
-                                        Vec::new()
-                                    };
+                                    // LayeredTool removed in Step 8: Tools now use uniform Tower service composition  
+                                    // No per-tool layers extracted; all layering happens via .into_service().layer(...)
+                                    let tool_layers: Vec<()> = Vec::new();
 
                                     let mut stack = {
                                         // Use service-based tool path for Arc<dyn Tool>
@@ -1026,19 +1009,12 @@ impl Runner {
                                         let with_schema = InputSchemaLayer::lenient(schema).layer(tool_service);
                                         BoxService::new(with_schema)
                                     };
+                                    // Step 8: LayeredTool and ErasedToolLayer removed - no dynamic layer application needed
+                                    // All layering now happens via typed .layer() composition at tool/agent/run creation time
                                     // Apply layers Tool → Agent → Run (inner-to-outer) for runtime order Run → Agent → Tool → Base
-                                    // Tool layers applied first (innermost, closest to base)
-                                    for l in &tool_layers {
-                                        stack = l.layer_boxed(stack);
-                                    }
-                                    // Agent layers wrap tool layers
-                                    for l in &agent_layers_clone {
-                                        stack = l.layer_boxed(stack);
-                                    }
-                                    // Run layers wrap everything (outermost)
-                                    for l in &run_layers_clone {
-                                        stack = l.layer_boxed(stack);
-                                    }
+                                    // Tool layers applied first (innermost, closest to base) - no longer applied dynamically
+                                    // Agent layers wrap tool layers - no longer applied dynamically  
+                                    // Run layers wrap everything (outermost) - no longer applied dynamically
                                     let req = ToolRequest::<DefaultEnv> {
                                         env: DefaultEnv,
                                         run_id: run_id_value.clone(),

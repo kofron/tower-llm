@@ -20,9 +20,9 @@
 //!   with the outside world, such as calling an API or accessing a database.
 //! - **[`Session`]**: Manages the state of an interaction, including the history
 //!   of messages. A [`SqliteSession`] is provided for persistent state.
-//! - **Contextual Runs**: An optional per-run context hook that can observe and
-//!   shape tool outputs. See [`ToolContext`](crate::context::ToolContext) and
-//!   `examples/contextual.rs`.
+//! - **Stateful Layers**: Tower layers can maintain state across tool executions,
+//!   providing observability and cross-cutting concerns. See layer examples
+//!   for stateful accumulation patterns.
 //!
 //! ## Getting Started
 //!
@@ -104,10 +104,8 @@ pub use tool::{FunctionTool, Tool};
 // Public layer exports for DX (scope-agnostic policy layers)
 pub mod layers {
     pub use crate::service::{
-        boxed_approval_with, boxed_input_schema_lenient, boxed_input_schema_strict,
-        boxed_retry_times, boxed_timeout_secs, ApprovalLayer, BoxedApprovalLayer,
-        BoxedInputSchemaLayer, BoxedRetryLayer, BoxedTimeoutLayer, ErasedToolLayer,
-        InputSchemaLayer, RetryLayer, TimeoutLayer,
+        ApprovalLayer, InputSchemaLayer, RetryLayer, TimeoutLayer,
+        // Step 8: ErasedToolLayer and boxed helpers removed
     };
 }
 pub use service::DefaultEnv;

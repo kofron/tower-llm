@@ -5,9 +5,10 @@
 
 use openai_agents_rs::{
     env::{EnvBuilder, InMemoryMetrics, LoggingCapability},
-    layers, Agent, FunctionTool,
+    layers, Agent, FunctionTool, tool_service::IntoToolService, service::DefaultEnv,
 };
 use std::sync::Arc;
+use tower::Layer;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -20,7 +21,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_capability(Arc::new(InMemoryMetrics::default()))
         .build();
 
-    // Create tools with standard layers
+    // Create tools with service-based layering
     let calculator = FunctionTool::simple("add", "Adds two numbers", |input: String| {
         // Parse input as "a + b"
         let parts: Vec<&str> = input.split('+').collect();
@@ -31,14 +32,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             "Invalid input".to_string()
         }
-    })
-    .layer(layers::boxed_retry_times(2))
-    .layer(layers::boxed_timeout_secs(5));
+    });
+
+    // Layers would be applied via Tower services:
+    let _calc_service = layers::TimeoutLayer::secs(5).layer(
+        layers::RetryLayer::times(2).layer(
+            calculator.clone().into_service::<DefaultEnv>()
+        )
+    );
 
     let weather = FunctionTool::simple("weather", "Gets weather", |city: String| {
         format!("The weather in {} is sunny", city)
-    })
-    .layer(layers::boxed_timeout_secs(5));
+    });
+
+    let _weather_service = layers::TimeoutLayer::secs(5).layer(
+        weather.clone().into_service::<DefaultEnv>()
+    );
 
     // Create an agent with the tools
     let _agent = Agent::simple("Assistant", "A helpful assistant")
@@ -50,7 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  - Logging capability");
     println!("  - Metrics capability");
     println!();
-    println!("Tools have layers applied:");
+    println!("Tools can have layers applied via Tower services:");
     println!("  - Calculator: retry (2 times) + timeout (5s)");
     println!("  - Weather: timeout (5s)");
     println!();

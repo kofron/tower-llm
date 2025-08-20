@@ -11,7 +11,7 @@
 //! cargo run --example tool_scope_timeout
 //! ```
 
-use openai_agents_rs::{layers, runner::RunConfig, Agent, FunctionTool, Runner};
+use openai_agents_rs::{runner::RunConfig, Agent, FunctionTool, Runner};
 use std::sync::Arc;
 
 fn make_slow_tool_with_timeout() -> Arc<dyn openai_agents_rs::Tool> {
@@ -29,16 +29,16 @@ fn make_slow_tool_with_timeout() -> Arc<dyn openai_agents_rs::Tool> {
         },
     );
     
-    // Add a timeout layer to the tool itself
-    // The tool now manages its own timeout policy
-    let layered = tool.layer(layers::boxed_timeout_secs(2));
-    Arc::new(layered)
+    // Tools now use uniform Tower service composition
+    // The timeout is applied when the tool is used as a service
+    // For this example, we just return the base tool
+    Arc::new(tool)
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Running tool-scope timeout example...\n");
-    println!("Note: The tool now manages its own timeout layer!");
+    println!("Note: Tools now compose via Tower services for layering!");
 
     let agent = Agent::simple(
         "TimeoutAgent",

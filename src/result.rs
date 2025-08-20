@@ -261,9 +261,10 @@ pub struct StreamingRunResult {
     pub trace_id: String,
 }
 
-/// A completed run result bundled with the final typed context value.
+/// A completed run result bundled with final state from a stateful layer.
 ///
-/// Returned by `Runner::run_with_context` when using a typed contextual agent.
+/// Can be used to extract accumulated state from stateful Tower layers
+/// after a run completes. See layer examples for usage patterns.
 pub struct RunResultWithContext<C> {
     pub result: RunResult,
     pub context: C,

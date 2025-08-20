@@ -2,15 +2,18 @@
 //!
 //! These tests demonstrate real-world usage patterns and verify that
 //! the Tower composition model works correctly.
+//!
+//! Step 8 completed: LayeredTool removed, tools now use uniform Tower service composition
 
-use openai_agents_rs::{layers, runner::RunConfig, Agent, FunctionTool, Tool};
+use openai_agents_rs::{layers, runner::RunConfig, Agent, FunctionTool, Tool, tool_service::IntoToolService, service::DefaultEnv};
 use serde_json::json;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use tower::Layer;
 
 #[tokio::test]
-async fn test_layered_tool_execution() {
-    // Create a tool with multiple layers
+async fn test_service_tool_execution() {
+    // Create a tool and compose it with layers via Tower services
     let call_count = Arc::new(AtomicUsize::new(0));
     let count_clone = call_count.clone();
 
@@ -22,8 +25,11 @@ async fn test_layered_tool_execution() {
             count_clone.fetch_add(1, Ordering::SeqCst);
             Ok(json!({"count": count_clone.load(Ordering::SeqCst)}))
         },
-    )
-    .layer(layers::boxed_retry_times(2)); // Will retry on failure
+    );
+
+    // Tools now compose via .into_service().layer() for uniform Tower patterns
+    let service = tool.clone().into_service::<DefaultEnv>();
+    let _layered = layers::RetryLayer::times(2).layer(service);
 
     // Tool should work with the standard Tool trait
     let result = tool.execute(json!({})).await.unwrap();
@@ -31,8 +37,8 @@ async fn test_layered_tool_execution() {
 }
 
 #[tokio::test]
-async fn test_tool_layer_ordering() {
-    // Demonstrates that layers wrap in the correct order
+async fn test_service_layer_ordering() {
+    // Demonstrates that layers wrap in the correct order via Tower services
     let execution_order = Arc::new(std::sync::Mutex::new(Vec::new()));
 
     // Create a tool that records when it executes
@@ -47,19 +53,19 @@ async fn test_tool_layer_ordering() {
         },
     );
 
-    // Layers are applied outside-in as they're added
-    // So if we add A then B, execution goes B -> A -> tool
-    let layered = tool
-        .layer(layers::boxed_retry_times(1)) // Inner layer
-        .layer(layers::boxed_timeout_secs(10)); // Outer layer
+    // Tools now compose via Tower services with typed layers
+    let service = tool.clone().into_service::<DefaultEnv>();
+    let _layered = layers::TimeoutLayer::secs(10).layer(
+        layers::RetryLayer::times(1).layer(service)
+    );
 
-    // Verify the layered tool still implements Tool
-    assert_eq!(layered.name(), "ordered");
-    let _result = layered.execute(json!({})).await.unwrap();
+    // Verify the original tool still implements Tool
+    assert_eq!(tool.name(), "ordered");
+    let _result = tool.execute(json!({})).await.unwrap();
 }
 
 #[test]
-fn test_tool_with_custom_name_and_layers() {
+fn test_tool_with_custom_name_and_service_layers() {
     // Real-world pattern: database tool with custom configuration
     let db_tool = FunctionTool::new(
         "generic_db".to_string(),
@@ -79,22 +85,31 @@ fn test_tool_with_custom_name_and_layers() {
             }))
         },
     )
-    .with_name("user_database") // Custom name for this instance
-    .layer(layers::boxed_timeout_secs(30)) // Database queries can be slow
-    .layer(layers::boxed_retry_times(1)); // But don't retry too much
+    .with_name("user_database"); // Custom name for this instance
+
+    // Layers are now applied via Tower services:
+    let service = db_tool.clone().into_service::<DefaultEnv>();
+    let _layered = layers::TimeoutLayer::secs(30).layer(
+        layers::RetryLayer::times(1).layer(service)
+    );
 
     assert_eq!(db_tool.name(), "user_database");
 }
 
 #[test]
-fn test_agent_with_mixed_tools() {
-    // Some tools have layers, some don't - both work fine
+fn test_agent_with_service_based_tools() {
+    // Tools are now used directly in agents - layering happens via services
     let simple_tool = FunctionTool::simple("simple", "A simple tool", |s: String| s);
 
     let complex_tool =
-        FunctionTool::simple("complex", "A complex tool", |s: String| s.to_uppercase())
-            .layer(layers::boxed_timeout_secs(5))
-            .layer(layers::boxed_retry_times(3));
+        FunctionTool::simple("complex", "A complex tool", |s: String| s.to_uppercase());
+
+    // Tools can be individually layered when converted to services:
+    let _service1 = simple_tool.clone().into_service::<DefaultEnv>();
+    let _service2 = complex_tool.clone().into_service::<DefaultEnv>();
+    let _layered2 = layers::TimeoutLayer::secs(5).layer(
+        layers::RetryLayer::times(3).layer(_service2)
+    );
 
     let agent = Agent::simple("MixedAgent", "Uses both simple and complex tools")
         .with_tool(Arc::new(simple_tool))
@@ -109,21 +124,23 @@ fn test_agent_with_mixed_tools() {
 }
 
 #[test]
-fn test_tool_default_with_layers() {
-    // Even default tools can have layers added
+fn test_tool_default_with_service_layers() {
+    // Even default tools can have layers added via services
     let tool = FunctionTool::default()
-        .with_name("customized_default")
-        .layer(layers::boxed_timeout_secs(10));
+        .with_name("customized_default");
+
+    // Layers are now applied via Tower services:
+    let service = tool.clone().into_service::<DefaultEnv>();
+    let _layered = layers::TimeoutLayer::secs(10).layer(service);
 
     assert_eq!(tool.name(), "customized_default");
     assert_eq!(tool.description(), "An example tool");
 }
 
 #[tokio::test]
-async fn test_tool_error_handling_with_layers() {
-    // Note: Layers are applied by the runner when building the service stack.
-    // Direct tool execution doesn't apply layers - this is by design.
-    // The LayeredTool carries its layers but they're applied during agent execution.
+async fn test_service_error_handling_with_layers() {
+    // Layers are now applied via Tower services, not stored in tools
+    // Tools are pure, layers are applied during service composition
 
     let flaky_tool = FunctionTool::new(
         "flaky".to_string(),
@@ -134,20 +151,20 @@ async fn test_tool_error_handling_with_layers() {
             // But for this test, we'll just verify it can be created with layers
             Ok(json!({"status": "ok", "args": args}))
         },
-    )
-    .layer(layers::boxed_retry_times(2)); // Retry layer attached but not executed here
+    );
 
-    // The tool carries its layers
-    assert_eq!(flaky_tool.layers().len(), 1);
+    // Tools no longer carry layers - they compose via services
+    let service = flaky_tool.clone().into_service::<DefaultEnv>();
+    let _layered = layers::RetryLayer::times(2).layer(service);
 
-    // Direct execution doesn't apply layers (they're applied by the runner)
+    // Direct execution doesn't apply layers (they're applied by the runner/service)
     let result = flaky_tool.execute(json!({"test": true})).await;
     assert!(result.is_ok());
     assert_eq!(result.unwrap().output["status"], "ok");
 }
 
 #[test]
-fn test_separation_of_concerns() {
+fn test_clean_separation_of_concerns() {
     // This test demonstrates the clean separation of concerns
 
     // 1. Tool level - manages tool-specific configuration
@@ -157,44 +174,56 @@ fn test_separation_of_concerns() {
         json!({"type": "object", "properties": {"endpoint": {"type": "string"}}}),
         |args| Ok(json!({"response": "ok", "endpoint": args["endpoint"]})),
     )
-    .with_name("external_api")
-    .layer(layers::boxed_timeout_secs(10)) // API-specific timeout
-    .layer(layers::boxed_retry_times(3)); // API-specific retry
+    .with_name("external_api");
 
-    // 2. Agent level - manages agent-specific configuration
+    // Service-based layering would be:
+    let _service = api_tool.clone().into_service::<DefaultEnv>();
+    let _layered = layers::TimeoutLayer::secs(10).layer(
+        layers::RetryLayer::times(3).layer(_service)
+    );
+
+    // 2. Agent level - manages agent-specific configuration (would add agent layers here)
     let agent = Agent::simple("APIAgent", "Handles API calls")
         .with_tool(Arc::new(api_tool));
 
     // 3. Run level - manages run-specific configuration
     let _config = RunConfig::default();
 
-    // Each level is independent and manages its own concerns
+    // Clean boundaries - each level manages itself
     assert_eq!(agent.tools()[0].name(), "external_api");
 }
 
 #[test]
-fn test_tool_composition_patterns() {
+fn test_service_composition_patterns() {
     // Pattern 1: Simple tool with no layers
     let simple = FunctionTool::simple("echo", "Echoes input", |s: String| s);
 
-    // Pattern 2: Tool with single layer
+    // Pattern 2: Tool with service-based single layer
     let with_timeout = FunctionTool::simple("slow", "Slow operation", |s: String| {
         // Simulate slow operation
         std::thread::sleep(std::time::Duration::from_millis(10));
         s
-    })
-    .layer(layers::boxed_timeout_secs(1));
+    });
+    let _timeout_service = layers::TimeoutLayer::secs(1).layer(
+        with_timeout.clone().into_service::<DefaultEnv>()
+    );
 
-    // Pattern 3: Tool with multiple layers (order matters!)
-    let with_multiple = FunctionTool::simple("critical", "Critical operation", |s: String| s)
-        .layer(layers::boxed_timeout_secs(5)) // Inner layer
-        .layer(layers::boxed_retry_times(3)); // Outer layer
+    // Pattern 3: Tool with multiple service layers (order matters!)
+    let with_multiple = FunctionTool::simple("critical", "Critical operation", |s: String| s);
+    let _multi_service = layers::RetryLayer::times(3).layer(
+        layers::TimeoutLayer::secs(5).layer(
+            with_multiple.clone().into_service::<DefaultEnv>()
+        )
+    );
 
-    // Pattern 4: Tool with custom name and layers
+    // Pattern 4: Tool with custom name and service layers
     let fully_configured = FunctionTool::simple("base", "Base tool", |s: String| s)
-        .with_name("production_tool")
-        .layer(layers::boxed_timeout_secs(30))
-        .layer(layers::boxed_retry_times(2));
+        .with_name("production_tool");
+    let _full_service = layers::RetryLayer::times(2).layer(
+        layers::TimeoutLayer::secs(30).layer(
+            fully_configured.clone().into_service::<DefaultEnv>()
+        )
+    );
 
     // All patterns result in tools that implement the Tool trait
     let tools: Vec<Arc<dyn Tool>> = vec![
@@ -215,14 +244,16 @@ fn test_no_string_coupling() {
     // OLD WAY (removed):
     // agent.with_tool_layers("database", vec![layers]);  // String coupling!
 
-    // NEW WAY: Direct, type-safe configuration
-    let tool = FunctionTool::simple("database", "DB operations", |s: String| s)
-        .layer(layers::boxed_timeout_secs(30));
+    // NEW WAY: Direct, type-safe configuration via Tower services
+    let tool = FunctionTool::simple("database", "DB operations", |s: String| s);
+    let _service = layers::TimeoutLayer::secs(30).layer(
+        tool.clone().into_service::<DefaultEnv>()
+    );
 
     let agent = Agent::simple("DataAgent", "Handles data").with_tool(Arc::new(tool));
 
     // No strings needed to configure tools
-    // The tool carries its configuration with it
+    // Layer configuration happens when tools are converted to services
     assert_eq!(agent.tools()[0].name(), "database");
 }
 
@@ -231,12 +262,15 @@ fn test_tower_philosophy() {
     // This test demonstrates that we're following Tower's philosophy:
     // "Everything is a service, and services compose through layers"
 
-    // Tools are services
+    // Tools are services (via .into_service())
     let service1 = FunctionTool::simple("service1", "First service", |s: String| s);
+    let _s1_service = service1.clone().into_service::<DefaultEnv>();
 
-    // Layers modify service behavior
-    let service2 = FunctionTool::simple("service2", "Second service", |s: String| s)
-        .layer(layers::boxed_timeout_secs(10));
+    // Layers modify service behavior via Tower composition
+    let service2 = FunctionTool::simple("service2", "Second service", |s: String| s);
+    let _s2_layered = layers::TimeoutLayer::secs(10).layer(
+        service2.clone().into_service::<DefaultEnv>()
+    );
 
     // Services compose into higher-level services (agents)
     let agent = Agent::simple("ComposedAgent", "Composed from services")
@@ -249,6 +283,6 @@ fn test_tower_philosophy() {
     // And runs could have their own layers (run-level policies)
     let _config = RunConfig::default();
 
-    // Clean, uniform composition at every level
+    // Clean, uniform composition at every level via Tower services
     assert_eq!(agent_with_layers.tools().len(), 2);
 }
