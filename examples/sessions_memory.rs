@@ -9,17 +9,15 @@ use tower::{Layer, Service, ServiceExt};
 
 // Import the next module and its submodules
 // Core module is now at root level
-// use openai_agents_rs directly
-
-
+// use tower_llm directly
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("=== Sessions Memory Example ===\n");
 
     // Create an in-memory session store
-    let store = openai_agents_rs::sessions::InMemorySessionStore::default();
-    let session_id = openai_agents_rs::sessions::SessionId("user_123_session".to_string());
+    let store = tower_llm::sessions::InMemorySessionStore::default();
+    let session_id = tower_llm::sessions::SessionId("user_123_session".to_string());
 
     println!("📦 Created in-memory session store");
     println!("🔑 Session ID: {}\n", session_id.0);
@@ -47,7 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     .into(),
             );
 
-            Ok::<_, tower::BoxError>(openai_agents_rs::StepOutcome::Done {
+            Ok::<_, tower::BoxError>(tower_llm::StepOutcome::Done {
                 messages: response_messages,
                 aux: Default::default(),
             })
@@ -55,7 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     });
 
     // Wrap the agent with the memory layer
-    let memory_layer = openai_agents_rs::sessions::MemoryLayer::new(
+    let memory_layer = tower_llm::sessions::MemoryLayer::new(
         Arc::new(store.clone()),
         Arc::new(store.clone()),
         session_id.clone(),
@@ -77,7 +75,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let outcome1 = agent_with_memory.ready().await?.call(req1).await?;
 
     match outcome1 {
-        openai_agents_rs::StepOutcome::Done { messages, .. } => {
+        tower_llm::StepOutcome::Done { messages, .. } => {
             println!(
                 "\n✅ First interaction complete. Total messages: {}",
                 messages.len()
@@ -101,7 +99,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let outcome2 = agent_with_memory.ready().await?.call(req2).await?;
 
     match outcome2 {
-        openai_agents_rs::StepOutcome::Done { messages, .. } => {
+        tower_llm::StepOutcome::Done { messages, .. } => {
             println!(
                 "\n✅ Second interaction complete. Total messages: {}",
                 messages.len()
@@ -117,9 +115,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Load the session directly from the store
     use tower::{Service, ServiceExt};
     let mut store_svc = store.clone();
-    let stored_history = Service::<openai_agents_rs::sessions::LoadSession>::call(
+    let stored_history = Service::<tower_llm::sessions::LoadSession>::call(
         &mut store_svc,
-        openai_agents_rs::sessions::LoadSession {
+        tower_llm::sessions::LoadSession {
             id: session_id.clone(),
         },
     )
@@ -138,8 +136,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("\n--- Creating New Session ---");
 
     // Create a new session for comparison
-    let new_session_id = openai_agents_rs::sessions::SessionId("user_456_session".to_string());
-    let memory_layer2 = openai_agents_rs::sessions::MemoryLayer::new(
+    let new_session_id = tower_llm::sessions::SessionId("user_456_session".to_string());
+    let memory_layer2 = tower_llm::sessions::MemoryLayer::new(
         Arc::new(store.clone()),
         Arc::new(store.clone()),
         new_session_id.clone(),
@@ -150,7 +148,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 "  New session agent received {} messages",
                 req.messages.len()
             );
-            Ok::<_, tower::BoxError>(openai_agents_rs::StepOutcome::Done {
+            Ok::<_, tower::BoxError>(tower_llm::StepOutcome::Done {
                 messages: req.messages,
                 aux: Default::default(),
             })

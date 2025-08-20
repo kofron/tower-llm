@@ -1,14 +1,14 @@
-use serde_json::json;
 use futures::FutureExt;
+use serde_json::json;
 use tower::{Service, ServiceExt};
 
 // Core module is now at root level
-// use openai_agents_rs directly
+// use tower_llm directly
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Define a simple echo tool
-    let echo = openai_agents_rs::ToolDef::from_handler(
+    let echo = tower_llm::ToolDef::from_handler(
         "echo",
         "Echo back the input",
         json!({
@@ -21,14 +21,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }),
     );
 
-    let (mut router, _specs) = openai_agents_rs::ToolRouter::new(vec![echo]);
+    let (mut router, _specs) = tower_llm::ToolRouter::new(vec![echo]);
     let out = router
         .ready()
         .await?
-        .call(openai_agents_rs::ToolInvocation { id: "1".into(), name: "echo".into(), arguments: json!({"text":"hi"}) })
+        .call(tower_llm::ToolInvocation {
+            id: "1".into(),
+            name: "echo".into(),
+            arguments: json!({"text":"hi"}),
+        })
         .await?;
     println!("tool out={}", out.result);
     Ok(())
 }
-
-

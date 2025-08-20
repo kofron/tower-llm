@@ -11,9 +11,7 @@ use serde_json::json;
 
 // Import the next module and its submodules
 // Core module is now at root level
-// use openai_agents_rs directly
-
-
+// use tower_llm directly
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Codec Bijection Example ===\n");
@@ -63,12 +61,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Convert to RunItems
     println!("\n--- Converting to RunItems ---");
-    let items = openai_agents_rs::codec::messages_to_items(&original_messages)?;
+    let items = tower_llm::codec::messages_to_items(&original_messages)?;
 
     println!("RunItems ({} total):", items.len());
     for (i, item) in items.iter().enumerate() {
         match item {
-            openai_agents_rs::items::RunItem::Message(m) => {
+            tower_llm::items::RunItem::Message(m) => {
                 println!(
                     "  {}: Message(role={:?}, content_len={})",
                     i,
@@ -76,16 +74,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     m.content.len()
                 );
             }
-            openai_agents_rs::items::RunItem::ToolCall(tc) => {
+            tower_llm::items::RunItem::ToolCall(tc) => {
                 println!("  {}: ToolCall(name={}, id={})", i, tc.tool_name, tc.id);
             }
-            openai_agents_rs::items::RunItem::ToolOutput(to) => {
+            tower_llm::items::RunItem::ToolOutput(to) => {
                 println!(
                     "  {}: ToolOutput(id={}, output_type={})",
                     i, to.tool_call_id, to.output
                 );
             }
-            openai_agents_rs::items::RunItem::Handoff(_) => {
+            tower_llm::items::RunItem::Handoff(_) => {
                 println!("  {}: Handoff", i);
             }
         }
@@ -93,7 +91,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Convert back to messages
     println!("\n--- Converting back to Messages ---");
-    let reconstructed = openai_agents_rs::codec::items_to_messages(&items);
+    let reconstructed = tower_llm::codec::items_to_messages(&items);
 
     println!("Reconstructed messages ({} total):", reconstructed.len());
     for (i, msg) in reconstructed.iter().enumerate() {

@@ -7,19 +7,15 @@ use tower::{Layer, Service, ServiceExt};
 
 // Import the next module and its submodules
 // Core module is now at root level
-// use openai_agents_rs directly
-
-
-
-
+// use tower_llm directly
 
 // Simple in-memory trace store for demonstration
 #[derive(Clone, Default)]
 struct InMemoryTraceStore {
-    traces: Arc<tokio::sync::Mutex<std::collections::HashMap<String, openai_agents_rs::recording::Trace>>>,
+    traces: Arc<tokio::sync::Mutex<std::collections::HashMap<String, tower_llm::recording::Trace>>>,
 }
 
-impl Service<openai_agents_rs::recording::WriteTrace> for InMemoryTraceStore {
+impl Service<tower_llm::recording::WriteTrace> for InMemoryTraceStore {
     type Response = ();
     type Error = tower::BoxError;
     type Future =
@@ -32,21 +28,27 @@ impl Service<openai_agents_rs::recording::WriteTrace> for InMemoryTraceStore {
         std::task::Poll::Ready(Ok(()))
     }
 
-    fn call(&mut self, req: openai_agents_rs::recording::WriteTrace) -> Self::Future {
+    fn call(&mut self, req: tower_llm::recording::WriteTrace) -> Self::Future {
         let traces = self.traces.clone();
         Box::pin(async move {
             let mut t = traces.lock().await;
-            t.insert(req.id.clone(), openai_agents_rs::recording::Trace { items: req.items });
+            t.insert(
+                req.id.clone(),
+                tower_llm::recording::Trace { items: req.items },
+            );
             Ok(())
         })
     }
 }
 
-impl Service<openai_agents_rs::recording::ReadTrace> for InMemoryTraceStore {
-    type Response = openai_agents_rs::recording::Trace;
+impl Service<tower_llm::recording::ReadTrace> for InMemoryTraceStore {
+    type Response = tower_llm::recording::Trace;
     type Error = tower::BoxError;
     type Future = std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<openai_agents_rs::recording::Trace, tower::BoxError>> + Send>,
+        Box<
+            dyn std::future::Future<Output = Result<tower_llm::recording::Trace, tower::BoxError>>
+                + Send,
+        >,
     >;
 
     fn poll_ready(
@@ -56,7 +58,7 @@ impl Service<openai_agents_rs::recording::ReadTrace> for InMemoryTraceStore {
         std::task::Poll::Ready(Ok(()))
     }
 
-    fn call(&mut self, req: openai_agents_rs::recording::ReadTrace) -> Self::Future {
+    fn call(&mut self, req: tower_llm::recording::ReadTrace) -> Self::Future {
         let traces = self.traces.clone();
         Box::pin(async move {
             let t = traces.lock().await;
@@ -90,9 +92,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     .into(),
             );
 
-            Ok::<_, tower::BoxError>(openai_agents_rs::StepOutcome::Done {
+            Ok::<_, tower::BoxError>(tower_llm::StepOutcome::Done {
                 messages,
-                aux: openai_agents_rs::StepAux {
+                aux: tower_llm::StepAux {
                     prompt_tokens: 50,
                     completion_tokens: 25,
                     tool_invocations: 0,
@@ -103,7 +105,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // Wrap with recording layer
     let trace_id = "demo-trace-001";
-    let recorder_layer = openai_agents_rs::recording::RecorderLayer::new(store.clone(), trace_id);
+    let recorder_layer = tower_llm::recording::RecorderLayer::new(store.clone(), trace_id);
     let mut recording_agent = recorder_layer.layer(mock_agent);
 
     // Create an initial conversation
@@ -132,11 +134,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let outcome = recording_agent.ready().await?.call(req).await?;
 
     match &outcome {
-        openai_agents_rs::StepOutcome::Done { messages, .. } => {
+        tower_llm::StepOutcome::Done { messages, .. } => {
             println!("  ✅ Recorded run with {} final messages", messages.len());
 
             // Convert to RunItems for storage
-            let items = openai_agents_rs::codec::messages_to_items(&messages)?;
+            let items = tower_llm::codec::messages_to_items(&messages)?;
             println!(
                 "  📼 Stored {} RunItems in trace '{}'",
                 items.len(),
@@ -149,7 +151,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("\n--- Phase 2: Replaying the Recorded Run ---");
 
     // Create a replay service
-    let replay_service = openai_agents_rs::recording::ReplayService::new(store.clone(), trace_id, "gpt-4o");
+    let replay_service =
+        tower_llm::recording::ReplayService::new(store.clone(), trace_id, "gpt-4o");
     let mut replayer = replay_service;
 
     // Replay with the same initial messages
@@ -166,11 +169,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let replayed = replayer.ready().await?.call(replay_req).await?;
 
     match replayed {
-        openai_agents_rs::StepOutcome::Done { messages, .. } => {
+        tower_llm::StepOutcome::Done { messages, .. } => {
             println!("  ✅ Replayed run returned {} messages", messages.len());
 
             // Verify it matches the original
-            if let openai_agents_rs::StepOutcome::Done {
+            if let tower_llm::StepOutcome::Done {
                 messages: original, ..
             } = outcome
             {
@@ -189,7 +192,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Record multiple different runs
     for i in 1..=3 {
         let trace_id = format!("trace-{:03}", i);
-        let recorder = openai_agents_rs::recording::RecorderLayer::new(store.clone(), &trace_id);
+        let recorder = tower_llm::recording::RecorderLayer::new(store.clone(), &trace_id);
         let mut agent = recorder.layer(tower::service_fn(
             |req: async_openai::types::CreateChatCompletionRequest| async move {
                 let mut msgs = req.messages.clone();
@@ -199,7 +202,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         .build()?
                         .into(),
                 );
-                Ok::<_, tower::BoxError>(openai_agents_rs::StepOutcome::Done {
+                Ok::<_, tower::BoxError>(tower_llm::StepOutcome::Done {
                     messages: msgs,
                     aux: Default::default(),
                 })

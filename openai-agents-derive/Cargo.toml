@@ -2,7 +2,7 @@
 name = "openai-agents-derive"
 version = "0.1.0"
 edition = "2021"
-description = "Proc-macros for openai-agents-rs (tool args/output derives)"
+description = "Proc-macros for tower-llm (tool args/output derives)"
 license = "MIT"
 
 [lib]

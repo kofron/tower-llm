@@ -11,9 +11,7 @@ use tower::{Service, ServiceExt};
 
 // Import the next module and its submodules
 // Core module is now at root level
-// use openai_agents_rs directly
-
-
+// use tower_llm directly
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -59,7 +57,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let create_router = move || {
         let tools = tools.clone();
-        tower::util::BoxService::new(tower::service_fn(move |inv: openai_agents_rs::ToolInvocation| {
+        tower::util::BoxService::new(tower::service_fn(move |inv: tower_llm::ToolInvocation| {
             let tools = tools.clone();
             Box::pin(async move {
                 for (name, tool) in tools.iter() {
@@ -68,7 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         return tool_guard.ready().await?.call(inv).await;
                     }
                 }
-                Err::<openai_agents_rs::ToolOutput, tower::BoxError>(
+                Err::<tower_llm::ToolOutput, tower::BoxError>(
                     format!("Unknown tool: {}", inv.name).into(),
                 )
             })
@@ -81,7 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Execute tools sequentially
     let mut seq_router = create_router();
     for (i, tool_name) in ["weather", "stock", "news", "translate"].iter().enumerate() {
-        let inv = openai_agents_rs::ToolInvocation {
+        let inv = tower_llm::ToolInvocation {
             id: format!("seq_{}", i),
             name: tool_name.to_string(),
             arguments: json!({}),
@@ -104,30 +102,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Wrap router with parallel execution layer (limit 3 concurrent)
     // Use Buffer to make the router clonable for concurrent access
     let buffered_router = tower::buffer::Buffer::new(create_router(), 10);
-    let mut parallel_router = openai_agents_rs::concurrency::ParallelToolRouter::new(
+    let mut parallel_router = tower_llm::concurrency::ParallelToolRouter::new(
         buffered_router,
-        openai_agents_rs::concurrency::ConcurrencyLimit(3),
-        openai_agents_rs::concurrency::ToolJoinPolicy::JoinAll,
+        tower_llm::concurrency::ConcurrencyLimit(3),
+        tower_llm::concurrency::ToolJoinPolicy::JoinAll,
     );
 
     // Create multiple tool invocations
     let invocations = vec![
-        openai_agents_rs::ToolInvocation {
+        tower_llm::ToolInvocation {
             id: "p1".into(),
             name: "weather".into(),
             arguments: json!({"city": "New York"}),
         },
-        openai_agents_rs::ToolInvocation {
+        tower_llm::ToolInvocation {
             id: "p2".into(),
             name: "stock".into(),
             arguments: json!({"symbol": "AAPL"}),
         },
-        openai_agents_rs::ToolInvocation {
+        tower_llm::ToolInvocation {
             id: "p3".into(),
             name: "news".into(),
             arguments: json!({"topic": "tech"}),
         },
-        openai_agents_rs::ToolInvocation {
+        tower_llm::ToolInvocation {
             id: "p4".into(),
             name: "translate".into(),
             arguments: json!({"text": "hello"}),
@@ -162,17 +160,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // Add a failing tool
     let failing_invocations = vec![
-        openai_agents_rs::ToolInvocation {
+        tower_llm::ToolInvocation {
             id: "f1".into(),
             name: "weather".into(),
             arguments: json!({}),
         },
-        openai_agents_rs::ToolInvocation {
+        tower_llm::ToolInvocation {
             id: "fail".into(),
             name: "unknown_tool".into(), // This will fail
             arguments: json!({}),
         },
-        openai_agents_rs::ToolInvocation {
+        tower_llm::ToolInvocation {
             id: "f3".into(),
             name: "news".into(),
             arguments: json!({}),
@@ -180,10 +178,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     ];
 
     let buffered_router2 = tower::buffer::Buffer::new(create_router(), 10);
-    let mut fail_fast_router = openai_agents_rs::concurrency::ParallelToolRouter::new(
+    let mut fail_fast_router = tower_llm::concurrency::ParallelToolRouter::new(
         buffered_router2,
-        openai_agents_rs::concurrency::ConcurrencyLimit(3),
-        openai_agents_rs::concurrency::ToolJoinPolicy::FailFast,
+        tower_llm::concurrency::ConcurrencyLimit(3),
+        tower_llm::concurrency::ToolJoinPolicy::FailFast,
     );
 
     let start = Instant::now();
@@ -207,10 +205,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // Test with limit of 2
     let buffered_router3 = tower::buffer::Buffer::new(create_router(), 10);
-    let limited_router = openai_agents_rs::concurrency::ParallelToolRouter::new(
+    let limited_router = tower_llm::concurrency::ParallelToolRouter::new(
         buffered_router3,
-        openai_agents_rs::concurrency::ConcurrencyLimit(2), // Only 2 at a time
-        openai_agents_rs::concurrency::ToolJoinPolicy::JoinAll,
+        tower_llm::concurrency::ConcurrencyLimit(2), // Only 2 at a time
+        tower_llm::concurrency::ToolJoinPolicy::JoinAll,
     );
 
     max_concurrent.store(0, Ordering::SeqCst);
@@ -241,8 +239,8 @@ fn create_tool(
     delay_ms: u64,
     counter: Arc<AtomicUsize>,
     max_counter: Arc<AtomicUsize>,
-) -> tower::util::BoxService<openai_agents_rs::ToolInvocation, openai_agents_rs::ToolOutput, tower::BoxError> {
-    tower::util::BoxService::new(tower::service_fn(move |inv: openai_agents_rs::ToolInvocation| {
+) -> tower::util::BoxService<tower_llm::ToolInvocation, tower_llm::ToolOutput, tower::BoxError> {
+    tower::util::BoxService::new(tower::service_fn(move |inv: tower_llm::ToolInvocation| {
         let counter = counter.clone();
         let max_counter = max_counter.clone();
         Box::pin(async move {
@@ -273,7 +271,7 @@ fn create_tool(
 
             println!("  [{}] Completed", name);
 
-            Ok(openai_agents_rs::ToolOutput {
+            Ok(tower_llm::ToolOutput {
                 id: inv.id,
                 result: json!({ "tool": name, "status": "completed" }),
             })

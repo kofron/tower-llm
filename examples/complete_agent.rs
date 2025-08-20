@@ -10,7 +10,7 @@ use serde_json::json;
 
 // Import the experimental next module
 // Core module is now at root level
-// use openai_agents_rs directly
+// use tower_llm directly
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct CalculatorArgs {
@@ -36,7 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let client: Arc<Client<OpenAIConfig>> = Arc::new(Client::new());
 
     // Define tools using the typed helper
-    let calculator = openai_agents_rs::tool_typed(
+    let calculator = tower_llm::tool_typed(
         "calculator",
         "Perform basic arithmetic operations (add, subtract, multiply, divide)",
         |args: CalculatorArgs| async move {
@@ -67,7 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         timezone: Option<String>,
     }
 
-    let get_time = openai_agents_rs::tool_typed(
+    let get_time = tower_llm::tool_typed(
         "get_current_time",
         "Get the current time in UTC",
         |_args: TimeArgs| async move {
@@ -79,14 +79,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     );
 
     // Build the agent with tools and policies
-    let mut agent = openai_agents_rs::Agent::builder(client.clone())
+    let mut agent = tower_llm::Agent::builder(client.clone())
         .model("gpt-4o-mini") // Using mini for cost efficiency
         .temperature(0.7)
         .tool(calculator)
         .tool(get_time)
-        .policy(openai_agents_rs::CompositePolicy::new(vec![
-            openai_agents_rs::policies::until_no_tool_calls(),
-            openai_agents_rs::policies::max_steps(5),
+        .policy(tower_llm::CompositePolicy::new(vec![
+            tower_llm::policies::until_no_tool_calls(),
+            tower_llm::policies::max_steps(5),
         ]))
         .build();
 
@@ -94,7 +94,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("--- Example 1: Math Problem ---");
     println!("User: What's 15 * 7 + 23?");
 
-    let result1 = openai_agents_rs::run(
+    let result1 = tower_llm::run(
         &mut agent,
         "You are a helpful assistant with calculator and time tools.",
         "What's 15 * 7 + 23? Please calculate step by step.",
@@ -108,7 +108,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("--- Example 2: Time Query ---");
     println!("User: What time is it?");
 
-    let result2 = openai_agents_rs::run(
+    let result2 = tower_llm::run(
         &mut agent,
         "You are a helpful assistant with calculator and time tools.",
         "What time is it right now?",
@@ -122,7 +122,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("--- Example 3: Multi-step Problem ---");
     println!("User: Calculate (100 / 4) * 3 - 10");
 
-    let result3 = openai_agents_rs::run(
+    let result3 = tower_llm::run(
         &mut agent,
         "You are a helpful assistant. Break down complex calculations into steps.",
         "Calculate (100 / 4) * 3 - 10. Show your work step by step.",

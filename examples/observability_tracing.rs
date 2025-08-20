@@ -9,9 +9,7 @@ use tracing::{info, info_span};
 
 // Import the next module and its submodules
 // Core module is now at root level
-// use openai_agents_rs directly
-
-
+// use tower_llm directly
 
 // Simple metrics collector for demonstration
 #[derive(Clone)]
@@ -48,7 +46,7 @@ impl DemoMetricsCollector {
     }
 }
 
-impl Service<openai_agents_rs::observability::MetricRecord> for DemoMetricsCollector {
+impl Service<tower_llm::observability::MetricRecord> for DemoMetricsCollector {
     type Response = ();
     type Error = tower::BoxError;
     type Future =
@@ -61,17 +59,17 @@ impl Service<openai_agents_rs::observability::MetricRecord> for DemoMetricsColle
         std::task::Poll::Ready(Ok(()))
     }
 
-    fn call(&mut self, req: openai_agents_rs::observability::MetricRecord) -> Self::Future {
+    fn call(&mut self, req: tower_llm::observability::MetricRecord) -> Self::Future {
         let counters = self.counters.clone();
         let histograms = self.histograms.clone();
 
         Box::pin(async move {
             match req {
-                openai_agents_rs::observability::MetricRecord::Counter { name, value } => {
+                tower_llm::observability::MetricRecord::Counter { name, value } => {
                     let mut c = counters.lock().unwrap();
                     *c.entry(name).or_insert(0) += value;
                 }
-                openai_agents_rs::observability::MetricRecord::Histogram { name, value } => {
+                tower_llm::observability::MetricRecord::Histogram { name, value } => {
                     let mut h = histograms.lock().unwrap();
                     h.push((name, value));
                 }
@@ -108,9 +106,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     req.messages.len()
                 );
 
-                Ok::<_, tower::BoxError>(openai_agents_rs::StepOutcome::Done {
+                Ok::<_, tower::BoxError>(tower_llm::StepOutcome::Done {
                     messages: req.messages,
-                    aux: openai_agents_rs::StepAux {
+                    aux: tower_llm::StepAux {
                         prompt_tokens: 100 + count as usize * 20,
                         completion_tokens: 50 + count as usize * 10,
                         tool_invocations: if count % 2 == 0 { 1 } else { 0 },
@@ -124,7 +122,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("Instrumenting service calls with spans...\n");
 
     // Add tracing layer
-    let tracing_layer = openai_agents_rs::observability::TracingLayer::new();
+    let tracing_layer = tower_llm::observability::TracingLayer::new();
     let mut traced_service = tracing_layer.layer(mock_step.clone());
 
     // Make some calls within a span
@@ -142,7 +140,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let outcome = traced_service.ready().await?.call(req).await?;
 
         match outcome {
-            openai_agents_rs::StepOutcome::Done { aux, .. } => {
+            tower_llm::StepOutcome::Done { aux, .. } => {
                 info!(
                     "Step {} complete: {} prompt, {} completion tokens",
                     i, aux.prompt_tokens, aux.completion_tokens
@@ -161,7 +159,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let collector = DemoMetricsCollector::new();
 
     // Add metrics layer
-    let metrics_layer = openai_agents_rs::observability::MetricsLayer::new(collector.clone());
+    let metrics_layer = tower_llm::observability::MetricsLayer::new(collector.clone());
     let mut metered_service = metrics_layer.layer(mock_step.clone());
 
     // Reset step counter
@@ -191,8 +189,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let combined_collector = DemoMetricsCollector::new();
 
     // Stack the layers: tracing -> metrics -> service
-    let combined = openai_agents_rs::observability::TracingLayer::new()
-        .layer(openai_agents_rs::observability::MetricsLayer::new(combined_collector.clone()).layer(mock_step));
+    let combined = tower_llm::observability::TracingLayer::new().layer(
+        tower_llm::observability::MetricsLayer::new(combined_collector.clone()).layer(mock_step),
+    );
 
     let mut observable_service = combined;
 

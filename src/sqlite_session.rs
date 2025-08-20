@@ -23,9 +23,9 @@
 //! ### Example: Creating and Using a Persistent Session
 //!
 //! ```rust,no_run
-//! use openai_agents_rs::sqlite_session::SqliteSession;
-//! use openai_agents_rs::memory::Session;
-//! use openai_agents_rs::items::{RunItem, MessageItem, Role};
+//! use tower_llm::sqlite_session::SqliteSession;
+//! use tower_llm::memory::Session;
+//! use tower_llm::items::{RunItem, MessageItem, Role};
 //! use chrono::Utc;
 //!
 //! # #[tokio::main]
@@ -144,7 +144,7 @@ impl SqliteSession {
         // Create index for efficient queries
         sqlx::query(
             r#"
-            CREATE INDEX IF NOT EXISTS idx_session_id 
+            CREATE INDEX IF NOT EXISTS idx_session_id
             ON sessions(session_id, sequence_num)
             "#,
         )
@@ -185,8 +185,8 @@ impl Session for SqliteSession {
         let query = if let Some(limit) = limit {
             sqlx::query(
                 r#"
-                SELECT item_data 
-                FROM sessions 
+                SELECT item_data
+                FROM sessions
                 WHERE session_id = ?
                 ORDER BY sequence_num DESC
                 LIMIT ?
@@ -197,8 +197,8 @@ impl Session for SqliteSession {
         } else {
             sqlx::query(
                 r#"
-                SELECT item_data 
-                FROM sessions 
+                SELECT item_data
+                FROM sessions
                 WHERE session_id = ?
                 ORDER BY sequence_num ASC
                 "#,
@@ -226,8 +226,8 @@ impl Session for SqliteSession {
         // Get the current max sequence number
         let max_seq: Option<i64> = sqlx::query_scalar(
             r#"
-            SELECT MAX(sequence_num) 
-            FROM sessions 
+            SELECT MAX(sequence_num)
+            FROM sessions
             WHERE session_id = ?
             "#,
         )
@@ -270,8 +270,8 @@ impl Session for SqliteSession {
         // Get the last item
         let row = sqlx::query(
             r#"
-            SELECT id, item_data 
-            FROM sessions 
+            SELECT id, item_data
+            FROM sessions
             WHERE session_id = ?
             ORDER BY sequence_num DESC
             LIMIT 1

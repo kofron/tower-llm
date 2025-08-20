@@ -8,7 +8,7 @@ use serde_json::json;
 
 // Import the experimental module without modifying lib.rs
 // Core module is now at root level
-// use openai_agents_rs directly
+// use tower_llm directly
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -21,18 +21,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         b: f64,
     }
 
-    let add_tool = openai_agents_rs::tool_typed("calc_add", "Add two numbers", |args: AddArgs| async move {
-        Ok::<_, tower::BoxError>(json!({ "sum": args.a + args.b }))
-    });
+    let add_tool =
+        tower_llm::tool_typed("calc_add", "Add two numbers", |args: AddArgs| async move {
+            Ok::<_, tower::BoxError>(json!({ "sum": args.a + args.b }))
+        });
 
     // Build an agent via the sugar builder
     let client: Arc<Client<OpenAIConfig>> = Arc::new(Client::new());
-    let policy = openai_agents_rs::Policy::new()
+    let policy = tower_llm::Policy::new()
         .until_no_tool_calls()
         .or_max_steps(4)
         .build();
 
-    let mut agent = openai_agents_rs::Agent::builder(client)
+    let mut agent = tower_llm::Agent::builder(client)
         .model("gpt-4o")
         .temperature(0.0)
         .max_tokens(256)
@@ -40,7 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .policy(policy)
         .build();
 
-    let run = openai_agents_rs::run(
+    let run = tower_llm::run(
         &mut agent,
         "You are a careful assistant. For arithmetic, always call the appropriate tool.",
         "Compute ((2 + 3) + (10 + 5)).",

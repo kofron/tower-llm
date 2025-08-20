@@ -14,15 +14,9 @@ use tracing::info;
 
 // Import the next module and key submodules
 // Core module is now at root level
-// use openai_agents_rs directly
+// use tower_llm directly
 
-
-
-
-
-
-
-use openai_agents_rs::AgentPolicy;
+use tower_llm::AgentPolicy;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct MathArgs {
@@ -52,7 +46,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let client: Arc<Client<OpenAIConfig>> = Arc::new(Client::new());
 
     // Define a calculator tool using typed helper
-    let calculator = openai_agents_rs::tool_typed(
+    let calculator = tower_llm::tool_typed(
         "calculator",
         "Perform arithmetic operations",
         |args: MathArgs| async move {
@@ -80,10 +74,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("--- Part 1: Basic Agent with Tools and Policies ---\n");
 
     // Build agent with tools and composite policy
-    let policy = openai_agents_rs::CompositePolicy::new(vec![
-        openai_agents_rs::policies::until_no_tool_calls(),
-        openai_agents_rs::policies::max_steps(3),
-        openai_agents_rs::budgets::budget_policy(openai_agents_rs::budgets::Budget {
+    let policy = tower_llm::CompositePolicy::new(vec![
+        tower_llm::policies::until_no_tool_calls(),
+        tower_llm::policies::max_steps(3),
+        tower_llm::budgets::budget_policy(tower_llm::budgets::Budget {
             max_prompt_tokens: Some(1000),
             max_completion_tokens: Some(500),
             max_tool_invocations: Some(5),
@@ -91,7 +85,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }),
     ]);
 
-    let mut basic_agent = openai_agents_rs::Agent::builder(client.clone())
+    let mut basic_agent = tower_llm::Agent::builder(client.clone())
         .model("gpt-4o-mini")
         .temperature(0.7)
         .tool(calculator)
@@ -100,7 +94,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // Run a simple calculation
     println!("User: What's 25 * 4?");
-    let result = openai_agents_rs::run(
+    let result = tower_llm::run(
         &mut basic_agent,
         "You are a helpful math assistant. Use the calculator tool for calculations.",
         "What's 25 * 4?",
@@ -122,12 +116,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             async move {
                 if count == 0 {
                     // First call fails
-                    Err::<openai_agents_rs::StepOutcome, tower::BoxError>("Temporary failure".into())
+                    Err::<tower_llm::StepOutcome, tower::BoxError>("Temporary failure".into())
                 } else {
                     // Subsequent calls succeed
-                    Ok(openai_agents_rs::StepOutcome::Done {
+                    Ok(tower_llm::StepOutcome::Done {
                         messages: req.messages,
-                        aux: openai_agents_rs::StepAux {
+                        aux: tower_llm::StepAux {
                             prompt_tokens: 50,
                             completion_tokens: 25,
                             tool_invocations: 0,
@@ -139,13 +133,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     );
 
     // Wrap with resilience layers
-    let retry_policy = openai_agents_rs::resilience::RetryPolicy {
+    let retry_policy = tower_llm::resilience::RetryPolicy {
         max_retries: 2,
-        backoff: openai_agents_rs::resilience::Backoff::fixed(Duration::from_millis(100)),
+        backoff: tower_llm::resilience::Backoff::fixed(Duration::from_millis(100)),
     };
 
-    let resilient_agent = openai_agents_rs::resilience::TimeoutLayer::new(Duration::from_secs(5)).layer(
-        openai_agents_rs::resilience::RetryLayer::new(retry_policy, openai_agents_rs::resilience::AlwaysRetry).layer(flaky_agent),
+    let resilient_agent = tower_llm::resilience::TimeoutLayer::new(Duration::from_secs(5)).layer(
+        tower_llm::resilience::RetryLayer::new(retry_policy, tower_llm::resilience::AlwaysRetry)
+            .layer(flaky_agent),
     );
 
     let mut resilient = resilient_agent;
@@ -167,11 +162,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let metrics = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
     let metrics_clone = metrics.clone();
 
-    let collector = tower::service_fn(move |record: openai_agents_rs::observability::MetricRecord| {
+    let collector = tower::service_fn(move |record: tower_llm::observability::MetricRecord| {
         let metrics = metrics_clone.clone();
         async move {
             match record {
-                openai_agents_rs::observability::MetricRecord::Counter { name, value } => {
+                tower_llm::observability::MetricRecord::Counter { name, value } => {
                     let mut m = metrics.lock().unwrap();
                     *m.entry(name).or_insert(0u64) += value;
                 }
@@ -182,13 +177,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     });
 
     // Create observable agent with tracing and metrics
-    let observable_agent = openai_agents_rs::observability::TracingLayer::new().layer(
-        openai_agents_rs::observability::MetricsLayer::new(collector).layer(tower::service_fn(
+    let observable_agent = tower_llm::observability::TracingLayer::new().layer(
+        tower_llm::observability::MetricsLayer::new(collector).layer(tower::service_fn(
             |req: async_openai::types::CreateChatCompletionRequest| async move {
                 info!("Processing request with {} messages", req.messages.len());
-                Ok::<_, tower::BoxError>(openai_agents_rs::StepOutcome::Done {
+                Ok::<_, tower::BoxError>(tower_llm::StepOutcome::Done {
                     messages: req.messages,
-                    aux: openai_agents_rs::StepAux {
+                    aux: tower_llm::StepAux {
                         prompt_tokens: 100,
                         completion_tokens: 50,
                         tool_invocations: 1,

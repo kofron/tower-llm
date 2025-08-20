@@ -16,7 +16,7 @@
 //! Set your OpenAI API key in the `OPENAI_API_KEY` environment variable.
 //!
 //! ```rust,no_run
-//! use openai_agents_rs::{Agent, tool_typed, policies, CompositePolicy};
+//! use tower_llm::{Agent, tool_typed, policies, CompositePolicy};
 //! use async_openai::{config::OpenAIConfig, Client};
 //! use schemars::JsonSchema;
 //! use serde::Deserialize;
@@ -51,7 +51,7 @@
 //!
 //! // Use the agent with Tower's Service trait
 //! let mut agent = agent;
-//! let request = openai_agents_rs::simple_chat_request(
+//! let request = tower_llm::simple_chat_request(
 //!     "You are a helpful math assistant",
 //!     "What is 2 + 2?"
 //! );

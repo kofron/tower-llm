@@ -25,7 +25,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-openai-agents-rs = "0.1.0"
+tower-llm = "0.1.0"
 ```
 
 ### Environment Setup
@@ -41,7 +41,7 @@ export OPENAI_API_KEY="your-api-key"
 Here's a simple example of how to create and run an agent that writes haikus:
 
 ````rust,no_run
-use openai_agents_rs::{Agent, Runner, runner::RunConfig};
+use tower_llm::{Agent, Runner, runner::RunConfig};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -70,7 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Core Concepts
 
-The SDK is built around a few core concepts that work together to create powerful agentic workflows. For more detailed information, please refer to the [crate documentation](https://docs.rs/openai-agents-rs).
+The SDK is built around a few core concepts that work together to create powerful agentic workflows. For more detailed information, please refer to the [crate documentation](https://docs.rs/tower-llm).
 
 - **[`Agent`]**: The fundamental building block, representing an entity that can process input and generate a response. Agents are defined by their configuration, including their identity, instructions, and tools.
 - **[`Runner`]**: The engine that executes an agent's logic. It manages the interaction loop with the LLM, handles tool calls, and orchestrates the overall workflow.
@@ -79,14 +79,14 @@ The SDK is built around a few core concepts that work together to create powerfu
 - **[`Session`]**: Manages the state of an interaction, including the history of messages. A [`SqliteSession`] is provided for persistent state.
 - **[`Guardrail`]**: A mechanism for validating and sanitizing the input and output of an agent, ensuring safety and reliability.
 
-[`Agent`]: https://docs.rs/openai-agents-rs/latest/openai_agents_rs/agent/struct.Agent.html
-[`Runner`]: https://docs.rs/openai-agents-rs/latest/openai_agents_rs/runner/struct.Runner.html
-[`AgentGroup`]: https://docs.rs/openai-agents-rs/latest/openai_agents_rs/group/struct.AgentGroup.html
-[`AgentGroupBuilder`]: https://docs.rs/openai-agents-rs/latest/openai_agents_rs/group/struct.AgentGroupBuilder.html
-[`Tool`]: https://docs.rs/openai-agents-rs/latest/openai_agents_rs/tool/trait.Tool.html
-[`Session`]: https://docs.rs/openai-agents-rs/latest/openai_agents_rs/memory/trait.Session.html
-[`SqliteSession`]: https://docs.rs/openai-agents-rs/latest/openai_agents_rs/sqlite_session/struct.SqliteSession.html
-[`Guardrail`]: https://docs.rs/openai-agents-rs/latest/openai_agents_rs/guardrail/index.html
+[`Agent`]: https://docs.rs/tower-llm/latest/tower_llm/agent/struct.Agent.html
+[`Runner`]: https://docs.rs/tower-llm/latest/tower_llm/runner/struct.Runner.html
+[`AgentGroup`]: https://docs.rs/tower-llm/latest/tower_llm/group/struct.AgentGroup.html
+[`AgentGroupBuilder`]: https://docs.rs/tower-llm/latest/tower_llm/group/struct.AgentGroupBuilder.html
+[`Tool`]: https://docs.rs/tower-llm/latest/tower_llm/tool/trait.Tool.html
+[`Session`]: https://docs.rs/tower-llm/latest/tower_llm/memory/trait.Session.html
+[`SqliteSession`]: https://docs.rs/tower-llm/latest/tower_llm/sqlite_session/struct.SqliteSession.html
+[`Guardrail`]: https://docs.rs/tower-llm/latest/tower_llm/guardrail/index.html
 
 ## Examples
 
@@ -156,7 +156,7 @@ Note: All policy and cross-cutting concerns are now handled through Tower layers
 Minimal usage remains unchanged:
 
 ```rust
-use openai_agents_rs::{Agent, Runner, runner::RunConfig, FunctionTool};
+use tower_llm::{Agent, Runner, runner::RunConfig, FunctionTool};
 use std::sync::Arc;
 
 let tool = Arc::new(FunctionTool::simple("uppercase", "Upper", |s: String| s.to_uppercase()));
@@ -168,7 +168,7 @@ let result = Runner::run(agent, "hello", RunConfig::default()).await?;
 Parallel execution controls:
 
 ```rust
-use openai_agents_rs::runner::RunConfig;
+use tower_llm::runner::RunConfig;
 
 let config = RunConfig::default()
   .with_parallel_tools(true) // run multiple tool calls per turn concurrently
@@ -180,7 +180,7 @@ let result = Runner::run(agent, "hello", config).await?;
 Compose typed layers fluently at run-scope:
 
 ```rust
-use openai_agents_rs::{runner::RunConfig, layers};
+use tower_llm::{runner::RunConfig, layers};
 
 let config = RunConfig::default()
   .with_parallel_tools(true)
@@ -191,7 +191,7 @@ let config = RunConfig::default()
 Attach layers at agent-scope (wraps run-scope):
 
 ```rust
-use openai_agents_rs::{Agent, layers};
+use tower_llm::{Agent, layers};
 
 let agent = Agent::simple("CityInfoAgent", "...")
   .layer(layers::TimeoutLayer::secs(5))
@@ -203,14 +203,14 @@ The runner preserves reply order even when executing tools concurrently per turn
 ### DX cheatsheet: composing typed policy layers
 
 ```rust
-use openai_agents_rs::{layers, runner::RunConfig, Agent, FunctionTool, Runner};
+use tower_llm::{layers, runner::RunConfig, Agent, FunctionTool, Runner};
 use std::sync::Arc;
 
 // Define a tool with explicit schema validation
 let tool = Arc::new(
     FunctionTool::simple("uppercase", "Upper", |s: String| s.to_uppercase())
         .layer(layers::InputSchemaLayer::strict(serde_json::json!({
-            "type": "object", 
+            "type": "object",
             "properties": {"input": {"type": "string"}},
             "required": ["input"]
         })))
@@ -232,13 +232,13 @@ let _result = Runner::run(agent, "hello", cfg).await?;
 #### Approval policy layer (capability-based)
 
 ```rust
-use openai_agents_rs::{layers, Agent, FunctionTool, Runner, runner::RunConfig, env::EnvBuilder};
+use tower_llm::{layers, Agent, FunctionTool, Runner, runner::RunConfig, env::EnvBuilder};
 use std::sync::Arc;
 
 // Custom approval implementation
 #[derive(Default)]
 struct SafetyApproval;
-impl openai_agents_rs::env::Approval for SafetyApproval {
+impl tower_llm::env::Approval for SafetyApproval {
     fn request_approval(&self, operation: &str, details: &str) -> bool {
         !operation.contains("danger") // Deny dangerous operations
     }
@@ -248,7 +248,7 @@ let safe = Arc::new(FunctionTool::simple("safe", "ok", |s: String| s));
 let agent = Agent::simple("Approve", "Use tools").with_tool(safe);
 
 let env = EnvBuilder::new()
-    .with_capability(Arc::new(openai_agents_rs::env::ApprovalCapability::new(SafetyApproval)))
+    .with_capability(Arc::new(tower_llm::env::ApprovalCapability::new(SafetyApproval)))
     .build();
 
 let cfg = RunConfig::default()
@@ -260,7 +260,7 @@ let _ = Runner::run(agent, "run", cfg).await?;
 ### Typed tools (early API)
 
 ```rust
-use openai_agents_rs::{TypedFunctionTool, Tool};
+use tower_llm::{TypedFunctionTool, Tool};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -292,7 +292,7 @@ Locking guidance:
 #### Common policy layers (scope-agnostic)
 
 ```rust
-use openai_agents_rs::{layers, runner::RunConfig};
+use tower_llm::{layers, runner::RunConfig};
 
 // Schema validation (lenient by default in the stack)
 // Policy layers (schema/timeout/retry/approval) are available internally and applied by default conservatively.
@@ -304,8 +304,8 @@ use openai_agents_rs::{layers, runner::RunConfig};
 For advanced users, compose Tower layers directly with tools using the service-based approach:
 
 ```rust,no_run
-use openai_agents_rs::{
-    layers::{ApprovalLayer, InputSchemaLayer, RetryLayer}, 
+use tower_llm::{
+    layers::{ApprovalLayer, InputSchemaLayer, RetryLayer},
     service::ToolRequest,
     tool::FunctionTool,
     tool_service::IntoToolService,
@@ -317,7 +317,7 @@ use tower::{Layer, ServiceExt};
 // Custom approval capability
 #[derive(Default)]
 struct SafetyApproval;
-impl openai_agents_rs::env::Approval for SafetyApproval {
+impl tower_llm::env::Approval for SafetyApproval {
     fn request_approval(&self, _operation: &str, _details: &str) -> bool { true }
 }
 
@@ -348,7 +348,7 @@ Tools can have their own layers applied directly during construction for self-co
 For cross-cutting concerns that require state, implement custom Tower layers:
 
 ```rust,no_run
-use openai_agents_rs::{service::{ToolRequest, ToolResponse}, layers};
+use tower_llm::{service::{ToolRequest, ToolResponse}, layers};
 use tower::{Layer, Service};
 use std::sync::{Arc, Mutex};
 
@@ -362,7 +362,7 @@ impl CallCounterLayer {
     pub fn new() -> Self {
         Self { counter: Arc::new(Mutex::new(0)) }
     }
-    
+
     pub fn get_count(&self) -> usize {
         *self.counter.lock().unwrap()
     }
@@ -370,7 +370,7 @@ impl CallCounterLayer {
 
 impl<S> Layer<S> for CallCounterLayer {
     type Service = CallCounterService<S>;
-    
+
     fn layer(&self, service: S) -> Self::Service {
         CallCounterService {
             inner: service,

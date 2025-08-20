@@ -249,7 +249,7 @@ High-level concepts
 Run configuration (simple)
 
 ```rust
-use openai_agents_rs::{Agent, Runner, runner::RunConfig, FunctionTool};
+use tower_llm::{Agent, Runner, runner::RunConfig, FunctionTool};
 use std::sync::Arc;
 
 let tool = Arc::new(FunctionTool::simple("uppercase", "Upper", |s: String| s.to_uppercase()));
@@ -261,7 +261,7 @@ let result = Runner::run(agent, "hello", RunConfig::default()).await?;
 Adding run-level policies (scope-agnostic layers)
 
 ```rust
-use openai_agents_rs::{runner::RunConfig, layers};
+use tower_llm::{runner::RunConfig, layers};
 
 let layers_vec = vec![
   layers::boxed_timeout_secs(10),
@@ -281,7 +281,7 @@ let config = RunConfig::default()
 Adding agent-level shaping
 
 ```rust
-use openai_agents_rs::layers::AgentContextLayer;
+use tower_llm::layers::AgentContextLayer;
 
 let agent = agent.with_agent_layers(vec![
   AgentContextLayer::rewrite(|mut ctx, req, res| {
@@ -296,7 +296,7 @@ let agent = agent.with_agent_layers(vec![
 Adding tool-level last-mile shaping
 
 ```rust
-use openai_agents_rs::{Agent, layers, FunctionTool, Runner, runner::RunConfig};
+use tower_llm::{Agent, layers, FunctionTool, Runner, runner::RunConfig};
 use std::sync::Arc;
 
 let echo = Arc::new(FunctionTool::simple("echo", "echoes", |s: String| s));

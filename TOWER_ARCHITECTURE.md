@@ -25,13 +25,13 @@ Each level can have its own layers, applied in the canonical execution order: **
 Tools are first-class Tower services that implement `Service<ToolRequest<E>, Response = ToolResponse>`.
 
 ```rust
-use openai_agents_rs::{FunctionTool, tool_service::IntoToolService};
+use tower_llm::{FunctionTool, tool_service::IntoToolService};
 use std::sync::Arc;
 
 // Create function tool
 let tool = Arc::new(FunctionTool::simple(
-    "upper", 
-    "Uppercase", 
+    "upper",
+    "Uppercase",
     |s: String| s.to_uppercase()
 ));
 
@@ -44,11 +44,11 @@ let service = <FunctionTool as Clone>::clone(&tool).into_service::<DefaultEnv>()
 Everything uses Tower's typed `.layer()` pattern:
 
 ```rust
-use openai_agents_rs::{Agent, FunctionTool, layers, runner::RunConfig};
+use tower_llm::{Agent, FunctionTool, layers, runner::RunConfig};
 use tower::{ServiceBuilder, Layer};
 use std::{sync::Arc, time::Duration};
 
-// Service-based tool composition  
+// Service-based tool composition
 let tool = Arc::new(FunctionTool::simple("slow", "Slow operation", slow_fn));
 let service = <FunctionTool as Clone>::clone(&tool).into_service::<DefaultEnv>();
 let layered_service = layers::TimeoutLayer::secs(5).layer(
@@ -60,7 +60,7 @@ let agent = Agent::simple("Assistant", "Helpful assistant")
     .with_tool(tool)
     .layer(layers::TracingLayer);
 
-// Run config with typed layers  
+// Run config with typed layers
 let config = RunConfig::default()
     .layer(layers::TimeoutLayer::secs(30));
 ```
@@ -70,7 +70,7 @@ let config = RunConfig::default()
 Layers can access shared resources through type-safe capabilities. The runner automatically applies layers based on environment capabilities:
 
 ```rust
-use openai_agents_rs::{
+use tower_llm::{
     env::{EnvBuilder, ApprovalCapability, Approval},
     Runner, runner::RunConfig
 };
@@ -104,7 +104,7 @@ The following APIs have been **completely removed** in favor of uniform Tower pa
 
 ### Removed Vector-Based APIs
 - `with_agent_layers(vec![...])` → Use typed `.layer()` chaining
-- `with_run_layers(vec![...])` → Use typed `.layer()` chaining  
+- `with_run_layers(vec![...])` → Use typed `.layer()` chaining
 - `with_tool_layers("name", vec![...])` → Configure layers at tool creation
 
 ### Removed Erased Layer System
@@ -130,7 +130,7 @@ let tool = FunctionTool::simple("calc", "Calculator", calc_fn)
     .layer(layers::boxed_timeout_secs(5))
     .layer(layers::boxed_retry_times(3));
 
-// AFTER: Service-based composition  
+// AFTER: Service-based composition
 let tool = Arc::new(FunctionTool::simple("calc", "Calculator", calc_fn));
 let service = <FunctionTool as Clone>::clone(&tool).into_service::<DefaultEnv>();
 let layered = layers::TimeoutLayer::secs(5).layer(
@@ -189,10 +189,10 @@ The execution order is always: **Run → Agent → Tool → Base**
 // Runtime execution flow:
 Run Layer (outermost)
   ↓
-Agent Layer  
+Agent Layer
   ↓
 Tool Layer
-  ↓  
+  ↓
 Base Tool Execution
 ```
 
@@ -204,7 +204,7 @@ Base Tool Execution
 // On agent or run config
 let agent = agent.layer(layers::TimeoutLayer::secs(30));
 
-// On service directly  
+// On service directly
 let service = layers::TimeoutLayer::secs(30).layer(tool_service);
 ```
 
@@ -337,13 +337,13 @@ tool
 ### Simple Agent with Layered Tools
 
 ```rust
-use openai_agents_rs::{Agent, FunctionTool, layers, Runner, runner::RunConfig};
+use tower_llm::{Agent, FunctionTool, layers, Runner, runner::RunConfig};
 use std::sync::Arc;
 
 // Create tool
 let calculator = Arc::new(FunctionTool::simple(
     "calc",
-    "Calculator", 
+    "Calculator",
     |input: String| calculate(input)
 ));
 
@@ -364,7 +364,7 @@ let result = Runner::run(agent, "Calculate 2+2", RunConfig::default()).await?;
 ### Agent with Custom Environment and Capabilities
 
 ```rust
-use openai_agents_rs::{
+use tower_llm::{
     Agent, FunctionTool, Runner, runner::RunConfig,
     env::{EnvBuilder, ApprovalCapability, Approval}
 };
@@ -389,8 +389,8 @@ let agent = Agent::simple("SafeBot", "I follow safety policies")
 
 // Run with custom environment - ApprovalLayer automatically applied!
 let result = Runner::run_with_env(
-    agent, 
-    "Perform a safe operation", 
+    agent,
+    "Perform a safe operation",
     RunConfig::default(),
     env
 ).await?;
@@ -399,7 +399,7 @@ let result = Runner::run_with_env(
 ### Tool as Tower Service
 
 ```rust
-use openai_agents_rs::{FunctionTool, tool_service::IntoToolService, layers};
+use tower_llm::{FunctionTool, tool_service::IntoToolService, layers};
 use tower::ServiceBuilder;
 use std::time::Duration;
 
@@ -441,7 +441,7 @@ The runner supports both default and custom environments:
 ### Default Environment
 
 ```rust
-use openai_agents_rs::{Runner, runner::RunConfig};
+use tower_llm::{Runner, runner::RunConfig};
 
 // Uses DefaultEnv internally - no special capabilities
 let result = Runner::run(agent, "Hello", RunConfig::default()).await?;
@@ -450,7 +450,7 @@ let result = Runner::run(agent, "Hello", RunConfig::default()).await?;
 ### Custom Environment with Capabilities
 
 ```rust
-use openai_agents_rs::{
+use tower_llm::{
     Runner, runner::RunConfig,
     env::{EnvBuilder, ApprovalCapability}
 };

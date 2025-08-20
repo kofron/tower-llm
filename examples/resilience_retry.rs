@@ -10,9 +10,7 @@ use tower::{Layer, Service, ServiceExt};
 
 // Import the next module and its submodules
 // Core module is now at root level
-// use openai_agents_rs directly
-
-
+// use tower_llm directly
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -38,16 +36,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     });
 
-    let retry_policy = openai_agents_rs::resilience::RetryPolicy {
+    let retry_policy = tower_llm::resilience::RetryPolicy {
         max_retries: 3,
-        backoff: openai_agents_rs::resilience::Backoff::exponential(
+        backoff: tower_llm::resilience::Backoff::exponential(
             Duration::from_millis(100),
             2.0,
             Duration::from_secs(1),
         ),
     };
 
-    let retry_layer = openai_agents_rs::resilience::RetryLayer::new(retry_policy, openai_agents_rs::resilience::AlwaysRetry);
+    let retry_layer =
+        tower_llm::resilience::RetryLayer::new(retry_policy, tower_llm::resilience::AlwaysRetry);
     let mut retrying_service = retry_layer.layer(flaky_service);
 
     println!("  Starting request with retry (max 3 attempts)...");
@@ -64,7 +63,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Ok::<_, tower::BoxError>("This took too long")
     });
 
-    let timeout_layer = openai_agents_rs::resilience::TimeoutLayer::new(Duration::from_millis(500));
+    let timeout_layer = tower_llm::resilience::TimeoutLayer::new(Duration::from_millis(500));
     let mut timeout_service = timeout_layer.layer(slow_service.clone());
 
     println!("  Calling service with 500ms timeout...");
@@ -74,7 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     // Now with longer timeout
-    let longer_timeout = openai_agents_rs::resilience::TimeoutLayer::new(Duration::from_secs(3));
+    let longer_timeout = tower_llm::resilience::TimeoutLayer::new(Duration::from_secs(3));
     let mut longer_service = longer_timeout.layer(slow_service);
 
     println!("\n  Calling same service with 3s timeout...");
@@ -98,12 +97,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     });
 
-    let breaker_config = openai_agents_rs::resilience::BreakerConfig {
+    let breaker_config = tower_llm::resilience::BreakerConfig {
         failure_threshold: 2,
         reset_timeout: Duration::from_millis(500),
     };
 
-    let breaker_layer = openai_agents_rs::resilience::CircuitBreakerLayer::new(breaker_config);
+    let breaker_layer = tower_llm::resilience::CircuitBreakerLayer::new(breaker_config);
     let mut breaker_service = breaker_layer.layer(failing_service);
 
     println!("  Circuit breaker with failure threshold: 2");

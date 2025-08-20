@@ -7,9 +7,7 @@ use tower::{Service, ServiceExt};
 
 // Import the next module and its submodules
 // Core module is now at root level
-// use openai_agents_rs directly
-
-
+// use tower_llm directly
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -20,11 +18,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Create specialized mock agents using factories
 
     // Math agent factory
-    let create_math_agent = || -> openai_agents_rs::AgentSvc {
+    let create_math_agent = || -> tower_llm::AgentSvc {
         tower::util::BoxService::new(tower::service_fn(
             |_req: async_openai::types::CreateChatCompletionRequest| async move {
                 println!("    [Math Agent] Processing request");
-                Ok::<_, tower::BoxError>(openai_agents_rs::AgentRun {
+                Ok::<_, tower::BoxError>(tower_llm::AgentRun {
                     messages: vec![
                         async_openai::types::ChatCompletionRequestAssistantMessageArgs::default()
                             .content("I'm the math specialist. I can help with calculations.")
@@ -32,18 +30,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             .into(),
                     ],
                     steps: 1,
-                    stop: openai_agents_rs::AgentStopReason::DoneNoToolCalls,
+                    stop: tower_llm::AgentStopReason::DoneNoToolCalls,
                 })
             },
         ))
     };
 
     // Writing agent factory
-    let create_writing_agent = || -> openai_agents_rs::AgentSvc {
+    let create_writing_agent = || -> tower_llm::AgentSvc {
         tower::util::BoxService::new(tower::service_fn(
             |_req: async_openai::types::CreateChatCompletionRequest| async move {
                 println!("    [Writing Agent] Processing request");
-                Ok::<_, tower::BoxError>(openai_agents_rs::AgentRun {
+                Ok::<_, tower::BoxError>(tower_llm::AgentRun {
                     messages: vec![
                         async_openai::types::ChatCompletionRequestAssistantMessageArgs::default()
                             .content("I'm the writing specialist. I excel at creative text.")
@@ -51,18 +49,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             .into(),
                     ],
                     steps: 1,
-                    stop: openai_agents_rs::AgentStopReason::DoneNoToolCalls,
+                    stop: tower_llm::AgentStopReason::DoneNoToolCalls,
                 })
             },
         ))
     };
 
     // Code agent factory
-    let create_code_agent = || -> openai_agents_rs::AgentSvc {
+    let create_code_agent = || -> tower_llm::AgentSvc {
         tower::util::BoxService::new(tower::service_fn(
             |_req: async_openai::types::CreateChatCompletionRequest| async move {
                 println!("    [Code Agent] Processing request");
-                Ok::<_, tower::BoxError>(openai_agents_rs::AgentRun {
+                Ok::<_, tower::BoxError>(tower_llm::AgentRun {
                     messages: vec![
                         async_openai::types::ChatCompletionRequestAssistantMessageArgs::default()
                             .content("I'm the coding specialist. I can help with programming.")
@@ -70,7 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             .into(),
                     ],
                     steps: 1,
-                    stop: openai_agents_rs::AgentStopReason::DoneNoToolCalls,
+                    stop: tower_llm::AgentStopReason::DoneNoToolCalls,
                 })
             },
         ))
@@ -83,7 +81,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("--- Example 1: Content-Based Routing ---");
 
     // Create a content-based picker
-    let content_picker = tower::service_fn(|req: openai_agents_rs::groups::PickRequest| async move {
+    let content_picker = tower::service_fn(|req: tower_llm::groups::PickRequest| async move {
         // Examine the last user message to determine routing
         let last_user_msg = req.messages.iter().rev().find(|m| {
             matches!(
@@ -122,7 +120,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     });
 
     // Build the group router
-    let router = openai_agents_rs::groups::GroupBuilder::new()
+    let router = tower_llm::groups::GroupBuilder::new()
         .agent("math", create_math_agent())
         .agent("writing", create_writing_agent())
         .agent("code", create_code_agent())
@@ -164,7 +162,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let round_robin_picker = {
         let counter = round_robin_counter.clone();
         let agents = agents.clone();
-        tower::service_fn(move |_req: openai_agents_rs::groups::PickRequest| {
+        tower::service_fn(move |_req: tower_llm::groups::PickRequest| {
             let counter = counter.clone();
             let agents = agents.clone();
             async move {
@@ -177,7 +175,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         })
     };
 
-    let round_robin_router = openai_agents_rs::groups::GroupBuilder::new()
+    let round_robin_router = tower_llm::groups::GroupBuilder::new()
         .agent("math", create_math_agent())
         .agent("writing", create_writing_agent())
         .agent("code", create_code_agent())
@@ -212,7 +210,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let load_picker = {
         let loads = agent_loads.clone();
-        tower::service_fn(move |_req: openai_agents_rs::groups::PickRequest| {
+        tower::service_fn(move |_req: tower_llm::groups::PickRequest| {
             let loads = loads.clone();
             async move {
                 let mut load_map = loads.lock().await;
@@ -236,7 +234,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         })
     };
 
-    let load_balanced_router = openai_agents_rs::groups::GroupBuilder::new()
+    let load_balanced_router = tower_llm::groups::GroupBuilder::new()
         .agent("math", create_math_agent())
         .agent("writing", create_writing_agent())
         .agent("code", create_code_agent())

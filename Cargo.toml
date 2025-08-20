@@ -1,11 +1,11 @@
 [package]
-name = "openai-agents-rs"
+name = "tower-llm"
 version = "0.1.1"
 edition = "2021"
 description = "A port of the openai agents SDK to Rust."
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/kofron/openai-agents-rs"
+repository = "https://github.com/kofron/tower-llm"
 keywords = ["openai", "agents", "llm", "ai", "multi-agent"]
 
 # Examples are auto-discovered from examples/ directory

@@ -1,15 +1,15 @@
 //! Integration tests for the Tower-based agent implementation
 
-use openai_agents_rs::{
-    policies, simple_chat_request, tool_typed, Agent, AgentBuilder, AgentPolicy, AgentRun,
-    AgentStopReason, CompositePolicy, LoopState, PolicyFn, StepOutcome, ToolDef, ToolInvocation,
-    ToolOutput,
-};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
 use tower::{Service, ServiceExt};
+use tower_llm::{
+    policies, simple_chat_request, tool_typed, Agent, AgentBuilder, AgentPolicy, AgentRun,
+    AgentStopReason, CompositePolicy, LoopState, PolicyFn, StepOutcome, ToolDef, ToolInvocation,
+    ToolOutput,
+};
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct TestArgs {
@@ -103,7 +103,7 @@ fn test_composite_policy() {
 
 #[test]
 fn test_policy_builder() {
-    use openai_agents_rs::Policy;
+    use tower_llm::Policy;
 
     let policy = Policy::new().or_max_steps(5).until_no_tool_calls().build();
 
@@ -178,7 +178,7 @@ fn test_agent_stop_reasons() {
 
 #[test]
 fn test_step_outcome_variants() {
-    use openai_agents_rs::StepAux;
+    use tower_llm::StepAux;
 
     let aux = StepAux {
         prompt_tokens: 10,
@@ -202,9 +202,9 @@ fn test_step_outcome_variants() {
 #[test]
 fn test_old_api_removed() {
     // These should not compile if uncommented:
-    // use openai_agents_rs::Runner;
-    // use openai_agents_rs::env::EnvBuilder;
-    // use openai_agents_rs::tool::Tool;
+    // use tower_llm::Runner;
+    // use tower_llm::env::EnvBuilder;
+    // use tower_llm::tool::Tool;
     // let agent = Agent::simple("bot", "instructions");
 
     // The new API requires a client
