@@ -16,9 +16,12 @@
 //! Set your OpenAI API key in the `OPENAI_API_KEY` environment variable.
 //!
 //! ```rust,no_run
-//! use openai_agents_rs::{Agent, AgentBuilder, tool_typed};
+//! use openai_agents_rs::{Agent, tool_typed, policies, CompositePolicy};
+//! use async_openai::{config::OpenAIConfig, Client};
 //! use schemars::JsonSchema;
 //! use serde::Deserialize;
+//! use std::sync::Arc;
+//! use tower::{Service, ServiceExt};
 //!
 //! #[derive(Debug, Deserialize, JsonSchema)]
 //! struct AddArgs {
@@ -26,7 +29,10 @@
 //!     b: f64,
 //! }
 //!
-//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # async fn example() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+//! // Create OpenAI client
+//! let client = Arc::new(Client::<OpenAIConfig>::new());
+//!
 //! // Define a tool
 //! let calculator = tool_typed(
 //!     "add",
@@ -37,16 +43,19 @@
 //! );
 //!
 //! // Build an agent
-//! let agent = Agent::builder()
-//!     .instructions("You are a helpful math assistant")
+//! let agent = Agent::builder(client)
+//!     .model("gpt-4")
 //!     .tool(calculator)
-//!     .build()?;
+//!     .policy(CompositePolicy::new(vec![policies::until_no_tool_calls()]))
+//!     .build();
 //!
-//! // Run the agent
-//! let response = agent.run(
-//!     "system prompt",
+//! // Use the agent with Tower's Service trait
+//! let mut agent = agent;
+//! let request = openai_agents_rs::simple_chat_request(
+//!     "You are a helpful math assistant",
 //!     "What is 2 + 2?"
-//! ).await?;
+//! );
+//! let response = agent.ready().await?.call(request).await?;
 //!
 //! println!("Agent: {:?}", response);
 //! # Ok(())
@@ -75,10 +84,10 @@ mod core;
 
 // Re-export core types
 pub use core::{
-    Agent, AgentBuilder, AgentLoop, AgentLoopLayer, AgentPolicy, AgentRun, AgentStopReason,
-    AgentSvc, CompositePolicy, LoopState, Policy, PolicyFn, Step, StepAux, StepLayer,
-    StepOutcome, ToolDef, ToolInvocation, ToolOutput, ToolRouter, ToolSvc, policies,
-    run, simple_chat_request, tool_typed,
+    policies, run, simple_chat_request, tool_typed, Agent, AgentBuilder, AgentLoop, AgentLoopLayer,
+    AgentPolicy, AgentRun, AgentStopReason, AgentSvc, CompositePolicy, LoopState, Policy, PolicyFn,
+    Step, StepAux, StepLayer, StepOutcome, ToolDef, ToolInvocation, ToolOutput, ToolRouter,
+    ToolSvc,
 };
 
 // Public re-exports for convenience
@@ -91,8 +100,7 @@ pub use sqlite_session::SqliteSession;
 pub use async_openai::{
     config::OpenAIConfig,
     types::{
-        ChatCompletionRequestMessage, CreateChatCompletionRequest,
-        CreateChatCompletionRequestArgs,
+        ChatCompletionRequestMessage, CreateChatCompletionRequest, CreateChatCompletionRequestArgs,
     },
     Client,
 };
