@@ -3,20 +3,20 @@
 //! independent of the existing runtime. It may borrow ideas but should not
 //! touch existing code paths.
 
-pub mod layers;
-pub mod services;
-pub mod utils;
-pub mod sessions;
-pub mod codec;
-pub mod streaming;
-pub mod concurrency;
-pub mod resilience;
 pub mod approvals;
-pub mod provider;
-pub mod groups;
 pub mod budgets;
-pub mod recording;
+pub mod codec;
+pub mod concurrency;
+pub mod groups;
+pub mod layers;
 pub mod observability;
+pub mod provider;
+pub mod recording;
+pub mod resilience;
+pub mod services;
+pub mod sessions;
+pub mod streaming;
+pub mod utils;
 
 use std::{future::Future, pin::Pin, sync::Arc};
 
@@ -479,6 +479,9 @@ pub enum AgentStopReason {
     DoneNoToolCalls,
     MaxSteps,
     ToolCalled(String),
+    TokensBudgetExceeded,
+    ToolBudgetExceeded,
+    TimeBudgetExceeded,
 }
 
 // =============================

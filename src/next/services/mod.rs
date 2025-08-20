@@ -32,9 +32,7 @@
 //! - Same tool through `Step` with a model that always asks for that tool
 //! - Full agent built with builder sugar stopping on `until_no_tool_calls`
 
-pub use crate::next::{
-    Agent, AgentBuilder, AgentSvc, Step, ToolDef, ToolInvocation, ToolOutput, ToolRouter,
-};
+pub use crate::next::{ToolDef, ToolInvocation, ToolOutput, ToolRouter};
 
 #[cfg(test)]
 mod tests {

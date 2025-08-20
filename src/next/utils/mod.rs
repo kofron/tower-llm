@@ -20,7 +20,8 @@
 //! - Define a typed tool `AddArgs { a, b }` and construct it via `tool_typed`
 //! - Build a tiny agent and run a system/user prompt with `run` for a one-liner demo
 
-pub use crate::next::{run, simple_chat_request, tool_typed};
+// Re-export utilities from the main next module
+// These are defined in src/next/mod.rs but exposed here for organization
 
 #[cfg(test)]
 mod tests {

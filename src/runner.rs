@@ -206,7 +206,7 @@ impl RunConfig {
     /// **Deprecated**: Use `.layer()` instead for type-safe composition.
     ///
     /// # Migration
-    /// ```rust,ignore
+    /// ```text
     /// // Old:
     /// RunConfig::default().with_run_layers(vec![layers::boxed_timeout_secs(30)])
     ///
@@ -228,7 +228,7 @@ impl RunConfig {
     /// compile-time type safety and follows Tower's fluent composition pattern.
     ///
     /// # Example
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// use openai_agents_rs::{runner::RunConfig, service::{TimeoutLayer, RetryLayer}};
     /// use std::time::Duration;
     ///
@@ -363,7 +363,7 @@ impl<L, R: RunConfigLike> RunConfigLike for LayeredRunConfig<L, R> {
 ///
 /// ## Example: Running an Agent
 ///
-/// ```rust,no_run
+/// ```text
 /// use openai_agents_rs::{Agent, Runner, runner::RunConfig};
 ///
 /// # async fn run_agent() -> Result<(), Box<dyn std::error::Error>> {
@@ -427,7 +427,7 @@ impl Runner {
     ///
     /// # Example
     ///
-    /// ```rust,no_run
+    /// ```text
     /// use openai_agents_rs::{Agent, Runner, runner::RunConfig, env::EnvBuilder};
     /// use std::sync::Arc;
     ///
@@ -1183,7 +1183,7 @@ impl Runner {
         crate::service::ToolResponse,
         tower::BoxError,
     > {
-        use crate::service::{InputSchemaLayer, ToolRequest, ToolResponse, ApprovalLayer};
+        use crate::service::{ApprovalLayer, InputSchemaLayer, ToolRequest, ToolResponse};
         use crate::tool::ToolResult;
         use std::future::Future;
         use std::pin::Pin;
@@ -1261,12 +1261,13 @@ impl Runner {
         // Apply layers based on environment capabilities - this is the Tower way!
         // Start with schema validation (to be moved to tool constructors in Step 6)
         let with_schema = InputSchemaLayer::lenient(schema).layer(tool_service);
-        
+
         // Auto-apply ApprovalLayer if environment has approval capability
         // This demonstrates capability-driven layer application
-        if env.capability::<crate::env::ApprovalCapability>().is_some() 
-            || env.capability::<crate::env::AutoApprove>().is_some() 
-            || env.capability::<crate::env::ManualApproval>().is_some() {
+        if env.capability::<crate::env::ApprovalCapability>().is_some()
+            || env.capability::<crate::env::AutoApprove>().is_some()
+            || env.capability::<crate::env::ManualApproval>().is_some()
+        {
             let with_approval = ApprovalLayer.layer(with_schema);
             BoxService::new(with_approval)
         } else {
@@ -1486,9 +1487,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_runner_with_custom_env_approval_denied() {
-        use crate::env::{EnvBuilder, ApprovalCapability, Approval};
+        use crate::env::{Approval, ApprovalCapability, EnvBuilder};
         use crate::tool::FunctionTool;
-        
+
         // Create a test approval that always denies
         #[derive(Default)]
         struct DenyAllApproval;
@@ -1497,14 +1498,14 @@ mod tests {
                 false // Always deny
             }
         }
-        
+
         let env = EnvBuilder::new()
             .with_capability(Arc::new(ApprovalCapability::new(DenyAllApproval)))
             .build();
-        
+
         let tool = Arc::new(FunctionTool::simple("test", "Test tool", |s: String| s));
         let agent = Agent::simple("TestAgent", "I test approval").with_tool(tool);
-        
+
         struct MockP {
             call_count: std::sync::atomic::AtomicUsize,
         }
@@ -1525,8 +1526,10 @@ mod tests {
                 _max_tokens: Option<u32>,
             ) -> crate::error::Result<(crate::items::ModelResponse, crate::usage::Usage)>
             {
-                let count = self.call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                
+                let count = self
+                    .call_count
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
                 if count == 0 {
                     // First call: return a tool call that should be denied
                     let tool_call = crate::items::ToolCall {
@@ -1541,7 +1544,9 @@ mod tests {
                 } else {
                     // Subsequent calls: return final message after seeing the denial
                     Ok((
-                        crate::items::ModelResponse::new_message("I see the tool was denied access."),
+                        crate::items::ModelResponse::new_message(
+                            "I see the tool was denied access.",
+                        ),
                         crate::usage::Usage::new(5, 10),
                     ))
                 }
@@ -1550,16 +1555,21 @@ mod tests {
                 "test-model"
             }
         }
-        
+
         let config = RunConfig {
             model_provider: Some(Arc::new(MockP::new())),
             ..Default::default()
         };
 
-        let result = Runner::run_with_env(agent, "test approval", config, env).await.unwrap();
-        
+        let result = Runner::run_with_env(agent, "test approval", config, env)
+            .await
+            .unwrap();
+
         // Should have a tool call that was denied
-        assert!(result.items.iter().any(|item| matches!(item, RunItem::ToolCall(_))));
+        assert!(result
+            .items
+            .iter()
+            .any(|item| matches!(item, RunItem::ToolCall(_))));
         assert!(result.items.iter().any(|item| {
             matches!(item, RunItem::ToolOutput(output) if output.error.as_deref() == Some("approval denied"))
         }));
@@ -1567,9 +1577,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_runner_with_custom_env_approval_allowed() {
-        use crate::env::{EnvBuilder, ApprovalCapability, Approval};
+        use crate::env::{Approval, ApprovalCapability, EnvBuilder};
         use crate::tool::FunctionTool;
-        
+
         // Create a test approval that always approves
         #[derive(Default)]
         struct ApproveAllApproval;
@@ -1578,18 +1588,16 @@ mod tests {
                 true // Always approve
             }
         }
-        
+
         let env = EnvBuilder::new()
             .with_capability(Arc::new(ApprovalCapability::new(ApproveAllApproval)))
             .build();
-        
-        let tool = Arc::new(FunctionTool::simple(
-            "test", 
-            "Test tool", 
-            |s: String| format!("processed: {}", s)
-        ));
+
+        let tool = Arc::new(FunctionTool::simple("test", "Test tool", |s: String| {
+            format!("processed: {}", s)
+        }));
         let agent = Agent::simple("TestAgent", "I test approval").with_tool(tool);
-        
+
         struct MockP {
             call_count: std::sync::atomic::AtomicUsize,
         }
@@ -1610,8 +1618,10 @@ mod tests {
                 _max_tokens: Option<u32>,
             ) -> crate::error::Result<(crate::items::ModelResponse, crate::usage::Usage)>
             {
-                let count = self.call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                
+                let count = self
+                    .call_count
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
                 if count == 0 {
                     // First call: return a tool call that should be approved
                     let tool_call = crate::items::ToolCall {
@@ -1635,17 +1645,22 @@ mod tests {
                 "test-model"
             }
         }
-        
+
         let config = RunConfig {
             model_provider: Some(Arc::new(MockP::new())),
             ..Default::default()
         };
 
-        let result = Runner::run_with_env(agent, "test approval", config, env).await.unwrap();
+        let result = Runner::run_with_env(agent, "test approval", config, env)
+            .await
+            .unwrap();
         assert!(result.is_success());
-        
+
         // Should have successful tool execution (no error)
-        assert!(result.items.iter().any(|item| matches!(item, RunItem::ToolCall(_))));
+        assert!(result
+            .items
+            .iter()
+            .any(|item| matches!(item, RunItem::ToolCall(_))));
         assert!(result.items.iter().any(|item| {
             matches!(item, RunItem::ToolOutput(output) if output.error.is_none() && output.output.as_str() == Some("processed: hello"))
         }));
@@ -1655,11 +1670,11 @@ mod tests {
     async fn test_runner_without_approval_capability_auto_applies_layer() {
         use crate::env::DefaultEnv;
         use crate::tool::FunctionTool;
-        
+
         // Test that DefaultEnv (no approval capability) results in no ApprovalLayer applied
         let tool = Arc::new(FunctionTool::simple("test", "Test tool", |s: String| s));
         let agent = Agent::simple("TestAgent", "I test no approval").with_tool(tool);
-        
+
         struct MockP {
             call_count: std::sync::atomic::AtomicUsize,
         }
@@ -1680,8 +1695,10 @@ mod tests {
                 _max_tokens: Option<u32>,
             ) -> crate::error::Result<(crate::items::ModelResponse, crate::usage::Usage)>
             {
-                let count = self.call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                
+                let count = self
+                    .call_count
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
                 if count == 0 {
                     // First call: return a tool call
                     let tool_call = crate::items::ToolCall {
@@ -1696,7 +1713,9 @@ mod tests {
                 } else {
                     // Subsequent calls: return final message
                     Ok((
-                        crate::items::ModelResponse::new_message("Tool executed successfully without approval layer."),
+                        crate::items::ModelResponse::new_message(
+                            "Tool executed successfully without approval layer.",
+                        ),
                         crate::usage::Usage::new(5, 10),
                     ))
                 }
@@ -1705,19 +1724,25 @@ mod tests {
                 "test-model"
             }
         }
-        
+
         let config = RunConfig {
             model_provider: Some(Arc::new(MockP::new())),
             ..Default::default()
         };
 
         // Use DefaultEnv (no approval capability) - should work without ApprovalLayer being applied
-        let result = Runner::run_with_env(agent, "test no approval", config, DefaultEnv).await.unwrap();
-        
+        let result = Runner::run_with_env(agent, "test no approval", config, DefaultEnv)
+            .await
+            .unwrap();
+
         // Should execute successfully since DefaultEnv doesn't trigger ApprovalLayer application
-        assert!(result.items.iter().any(|item| matches!(item, RunItem::ToolCall(_))));
-        assert!(result.items.iter().any(|item| {
-            matches!(item, RunItem::ToolOutput(output) if output.error.is_none())
-        }));
+        assert!(result
+            .items
+            .iter()
+            .any(|item| matches!(item, RunItem::ToolCall(_))));
+        assert!(result
+            .items
+            .iter()
+            .any(|item| { matches!(item, RunItem::ToolOutput(output) if output.error.is_none()) }));
     }
 }

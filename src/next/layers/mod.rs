@@ -33,10 +33,7 @@
 //! - "Tools": a step with a fake tool router; policy `until_tool_called("handoff")` halts on a particular tool
 //! - "Budgets": show `AgentLoopLayer` wrapped by a budget layer to stop after N tools or tokens
 
-pub use crate::next::{
-    AgentLoop, AgentLoopLayer, AgentRun, AgentStopReason, CompositePolicy, LoopState, Policy,
-    StepLayer, StepOutcome,
-};
+pub use crate::next::{AgentRun, AgentStopReason, CompositePolicy, LoopState, Policy, StepOutcome};
 
 pub use crate::next::policies;
 

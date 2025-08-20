@@ -29,3 +29,43 @@
 //! - Integration tests: Step+MockProvider to test tool routing and loop logic independent of network
 
 
+use std::future::Future;
+use std::pin::Pin;
+
+use async_openai::types::CreateChatCompletionRequest;
+use futures::Stream;
+use futures::stream;
+use tower::BoxError;
+
+pub use crate::next::streaming::{StepChunk, StepProvider};
+
+/// A provider that always yields a fixed sequence of chunks.
+#[derive(Clone)]
+pub struct SequenceProvider { items: Vec<StepChunk> }
+impl SequenceProvider { pub fn new(items: Vec<StepChunk>) -> Self { Self { items } } }
+
+impl StepProvider for SequenceProvider {
+    type Stream = Pin<Box<dyn Stream<Item = StepChunk> + Send>>;
+    fn stream_step(
+        &self,
+        _req: CreateChatCompletionRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<Self::Stream, BoxError>> + Send>> {
+        let iter = stream::iter(self.items.clone());
+        Box::pin(async move { Ok(Box::pin(iter) as Pin<Box<dyn Stream<Item = StepChunk> + Send>>) })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_openai::types::CreateChatCompletionRequestArgs;
+
+    #[tokio::test]
+    async fn sequence_provider_streams_items() {
+        let p = SequenceProvider::new(vec![StepChunk::Token("a".into()), StepChunk::Token("b".into())]);
+        let req = CreateChatCompletionRequestArgs::default().model("gpt-4o").messages(vec![]).build().unwrap();
+        let mut s = p.stream_step(req).await.unwrap();
+        let items: Vec<_> = s.by_ref().collect().await;
+        assert_eq!(items.len(), 2);
+    }
+}
