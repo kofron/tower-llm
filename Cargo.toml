@@ -1,14 +1,12 @@
 [package]
 name = "tower-llm"
-version = "0.1.1"
+version = "0.0.1"
 edition = "2021"
-description = "A Tower-based LLM framework for building multi-agent workflows in Rust."
+description = "A Tower-based framework for building LLM & agent workflows in Rust."
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/kofron/tower-llm"
 keywords = ["openai", "agents", "llm", "ai", "multi-agent"]
-
-# Examples are auto-discovered from examples/ directory
 
 
 [dependencies]
