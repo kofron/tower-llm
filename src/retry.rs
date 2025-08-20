@@ -1,62 +1,8 @@
-//! # Retry Mechanism with Exponential Backoff
+//! # Retry utilities (orientation)
 //!
-//! This module provides a robust and flexible retry mechanism for handling
-//! transient failures, such as network errors or temporary API unavailability.
-//! It implements an exponential backoff strategy with optional jitter to prevent
-//! thundering herd issues.
-//!
-//! ## Core Components
-//!
-//! - **[`RetryPolicy`]**: A struct that encapsulates the configuration for a retry
-//!   strategy, including the maximum number of retries, initial and maximum
-//!   delays, and backoff multiplier.
-//! - **[`RetryBuilder`]**: A fluent builder for creating and executing retryable
-//!   operations.
-//! - **`retry_async` and `retry_sync`**: Functions that wrap an operation in retry
-//!   logic, for asynchronous and synchronous code respectively.
-//!
-//! ## Usage
-//!
-//! The `RetryBuilder` provides the most convenient way to use the retry logic.
-//! You can configure the retry policy and then execute an async or sync operation.
-//!
-//! ### Example: Retrying an Asynchronous Operation
-//!
-//! ```rust
-//! use openai_agents_rs::retry::RetryBuilder;
-//! use openai_agents_rs::error::{Result, AgentsError};
-//! use std::sync::atomic::{AtomicUsize, Ordering};
-//! use std::sync::Arc;
-//!
-//! # #[tokio::main]
-//! # async fn main() {
-//! let counter = Arc::new(AtomicUsize::new(0));
-//!
-//! let result = RetryBuilder::new()
-//!     .max_retries(3)
-//!     .run_async(|| {
-//!         let counter = counter.clone();
-//!         async move {
-//!             let count = counter.fetch_add(1, Ordering::SeqCst);
-//!             if count < 2 {
-//!                 Err(AgentsError::IoError(
-//!                     std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout")
-//!                 ))
-//!             } else {
-//!                 Ok("Success!")
-//!             }
-//!         }
-//!     })
-//!     .await;
-//!
-//! assert!(result.is_ok());
-//! assert_eq!(result.unwrap(), "Success!");
-//! assert_eq!(counter.load(Ordering::SeqCst), 3); // 2 failures + 1 success
-//! # }
-//! ```
-//! Retry mechanism with exponential backoff
-//!
-//! Provides robust retry logic for handling transient failures.
+//! Lightweight retry helpers for transient failures with exponential backoff
+//! and optional jitter. This module is policy-agnostic and useful outside the
+//! Tower stack; the Tower `RetryLayer` lives in `service.rs`.
 
 use crate::config::RetryConfig;
 use crate::error::{AgentsError, Result};
@@ -114,8 +60,8 @@ impl RetryPolicy {
         // Add jitter if enabled
         if self.config.jitter {
             use rand::Rng;
-            let mut rng = rand::thread_rng();
-            let jitter = rng.gen_range(0.0..0.3);
+            let mut rng = rand::rng();
+            let jitter = rng.random_range(0.0..0.3);
             let jitter_ms = (delay.as_millis() as f64 * jitter) as u64;
             delay += Duration::from_millis(jitter_ms);
         }

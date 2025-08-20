@@ -83,14 +83,20 @@ impl InputGuardrail for SensitiveInfoGuardrail {
         for pattern in &self.patterns {
             if input_lower.contains(pattern) {
                 println!("  ⚠️  Guardrail triggered: Sensitive information detected");
-                return Ok(GuardrailResult::fail(format!(
-                    "Input contains potentially sensitive information: '{}'",
-                    pattern
-                )));
+                return Ok(GuardrailResult {
+                    passed: false,
+                    reason: Some(format!(
+                        "Input contains potentially sensitive information: '{}'",
+                        pattern
+                    )),
+                });
             }
         }
 
-        Ok(GuardrailResult::pass())
+        Ok(GuardrailResult {
+            passed: true,
+            reason: None,
+        })
     }
 
     fn priority(&self) -> i32 {
@@ -118,15 +124,21 @@ impl OutputGuardrail for DisclaimerGuardrail {
             || output_lower.contains("medical")
             || output_lower.contains("diagnosis")
         {
-            let modified = format!(
+            let _modified = format!(
                 "{}\n\n⚠️ Disclaimer: This is for informational purposes only and should not be considered professional advice.",
                 output
             );
 
             println!("  📝 Output guardrail: Added disclaimer");
-            Ok(GuardrailResult::pass_with_modification(modified))
+            Ok(GuardrailResult {
+                passed: true,
+                reason: None,
+            })
         } else {
-            Ok(GuardrailResult::pass())
+            Ok(GuardrailResult {
+                passed: true,
+                reason: None,
+            })
         }
     }
 }

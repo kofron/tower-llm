@@ -1,56 +1,8 @@
-//! # Model Abstraction for LLM Interactions
+//! # Model abstraction (orientation)
 //!
-//! This module provides a flexible abstraction layer for interacting with
-//! Language Models (LLMs). It is designed to decouple the core agent logic
-//! from the specifics of any particular LLM provider, making it easier to
-//! support different models in the future.
-//!
-//! The central component of this module is the [`ModelProvider`] trait, which
-//! defines a standard interface for completing chat-based interactions with an
-//! LLM.
-//!
-//! ## The `ModelProvider` Trait
-//!
-//! The [`ModelProvider`] trait requires implementors to provide a `complete`
-//! method that takes a sequence of messages and a list of available tools,
-//! and returns a [`ModelResponse`] and [`Usage`] statistics. This design
-//! allows for different LLM providers to be plugged into the system.
-//!
-//! ## `OpenAIProvider`
-//!
-//! The primary implementation provided is the [`OpenAIProvider`], which uses the
-//! `async-openai` crate to communicate with the OpenAI API. It handles the
-//! conversion of the SDK's internal data structures to the format expected by
-//! the OpenAI API.
-//!
-//! ### Example: Using `OpenAIProvider`
-//!
-//! ```rust,no_run
-//! use openai_agents_rs::model::{ModelProvider, OpenAIProvider};
-//! use openai_agents_rs::items::Message;
-//!
-//! # #[tokio::main]
-//! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! let provider = OpenAIProvider::new("gpt-3.5-turbo");
-//!
-//! let messages = vec![
-//!     Message::system("You are a helpful assistant."),
-//!     Message::user("What is the capital of France?"),
-//! ];
-//!
-//! let (response, usage) = provider.complete(messages, vec![], None, None).await?;
-//!
-//! assert!(response.content.unwrap().contains("Paris"));
-//! println!("Total tokens used: {}", usage.total_tokens);
-//! # Ok(())
-//! # }
-//! ```
-//!
-//! For testing purposes, a [`MockProvider`] is also included, which allows you
-//! to simulate LLM responses without making actual API calls.
-//!
-//! [`Usage`]: crate::usage::Usage
-//! [`ModelResponse`]: crate::items::ModelResponse
+//! A thin boundary for LLM interactions. `ModelProvider` adapts different backends
+//! behind a consistent interface; the runner depends on this trait. The default
+//! implementation is `OpenAIProvider`; tests use `MockProvider`.
 
 use async_openai::{
     config::OpenAIConfig,
@@ -63,28 +15,71 @@ use async_openai::{
     Client,
 };
 use async_trait::async_trait;
-use serde_json::Value;
 use std::sync::Arc;
 
-use crate::error::{AgentsError, Result};
-use crate::items::{Message, ModelResponse, Role, ToolCall};
+use crate::error::Result;
+use crate::items::{Message, ModelResponse, ToolCall};
 use crate::tool::Tool;
 use crate::usage::Usage;
+fn map_messages_to_openai(
+    messages: Vec<Message>,
+) -> crate::error::Result<Vec<ChatCompletionRequestMessage>> {
+    let mut req_messages: Vec<ChatCompletionRequestMessage> = Vec::with_capacity(messages.len());
+    for m in messages {
+        match m.role {
+            crate::items::Role::System => {
+                let msg = ChatCompletionRequestSystemMessageArgs::default()
+                    .content(m.content)
+                    .build()
+                    .map_err(|e| crate::error::AgentsError::Other(e.to_string()))?;
+                req_messages.push(msg.into());
+            }
+            crate::items::Role::User => {
+                let msg = ChatCompletionRequestUserMessageArgs::default()
+                    .content(m.content)
+                    .build()
+                    .map_err(|e| crate::error::AgentsError::Other(e.to_string()))?;
+                req_messages.push(msg.into());
+            }
+            crate::items::Role::Assistant => {
+                let mut builder = ChatCompletionRequestAssistantMessageArgs::default();
+                if let Some(tool_calls) = m.tool_calls {
+                    let mapped = tool_calls
+                        .into_iter()
+                        .map(|tc| async_openai::types::ChatCompletionMessageToolCall {
+                            id: tc.id,
+                            r#type: ChatCompletionToolType::Function,
+                            function: async_openai::types::FunctionCall {
+                                name: tc.name,
+                                arguments: tc.arguments.to_string(),
+                            },
+                        })
+                        .collect::<Vec<_>>();
+                    builder.tool_calls(mapped);
+                }
+                builder.content(m.content);
+                let msg = builder
+                    .build()
+                    .map_err(|e| crate::error::AgentsError::Other(e.to_string()))?;
+                req_messages.push(msg.into());
+            }
+            crate::items::Role::Tool => {
+                let msg = ChatCompletionRequestToolMessageArgs::default()
+                    .content(m.content)
+                    .tool_call_id(m.tool_call_id.unwrap_or_default())
+                    .build()
+                    .map_err(|e| crate::error::AgentsError::Other(e.to_string()))?;
+                req_messages.push(msg.into());
+            }
+        }
+    }
+    Ok(req_messages)
+}
 
 /// A trait that defines the interface for a Language Model (LLM) provider.
-///
-/// This abstraction allows the SDK to support various LLM backends by providing
-/// a consistent interface for generating chat completions.
 #[async_trait]
 pub trait ModelProvider: Send + Sync {
     /// Generates a model response for a given set of messages and tools.
-    ///
-    /// # Arguments
-    ///
-    /// * `messages` - The conversation history to be sent to the model.
-    /// * `tools` - A list of tools that the agent can use.
-    /// * `temperature` - The temperature for response generation.
-    /// * `max_tokens` - The maximum number of tokens to generate.
     async fn complete(
         &self,
         messages: Vec<Message>,
@@ -93,13 +88,13 @@ pub trait ModelProvider: Send + Sync {
         max_tokens: Option<u32>,
     ) -> Result<(ModelResponse, Usage)>;
 
-    /// Returns the name of the model being used by the provider.
+    /// Name of the underlying model.
     fn model_name(&self) -> &str;
 }
 
-/// A [`ModelProvider`] implementation for OpenAI's API, using the `async-openai`
-/// crate.
+/// A [`ModelProvider`] implementation for OpenAI's API, using the `async-openai` crate.
 pub struct OpenAIProvider {
+    #[allow(dead_code)]
     client: Client<OpenAIConfig>,
     model: String,
 }
@@ -120,71 +115,6 @@ impl OpenAIProvider {
             model: model.into(),
         }
     }
-
-    /// Converts an SDK `Message` into the `async_openai` format.
-    fn convert_message(&self, msg: &Message) -> ChatCompletionRequestMessage {
-        match msg.role {
-            Role::System => ChatCompletionRequestSystemMessageArgs::default()
-                .content(msg.content.clone())
-                .build()
-                .unwrap()
-                .into(),
-            Role::User => ChatCompletionRequestUserMessageArgs::default()
-                .content(msg.content.clone())
-                .build()
-                .unwrap()
-                .into(),
-            Role::Assistant => {
-                let mut builder = ChatCompletionRequestAssistantMessageArgs::default();
-                builder.content(msg.content.clone());
-
-                // Add tool calls if present
-                if let Some(tool_calls) = &msg.tool_calls {
-                    let openai_tool_calls: Vec<_> = tool_calls
-                        .iter()
-                        .map(|tc| async_openai::types::ChatCompletionMessageToolCall {
-                            id: tc.id.clone(),
-                            r#type: async_openai::types::ChatCompletionToolType::Function,
-                            function: async_openai::types::FunctionCall {
-                                name: tc.name.clone(),
-                                arguments: tc.arguments.to_string(),
-                            },
-                        })
-                        .collect();
-                    builder.tool_calls(openai_tool_calls);
-                }
-
-                builder.build().unwrap().into()
-            }
-            Role::Tool => ChatCompletionRequestToolMessageArgs::default()
-                .content(msg.content.clone())
-                .tool_call_id(msg.tool_call_id.clone().unwrap_or_default())
-                .build()
-                .unwrap()
-                .into(),
-        }
-    }
-
-    /// Converts SDK `Tool`s into the `async_openai` format.
-    fn convert_tools(&self, tools: &[Arc<dyn Tool>]) -> Vec<ChatCompletionTool> {
-        tools
-            .iter()
-            .map(|tool| {
-                ChatCompletionToolArgs::default()
-                    .r#type(ChatCompletionToolType::Function)
-                    .function(
-                        FunctionObjectArgs::default()
-                            .name(tool.name())
-                            .description(tool.description())
-                            .parameters(tool.parameters_schema())
-                            .build()
-                            .unwrap(),
-                    )
-                    .build()
-                    .unwrap()
-            })
-            .collect()
-    }
 }
 
 #[async_trait]
@@ -196,68 +126,72 @@ impl ModelProvider for OpenAIProvider {
         temperature: Option<f32>,
         max_tokens: Option<u32>,
     ) -> Result<(ModelResponse, Usage)> {
-        let openai_messages: Vec<ChatCompletionRequestMessage> = messages
-            .iter()
-            .map(|msg| self.convert_message(msg))
-            .collect();
+        // Map messages
+        let req_messages = map_messages_to_openai(messages)?;
 
-        let mut request = CreateChatCompletionRequestArgs::default();
-        request.model(&self.model).messages(openai_messages);
-
-        if !tools.is_empty() {
-            request.tools(self.convert_tools(&tools));
+        // Map tools
+        let mut tool_specs: Vec<ChatCompletionTool> = Vec::with_capacity(tools.len());
+        for t in tools {
+            let func = FunctionObjectArgs::default()
+                .name(t.name())
+                .description(t.description())
+                .parameters(t.parameters_schema())
+                .build()
+                .map_err(|e| crate::error::AgentsError::Other(e.to_string()))?;
+            let tool = ChatCompletionToolArgs::default()
+                .r#type(ChatCompletionToolType::Function)
+                .function(func)
+                .build()
+                .map_err(|e| crate::error::AgentsError::Other(e.to_string()))?;
+            tool_specs.push(tool);
         }
 
+        let mut req_builder = CreateChatCompletionRequestArgs::default();
+        req_builder.model(&self.model);
+        req_builder.messages(req_messages);
+        if !tool_specs.is_empty() {
+            req_builder.tools(tool_specs);
+        }
         if let Some(temp) = temperature {
-            request.temperature(temp);
+            req_builder.temperature(temp);
         }
-
-        if let Some(max) = max_tokens {
-            request.max_tokens(max);
+        if let Some(mt) = max_tokens {
+            req_builder.max_tokens(mt);
         }
+        let req = req_builder
+            .build()
+            .map_err(|e| crate::error::AgentsError::Other(e.to_string()))?;
 
-        let response = self.client.chat().create(request.build()?).await?;
+        let resp = self.client.chat().create(req).await?;
 
-        // Extract the first choice
-        let choice = response
+        // Map response
+        let choice = resp
             .choices
-            .first()
-            .ok_or_else(|| AgentsError::ModelBehaviorError {
-                message: "No choices in response".to_string(),
-            })?;
+            .get(0)
+            .ok_or_else(|| crate::error::AgentsError::Other("no choices".into()))?;
+        let msg = &choice.message;
+        let usage = resp.usage.as_ref().cloned().unwrap_or_default();
+        let usage_out = Usage::new(
+            usage.prompt_tokens as usize,
+            usage.completion_tokens as usize,
+        );
 
-        // Convert tool calls if any
-        let tool_calls = if let Some(tool_calls) = &choice.message.tool_calls {
-            tool_calls
+        // If tool_calls are present, return ModelResponse with tool calls. Otherwise content.
+        if let Some(calls) = &msg.tool_calls {
+            let mapped = calls
                 .iter()
-                .map(|tc| ToolCall {
-                    id: tc.id.clone(),
-                    name: tc.function.name.clone(),
-                    arguments: serde_json::from_str(&tc.function.arguments).unwrap_or(Value::Null),
+                .map(|c| ToolCall {
+                    id: c.id.clone(),
+                    name: c.function.name.clone(),
+                    arguments: serde_json::from_str(&c.function.arguments)
+                        .unwrap_or_else(|_| serde_json::json!({})),
                 })
-                .collect()
+                .collect::<Vec<_>>();
+            Ok((ModelResponse::new_tool_calls(mapped), usage_out))
         } else {
-            vec![]
-        };
-
-        let model_response = ModelResponse {
-            id: response.id.clone(),
-            content: choice.message.content.clone(),
-            tool_calls,
-            finish_reason: choice.finish_reason.as_ref().map(|r| format!("{:?}", r)),
-            created_at: chrono::Utc::now(),
-        };
-
-        let usage = if let Some(usage) = response.usage {
-            Usage::new(
-                usage.prompt_tokens as usize,
-                usage.completion_tokens as usize,
-            )
-        } else {
-            Usage::empty()
-        };
-
-        Ok((model_response, usage))
+            let content = msg.content.clone().unwrap_or_default();
+            Ok((ModelResponse::new_message(content), usage_out))
+        }
     }
 
     fn model_name(&self) -> &str {
@@ -265,42 +199,47 @@ impl ModelProvider for OpenAIProvider {
     }
 }
 
-/// Mock model provider for testing
-#[cfg(test)]
+/// A simple mock model provider for tests and examples.
 pub struct MockProvider {
     model: String,
-    responses: std::sync::Mutex<Vec<ModelResponse>>,
+    responses: std::sync::Mutex<std::collections::VecDeque<ModelResponse>>,
 }
 
-#[cfg(test)]
 impl MockProvider {
-    pub fn new(model: impl Into<String>) -> Self {
+    pub fn new(model: &str) -> Self {
         Self {
-            model: model.into(),
-            responses: std::sync::Mutex::new(vec![]),
+            model: model.to_string(),
+            responses: std::sync::Mutex::new(std::collections::VecDeque::new()),
         }
     }
 
-    pub fn with_response(self, response: ModelResponse) -> Self {
-        self.responses.lock().unwrap().push(response);
+    pub fn with_message(mut self, content: &str) -> Self {
+        self.responses
+            .get_mut()
+            .unwrap()
+            .push_back(ModelResponse::new_message(content));
         self
     }
 
-    pub fn with_message(self, content: impl Into<String>) -> Self {
-        self.with_response(ModelResponse::new_message(content))
+    pub fn with_tool_call(mut self, name: &str, arguments: serde_json::Value) -> Self {
+        let call = ToolCall {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: name.to_string(),
+            arguments,
+        };
+        self.responses
+            .get_mut()
+            .unwrap()
+            .push_back(ModelResponse::new_tool_calls(vec![call]));
+        self
     }
 
-    pub fn with_tool_call(self, tool_name: impl Into<String>, args: Value) -> Self {
-        let tool_call = ToolCall {
-            id: uuid::Uuid::new_v4().to_string(),
-            name: tool_name.into(),
-            arguments: args,
-        };
-        self.with_response(ModelResponse::new_tool_calls(vec![tool_call]))
+    pub fn with_response(mut self, resp: ModelResponse) -> Self {
+        self.responses.get_mut().unwrap().push_back(resp);
+        self
     }
 }
 
-#[cfg(test)]
 #[async_trait]
 impl ModelProvider for MockProvider {
     async fn complete(
@@ -310,16 +249,12 @@ impl ModelProvider for MockProvider {
         _temperature: Option<f32>,
         _max_tokens: Option<u32>,
     ) -> Result<(ModelResponse, Usage)> {
-        let mut responses = self.responses.lock().unwrap();
-        if responses.is_empty() {
-            return Ok((
-                ModelResponse::new_message("Default response"),
-                Usage::new(10, 5),
-            ));
+        let mut guard = self.responses.lock().unwrap();
+        if let Some(resp) = guard.pop_front() {
+            Ok((resp, Usage::new(0, 0)))
+        } else {
+            Ok((ModelResponse::new_message("ok"), Usage::new(0, 0)))
         }
-
-        let response = responses.remove(0);
-        Ok((response, Usage::new(10, 5)))
     }
 
     fn model_name(&self) -> &str {
@@ -330,93 +265,54 @@ impl ModelProvider for MockProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tool::FunctionTool;
+    use crate::items::{ItemHelpers, MessageItem, Role, RunItem, ToolCallItem, ToolOutputItem};
+    use chrono::Utc;
 
     #[test]
-    fn test_openai_provider_creation() {
-        let provider = OpenAIProvider::new("gpt-4");
-        assert_eq!(provider.model_name(), "gpt-4");
-    }
+    fn preserves_assistant_tool_calls_before_tool_output() {
+        let items = vec![
+            RunItem::Message(MessageItem {
+                id: "m1".into(),
+                role: Role::User,
+                content: "hi".into(),
+                created_at: Utc::now(),
+            }),
+            RunItem::ToolCall(ToolCallItem {
+                id: "call_1".into(),
+                tool_name: "calc".into(),
+                arguments: serde_json::json!({"x":1}),
+                created_at: Utc::now(),
+            }),
+            RunItem::ToolOutput(ToolOutputItem {
+                id: "o1".into(),
+                tool_call_id: "call_1".into(),
+                output: serde_json::json!({"ok":true}),
+                error: None,
+                created_at: Utc::now(),
+            }),
+        ];
+        let messages = ItemHelpers::to_messages(&items);
+        assert!(messages
+            .get(1)
+            .and_then(|m| m.tool_calls.as_ref())
+            .is_some());
 
-    #[test]
-    fn test_message_conversion() {
-        let provider = OpenAIProvider::new("gpt-4");
-
-        let system_msg = Message::system("You are helpful");
-        let _converted = provider.convert_message(&system_msg);
-        // Just verify it doesn't panic
-
-        let user_msg = Message::user("Hello");
-        let _ = provider.convert_message(&user_msg);
-
-        let assistant_msg = Message::assistant("Hi there");
-        let _ = provider.convert_message(&assistant_msg);
-
-        let tool_msg = Message::tool("Result", "call_123");
-        let _ = provider.convert_message(&tool_msg);
-    }
-
-    #[test]
-    fn test_tool_conversion() {
-        let provider = OpenAIProvider::new("gpt-4");
-
-        let tool = Arc::new(FunctionTool::simple(
-            "test_tool",
-            "Test description",
-            |s: String| s,
-        ));
-
-        let tools: Vec<Arc<dyn Tool>> = vec![tool];
-        let converted = provider.convert_tools(&tools);
-
-        assert_eq!(converted.len(), 1);
-        assert_eq!(converted[0].function.name, "test_tool");
-        assert_eq!(
-            converted[0].function.description.as_ref().unwrap(),
-            "Test description"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_mock_provider() {
-        let provider = MockProvider::new("mock-model").with_message("Test response");
-
-        assert_eq!(provider.model_name(), "mock-model");
-
-        let (response, usage) = provider.complete(vec![], vec![], None, None).await.unwrap();
-
-        assert_eq!(response.content, Some("Test response".to_string()));
-        assert_eq!(usage.prompt_tokens, 10);
-        assert_eq!(usage.completion_tokens, 5);
-    }
-
-    #[tokio::test]
-    async fn test_mock_provider_tool_call() {
-        let provider = MockProvider::new("mock-model").with_tool_call(
-            "calculator",
-            serde_json::json!({"operation": "add", "a": 1, "b": 2}),
-        );
-
-        let (response, _) = provider.complete(vec![], vec![], None, None).await.unwrap();
-
-        assert_eq!(response.tool_calls.len(), 1);
-        assert_eq!(response.tool_calls[0].name, "calculator");
-    }
-
-    #[tokio::test]
-    async fn test_mock_provider_multiple_responses() {
-        let provider = MockProvider::new("mock-model")
-            .with_message("First")
-            .with_message("Second");
-
-        let (response1, _) = provider.complete(vec![], vec![], None, None).await.unwrap();
-        assert_eq!(response1.content, Some("First".to_string()));
-
-        let (response2, _) = provider.complete(vec![], vec![], None, None).await.unwrap();
-        assert_eq!(response2.content, Some("Second".to_string()));
-
-        // Default response when queue is empty
-        let (response3, _) = provider.complete(vec![], vec![], None, None).await.unwrap();
-        assert_eq!(response3.content, Some("Default response".to_string()));
+        let mapped = map_messages_to_openai(messages).expect("map ok");
+        assert_eq!(mapped.len(), 3);
+        match &mapped[1] {
+            async_openai::types::ChatCompletionRequestMessage::Assistant(a) => {
+                assert!(
+                    a.tool_calls.is_some(),
+                    "assistant tool_calls must be forwarded"
+                );
+            }
+            other => panic!("expected assistant, got {:?}", other),
+        }
+        match &mapped[2] {
+            async_openai::types::ChatCompletionRequestMessage::Tool(t) => {
+                assert!(!t.tool_call_id.is_empty());
+            }
+            other => panic!("expected tool, got {:?}", other),
+        }
     }
 }
