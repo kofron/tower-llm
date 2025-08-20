@@ -127,73 +127,68 @@ pub fn messages_to_items(
 /// Convert RunItems back to raw OpenAI request messages, preserving tool_calls semantics.
 pub fn items_to_messages(items: &[RunItem]) -> Vec<ChatCompletionRequestMessage> {
     let mut messages: Vec<ChatCompletionRequestMessage> = Vec::new();
-    let mut pending_tool_calls: Vec<async_openai::types::ChatCompletionMessageToolCall> =
-        Vec::new();
 
-    for (i, item) in items.iter().enumerate() {
-        match item {
+    let mut i = 0;
+    while i < items.len() {
+        match &items[i] {
             RunItem::Message(msg) => {
-                // If we have pending tool calls and this is an assistant message, attach them
-                if msg.role == Role::Assistant && !pending_tool_calls.is_empty() {
-                    let mut builder = ChatCompletionRequestAssistantMessageArgs::default();
-                    builder.content(msg.content.clone());
-                    builder.tool_calls(pending_tool_calls.clone());
-                    let assistant = builder.build().expect("assistant request build");
-                    messages.push(assistant.into());
-                    pending_tool_calls.clear();
-                } else {
-                    match msg.role {
-                        Role::System => {
-                            let sys = ChatCompletionRequestSystemMessageArgs::default()
-                                .content(msg.content.clone())
-                                .build()
-                                .expect("sys build");
-                            messages.push(sys.into());
+                match msg.role {
+                    Role::System => {
+                        let sys = ChatCompletionRequestSystemMessageArgs::default()
+                            .content(msg.content.clone())
+                            .build()
+                            .expect("sys build");
+                        messages.push(sys.into());
+                    }
+                    Role::User => {
+                        let usr = ChatCompletionRequestUserMessageArgs::default()
+                            .content(msg.content.clone())
+                            .build()
+                            .expect("user build");
+                        messages.push(usr.into());
+                    }
+                    Role::Assistant => {
+                        // Look ahead to see if there are tool calls following this assistant message
+                        let mut j = i + 1;
+                        let mut tool_calls = Vec::new();
+                        while j < items.len() {
+                            if let RunItem::ToolCall(tc) = &items[j] {
+                                tool_calls.push(
+                                    async_openai::types::ChatCompletionMessageToolCall {
+                                        id: tc.id.clone(),
+                                        r#type: ChatCompletionToolType::Function,
+                                        function: async_openai::types::FunctionCall {
+                                            name: tc.tool_name.clone(),
+                                            arguments: tc.arguments.to_string(),
+                                        },
+                                    },
+                                );
+                                j += 1;
+                            } else {
+                                break;
+                            }
                         }
-                        Role::User => {
-                            let usr = ChatCompletionRequestUserMessageArgs::default()
-                                .content(msg.content.clone())
-                                .build()
-                                .expect("user build");
-                            messages.push(usr.into());
+
+                        // Build assistant message with or without tool calls
+                        let mut builder = ChatCompletionRequestAssistantMessageArgs::default();
+                        builder.content(msg.content.clone());
+                        if !tool_calls.is_empty() {
+                            builder.tool_calls(tool_calls);
+                            // Skip the tool call items we just processed
+                            i = j - 1;
                         }
-                        Role::Assistant => {
-                            let asst = ChatCompletionRequestAssistantMessageArgs::default()
-                                .content(msg.content.clone())
-                                .build()
-                                .expect("assistant build");
-                            messages.push(asst.into());
-                        }
-                        Role::Tool => {
-                            // Should not happen as tool outputs are ToolOutput items; ignore
-                        }
+                        let assistant = builder.build().expect("assistant build");
+                        messages.push(assistant.into());
+                    }
+                    Role::Tool => {
+                        // Should not happen as tool outputs are ToolOutput items; ignore
                     }
                 }
             }
-            RunItem::ToolCall(tc) => {
-                pending_tool_calls.push(async_openai::types::ChatCompletionMessageToolCall {
-                    id: tc.id.clone(),
-                    r#type: ChatCompletionToolType::Function,
-                    function: async_openai::types::FunctionCall {
-                        name: tc.tool_name.clone(),
-                        arguments: tc.arguments.to_string(),
-                    },
-                });
-
-                // If next item is a ToolOutput, we should emit an assistant message now with tool_calls
-                if i + 1 < items.len() {
-                    if let RunItem::ToolOutput(_) = &items[i + 1] {
-                        if !pending_tool_calls.is_empty() {
-                            let assistant = ChatCompletionRequestAssistantMessageArgs::default()
-                                .content("")
-                                .tool_calls(pending_tool_calls.clone())
-                                .build()
-                                .expect("assistant tool_calls build");
-                            messages.push(assistant.into());
-                            pending_tool_calls.clear();
-                        }
-                    }
-                }
+            RunItem::ToolCall(_tc) => {
+                // Tool calls should have been handled when processing the preceding assistant message
+                // If we get here, it means there's a tool call without a preceding assistant message
+                // This shouldn't happen in well-formed data, but we'll skip it
             }
             RunItem::ToolOutput(out) => {
                 let content = out
@@ -212,15 +207,7 @@ pub fn items_to_messages(items: &[RunItem]) -> Vec<ChatCompletionRequestMessage>
                 // Agent-only; not part of the bijection to raw messages
             }
         }
-    }
-
-    if !pending_tool_calls.is_empty() {
-        let assistant = ChatCompletionRequestAssistantMessageArgs::default()
-            .content("")
-            .tool_calls(pending_tool_calls.clone())
-            .build()
-            .expect("assistant trailing tool_calls build");
-        messages.push(assistant.into());
+        i += 1;
     }
 
     messages
@@ -230,6 +217,8 @@ pub fn items_to_messages(items: &[RunItem]) -> Vec<ChatCompletionRequestMessage>
 mod tests {
     use super::*;
     use async_openai::types::ChatCompletionRequestMessage as ReqMsg;
+    use quickcheck::{Arbitrary, Gen, QuickCheck, TestResult};
+    use quickcheck_macros::quickcheck;
 
     fn assistant_with_calls(name: &str, args: Value, id: &str) -> ReqMsg {
         let tc = async_openai::types::ChatCompletionMessageToolCall {
