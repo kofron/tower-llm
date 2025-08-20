@@ -2,7 +2,9 @@
 
 ## Overview
 
-This codebase implements a pure Tower-based architecture for OpenAI agents. Everything is a Tower service, layers compose uniformly, and all cross-cutting concerns are handled through Tower middleware.
+This codebase implements a pure Tower-based architecture for OpenAI agents. Everything is a Tower service, layers compose uniformly via typed `.layer()` APIs, and all cross-cutting concerns are handled through Tower middleware.
+
+> **Important**: This document reflects the current architecture after the Tower migration completion. All legacy APIs have been removed in favor of uniform Tower patterns.
 
 ## Core Concepts
 
@@ -16,53 +18,51 @@ Runs → Agents → Tools
 - **Agents** manage multiple tool calls
 - **Tools** execute specific functions
 
-Each level can have its own layers, applied in order from most specific to most general.
+Each level can have its own layers, applied in the canonical execution order: **Run → Agent → Tool → Base**.
 
 ### 2. Tools as Services
 
 Tools are first-class Tower services that implement `Service<ToolRequest<E>, Response = ToolResponse>`.
 
 ```rust
-use openai_agents_rs::tool_service::{ServiceTool, IntoToolService};
+use openai_agents_rs::{FunctionTool, tool_service::IntoToolService};
+use std::sync::Arc;
 
-// Direct service tool
-let tool = ServiceTool::new(
-    "calculator",
-    "Performs calculations",
-    json!({"type": "object"}),
-    |args| {
-        // Tool logic here
-        Ok(json!({"result": 42}))
-    }
-);
+// Create function tool
+let tool = Arc::new(FunctionTool::simple(
+    "upper", 
+    "Uppercase", 
+    |s: String| s.to_uppercase()
+));
 
-// Adapt existing tool
-let existing = FunctionTool::simple("upper", "Uppercase", |s: String| s.to_uppercase());
-let service = existing.into_service::<DefaultEnv>();
+// Convert to service for Tower composition
+let service = <FunctionTool as Clone>::clone(&tool).into_service::<DefaultEnv>();
 ```
 
 ### 3. Uniform Composition with Layers
 
-Everything uses Tower's `.layer()` pattern:
+Everything uses Tower's typed `.layer()` pattern:
 
 ```rust
-use tower::ServiceBuilder;
+use openai_agents_rs::{Agent, FunctionTool, layers, runner::RunConfig};
+use tower::{ServiceBuilder, Layer};
+use std::{sync::Arc, time::Duration};
 
-// Tools with layers
-let tool = FunctionTool::simple("slow", "Slow operation", slow_fn)
-    .layer(layers::boxed_timeout_secs(5))
-    .layer(layers::boxed_retry_times(3));
+// Service-based tool composition  
+let tool = Arc::new(FunctionTool::simple("slow", "Slow operation", slow_fn));
+let service = <FunctionTool as Clone>::clone(&tool).into_service::<DefaultEnv>();
+let layered_service = layers::TimeoutLayer::secs(5).layer(
+    layers::RetryLayer::times(3).layer(service)
+);
 
-// Direct Tower composition
-let service = ServiceBuilder::new()
-    .timeout(Duration::from_secs(5))
-    .retry(retry_policy)
-    .service(tool.into_service());
-
-// Agent with layers
+// Agent with typed layers
 let agent = Agent::simple("Assistant", "Helpful assistant")
-    .with_tool(Arc::new(tool))
-    .layer(layers::boxed_trace());
+    .with_tool(tool)
+    .layer(layers::TracingLayer);
+
+// Run config with typed layers  
+let config = RunConfig::default()
+    .layer(layers::TimeoutLayer::secs(30));
 ```
 
 ### 4. Capability-Based Environment
@@ -84,32 +84,102 @@ if let Some(logger) = req.env.capability::<LoggingCapability>() {
 }
 ```
 
-## Migration from Old Architecture
+## Legacy APIs Removed
 
-### Before: Multiple Ways to Modify Behavior
+The following APIs have been **completely removed** in favor of uniform Tower patterns:
+
+### Removed Vector-Based APIs
+- `with_agent_layers(vec![...])` → Use typed `.layer()` chaining
+- `with_run_layers(vec![...])` → Use typed `.layer()` chaining  
+- `with_tool_layers("name", vec![...])` → Configure layers at tool creation
+
+### Removed Erased Layer System
+- `ErasedToolLayer` trait → Use typed `Layer<S>` implementations
+- `boxed_timeout_secs()`, `boxed_retry_times()` → Use `TimeoutLayer::secs()`, `RetryLayer::times()`
+- `LayeredTool` struct → Use `.into_service().layer()` composition
+
+### Removed Context System
+- `ToolContext` handlers → Use stateful Tower layers
+- `with_context_factory()` → Use capability-based environment
+- `RunResultWithContext<C>` → Use stateful layers for cross-cutting state
+
+### Removed Adapter Pattern
+- `BaseToolService` → Tools implement `Service` directly via `.into_service()`
+
+## Migration Patterns
+
+### Tool Composition: Before vs After
 
 ```rust
-// OLD: Agent configures tool internals (boundary violation)
-let agent = agent.with_tool_layers("calculator", vec![retry_layer]);
+// BEFORE: LayeredTool with erased layers
+let tool = FunctionTool::simple("calc", "Calculator", calc_fn)
+    .layer(layers::boxed_timeout_secs(5))
+    .layer(layers::boxed_retry_times(3));
 
-// OLD: Context handlers (spooky action at a distance)
-let agent = agent.with_context(initial_ctx, handler);
-
-// OLD: String-based coupling
-if let Some(tool) = tools.get("calculator") { ... }
+// AFTER: Service-based composition  
+let tool = Arc::new(FunctionTool::simple("calc", "Calculator", calc_fn));
+let service = <FunctionTool as Clone>::clone(&tool).into_service::<DefaultEnv>();
+let layered = layers::TimeoutLayer::secs(5).layer(
+    layers::RetryLayer::times(3).layer(service)
+);
 ```
 
-### After: Uniform Tower Composition
+### Agent/Run Layering: Before vs After
 
 ```rust
-// NEW: Tools manage themselves
-let tool = calculator.layer(retry_layer);
+// BEFORE: Vector-based APIs
+let agent = Agent::simple("Bot", "Assistant")
+    .with_agent_layers(vec![
+        layers::boxed_timeout_secs(10),
+        layers::boxed_retry_times(3),
+    ]);
 
-// NEW: Layers for cross-cutting concerns
-let tool = calculator.layer(transform_output_layer);
+let config = RunConfig::default()
+    .with_run_layers(vec![layers::boxed_timeout_secs(30)]);
 
-// NEW: Type-safe throughout
-let tool: Arc<dyn Tool> = Arc::new(calculator);
+// AFTER: Typed fluent chaining
+let agent = Agent::simple("Bot", "Assistant")
+    .layer(layers::TimeoutLayer::secs(10))
+    .layer(layers::RetryLayer::times(3));
+
+let config = RunConfig::default()
+    .layer(layers::TimeoutLayer::secs(30));
+```
+
+### Environment Capabilities: Before vs After
+
+```rust
+// BEFORE: Context handlers
+impl ToolContext<State> for Handler {
+    fn on_tool_output(&self, ctx, tool, args, result) -> ContextStep {
+        // Transform output
+    }
+}
+
+// AFTER: Capability-based layers
+let env = EnvBuilder::new()
+    .with_capability(Arc::new(LoggingCapability))
+    .build();
+
+// Layer accesses capability
+if let Some(logger) = req.env.capability::<LoggingCapability>() {
+    logger.info("Processing request");
+}
+```
+
+### Layer Ordering: Canonical Order
+
+The execution order is always: **Run → Agent → Tool → Base**
+
+```rust
+// Runtime execution flow:
+Run Layer (outermost)
+  ↓
+Agent Layer  
+  ↓
+Tool Layer
+  ↓  
+Base Tool Execution
 ```
 
 ## Standard Layers
@@ -117,25 +187,37 @@ let tool: Arc<dyn Tool> = Arc::new(calculator);
 ### Timeout Layer
 
 ```rust
-tool.layer(layers::boxed_timeout_secs(30))
+// On agent or run config
+let agent = agent.layer(layers::TimeoutLayer::secs(30));
+
+// On service directly  
+let service = layers::TimeoutLayer::secs(30).layer(tool_service);
 ```
 
 ### Retry Layer
 
 ```rust
-tool.layer(layers::boxed_retry_times(3))
+// On agent or run config
+let agent = agent.layer(layers::RetryLayer::times(3));
+
+// On service directly
+let service = layers::RetryLayer::times(3).layer(tool_service);
 ```
 
 ### Approval Layer
 
 ```rust
-tool.layer(layers::boxed_approval_with(approval_fn))
+// Requires capability in environment
+let agent = agent.layer(layers::ApprovalLayer);
+let config = config.layer(layers::ApprovalLayer);
 ```
 
 ### Schema Validation
 
 ```rust
-tool.layer(layers::boxed_input_schema_strict(schema))
+// Applied directly to service
+let schema = serde_json::json!({"type": "object"});
+let service = layers::InputSchemaLayer::strict(schema).layer(tool_service);
 ```
 
 ## Creating Custom Layers
@@ -178,16 +260,18 @@ where
 
 ## Best Practices
 
-### 1. Tools Own Their Layers
+### 1. Tools Compose Via Services
 
 ```rust
-// ✅ GOOD: Tool manages its own behavior
-let tool = DatabaseTool::new(db_pool)
-    .layer(timeout_layer)
-    .layer(retry_layer);
+// ✅ GOOD: Service-based layering at tool creation
+let tool = Arc::new(DatabaseTool::new(db_pool));
+let service = tool.clone().into_service::<DefaultEnv>();
+let layered = layers::TimeoutLayer::secs(30).layer(
+    layers::RetryLayer::times(3).layer(service)
+);
 
-// ❌ BAD: External configuration of tool internals
-agent.configure_tool("database", layers);
+// ❌ BAD: External configuration of tool internals (removed)
+// agent.configure_tool("database", layers);
 ```
 
 ### 2. Use Capabilities for Shared Resources
@@ -206,13 +290,19 @@ let metrics = registry.get("metrics").unwrap();
 
 ```rust
 // ✅ GOOD: Standard Tower composition
-ServiceBuilder::new()
-    .layer(TimeoutLayer::new(duration))
-    .layer(RetryLayer::new(policy))
-    .service(tool)
+let service = layers::TimeoutLayer::secs(30).layer(
+    layers::RetryLayer::times(3).layer(tool_service)
+);
 
-// ❌ BAD: Custom composition mechanisms
-tool.with_timeout(30).with_retry(3)
+// Or via ServiceBuilder
+use tower::ServiceBuilder;
+let service = ServiceBuilder::new()
+    .layer(layers::TimeoutLayer::secs(30))
+    .layer(layers::RetryLayer::times(3))
+    .service(tool_service);
+
+// ❌ BAD: Custom composition mechanisms (removed)
+// tool.with_timeout(30).with_retry(3)
 ```
 
 ### 4. Layer Order Matters
@@ -230,30 +320,49 @@ tool
 
 ## Examples
 
-### Simple Tool with Layers
+### Simple Agent with Layered Tools
 
 ```rust
-let calculator = FunctionTool::simple(
-    "calc",
-    "Calculator",
-    |input: String| calculate(input)
-)
-.layer(layers::boxed_timeout_secs(5))
-.layer(layers::boxed_retry_times(2));
+use openai_agents_rs::{Agent, FunctionTool, layers};
+use std::sync::Arc;
 
+// Create tool
+let calculator = Arc::new(FunctionTool::simple(
+    "calc",
+    "Calculator", 
+    |input: String| calculate(input)
+));
+
+// Service-based layering for advanced usage
+let service = <FunctionTool as Clone>::clone(&calculator).into_service::<DefaultEnv>();
+let layered_service = layers::TimeoutLayer::secs(5).layer(
+    layers::RetryLayer::times(2).layer(service)
+);
+
+// Agent with typed layers  
 let agent = Agent::simple("Bot", "Assistant")
-    .with_tool(Arc::new(calculator));
+    .with_tool(calculator)
+    .layer(layers::TimeoutLayer::secs(30));
 ```
 
 ### Tool as Tower Service
 
 ```rust
-let tool = FunctionTool::simple("upper", "Uppercase", |s: String| s.to_uppercase())
-    .into_service::<DefaultEnv>();
+use openai_agents_rs::{FunctionTool, tool_service::IntoToolService, layers};
+use tower::ServiceBuilder;
+use std::time::Duration;
 
-let service = ServiceBuilder::new()
-    .timeout(Duration::from_secs(1))
-    .service(tool);
+let tool = FunctionTool::simple("upper", "Uppercase", |s: String| s.to_uppercase());
+let service = tool.into_service::<DefaultEnv>();
+
+// Direct layer composition
+let layered = layers::TimeoutLayer::secs(1).layer(service);
+
+// Or via ServiceBuilder
+let service2 = tool.into_service::<DefaultEnv>();
+let composed = ServiceBuilder::new()
+    .layer(layers::TimeoutLayer::secs(1))
+    .service(service2);
 ```
 
 ### Custom Layer with Capabilities

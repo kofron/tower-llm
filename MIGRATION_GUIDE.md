@@ -2,6 +2,8 @@
 
 This guide explains the migration from the old context-based system to the new Tower-based architecture.
 
+> **Status**: This guide reflects the final Tower architecture after all migration phases are complete. All legacy APIs have been removed.
+
 ## What Changed
 
 ### Before: Multiple Ways to Modify Tool Behavior
@@ -24,10 +26,10 @@ Now there's one clear pattern:
 
 ## Migration Examples
 
-### Old Pattern: Agent Configures Tool Layers
+### Old Pattern: Agent Configures Tool Layers (REMOVED)
 
 ```rust
-// ❌ OLD: Agent reaches into tool configuration
+// ❌ REMOVED: Agent reaches into tool configuration
 let tool = Arc::new(FunctionTool::simple("db", "Database", |s| s));
 let agent = Agent::simple("Bot", "...")
     .with_tool(tool)
@@ -37,29 +39,36 @@ let agent = Agent::simple("Bot", "...")
     ]);
 ```
 
-### New Pattern: Tools Manage Themselves
+### New Pattern: Service-Based Composition
 
 ```rust
-// ✅ NEW: Tool manages its own layers
-let tool = FunctionTool::simple("db", "Database", |s| s)
-    .with_name("user_db")  // Optional custom name
-    .layer(layers::boxed_timeout_secs(30))
-    .layer(layers::boxed_retry_times(3));
+// ✅ NEW: Service-based layering 
+let tool = Arc::new(FunctionTool::simple("db", "Database", |s| s));
 
+// For advanced layering, use service composition
+let service = <FunctionTool as Clone>::clone(&tool).into_service::<DefaultEnv>();
+let layered = layers::TimeoutLayer::secs(30).layer(
+    layers::RetryLayer::times(3).layer(service)
+);
+
+// Agent uses tool directly
 let agent = Agent::simple("Bot", "...")
-    .with_tool(Arc::new(tool));
+    .with_tool(tool);
 ```
 
 ## Key Concepts
 
-### 1. LayeredTool
+### 1. Service-Based Tool Composition (Replaces LayeredTool)
 
-When you call `.layer()` on a tool, it returns a `LayeredTool` that wraps the original tool with its layers:
+LayeredTool has been removed. Tools now use uniform Tower service composition:
 
 ```rust
-let base_tool = FunctionTool::simple("test", "Test", |s| s);
-let layered_tool = base_tool.layer(layers::boxed_timeout_secs(5));
-// layered_tool is a LayeredTool that implements the Tool trait
+// Create base tool
+let base_tool = Arc::new(FunctionTool::simple("test", "Test", |s| s));
+
+// Convert to service and apply layers
+let service = <FunctionTool as Clone>::clone(&base_tool).into_service::<DefaultEnv>();
+let layered_service = layers::TimeoutLayer::secs(5).layer(service);
 ```
 
 ### 2. Tool Naming
@@ -77,23 +86,21 @@ assert_eq!(tool.name(), "custom_name");
 Each abstraction level manages only its own concerns:
 
 ```rust
-// Tool level - manages tool-specific policies
-let tool = DatabaseTool::new(db_pool)
-    .layer(TimeoutLayer::new(Duration::from_secs(30)))
-    .layer(RetryLayer::times(3));
+// Tool level - compose layers via service when needed
+let tool = Arc::new(DatabaseTool::new(db_pool));
+let service = tool.clone().into_service::<DefaultEnv>();
+let layered = layers::TimeoutLayer::secs(30).layer(
+    layers::RetryLayer::times(3).layer(service)
+);
 
-// Agent level - manages agent-specific policies
+// Agent level - manages agent-specific policies via typed layers
 let agent = Agent::simple("Bot", "...")
-    .with_tool(Arc::new(tool))
-    .with_agent_layers(vec![
-        layers::boxed_trace_all(),
-    ]);
+    .with_tool(tool)
+    .layer(layers::TracingLayer);
 
-// Run level - manages run-specific policies
+// Run level - manages run-specific policies  
 let config = RunConfig::default()
-    .with_run_layers(vec![
-        layers::boxed_global_timeout(300),
-    ]);
+    .layer(layers::TimeoutLayer::secs(300));
 ```
 
 ## Removed APIs
@@ -109,9 +116,25 @@ The following APIs have been removed:
 - `RunContextLayer` - Use run-level layers instead
 - `AgentContextLayer` - Use agent-level layers instead
 
-### Agent Tool Configuration
+### Agent Tool Configuration  
 
 - `Agent::with_tool_layers()` - Tools now manage their own layers
+- `with_agent_layers(vec![...])` - Use typed `.layer()` chaining instead
+- `with_run_layers(vec![...])` - Use typed `.layer()` chaining instead
+
+### LayeredTool System (Step 8 Removal)
+
+- `LayeredTool` struct - Use service composition via `.into_service().layer()`
+- `Tool::layer()` methods - Use service composition instead
+- `ErasedToolLayer` trait - Use typed `Layer<S>` implementations  
+- All `boxed_*` helpers - Use typed layers directly
+  - `boxed_timeout_secs()` → `TimeoutLayer::secs()`
+  - `boxed_retry_times()` → `RetryLayer::times()`
+  - `boxed_input_schema_*()` → `InputSchemaLayer::strict/lenient()`
+
+### Adapter System
+
+- `BaseToolService` - Tools implement `Service` directly via `.into_service()`
 
 ### Run Context Methods
 
@@ -162,14 +185,12 @@ impl ToolContext<MyCtx> for Counter {
 
 ```rust
 // Use a stateful layer at the appropriate level
-agent.with_agent_layers(vec![
-    layers::boxed_accumulator(initial_state),
-]);
+let agent = agent.layer(layers::AccumulatorLayer::new(initial_state));
 ```
 
 ### Tool-Specific Configuration
 
-**Old:**
+**Old (REMOVED):**
 
 ```rust
 agent.with_tool_layers("slow_api", vec![
@@ -181,10 +202,12 @@ agent.with_tool_layers("slow_api", vec![
 **New:**
 
 ```rust
-let slow_api = ApiTool::new(client)
-    .with_name("slow_api")
-    .layer(layers::boxed_timeout_secs(60))
-    .layer(layers::boxed_retry_times(5));
+let slow_api = Arc::new(ApiTool::new(client).with_name("slow_api"));
+// For advanced layering, use service composition
+let service = <ApiTool as Clone>::clone(&slow_api).into_service::<DefaultEnv>();
+let layered = layers::TimeoutLayer::secs(60).layer(
+    layers::RetryLayer::times(5).layer(service)
+);
 ```
 
 ## Benefits of the New Architecture
@@ -202,12 +225,16 @@ See `tests/tower_patterns.rs` for examples of testing tools with layers:
 ```rust
 #[test]
 fn test_tool_with_layers() {
-    let tool = FunctionTool::simple("test", "Test", |s| s)
-        .layer(layers::boxed_timeout_secs(5))
-        .layer(layers::boxed_retry_times(3));
+    let base_tool = Arc::new(FunctionTool::simple("test", "Test", |s| s));
+    
+    // Service composition for layered tools
+    let service = <FunctionTool as Clone>::clone(&base_tool).into_service::<DefaultEnv>();
+    let layered = layers::TimeoutLayer::secs(5).layer(
+        layers::RetryLayer::times(3).layer(service)
+    );
 
-    assert_eq!(tool.name(), "test");
-    // Tool carries its layers internally
+    assert_eq!(base_tool.name(), "test");
+    // Layering happens via service composition
 }
 ```
 
