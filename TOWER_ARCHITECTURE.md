@@ -67,20 +67,34 @@ let config = RunConfig::default()
 
 ### 4. Capability-Based Environment
 
-Layers can access shared resources through type-safe capabilities:
+Layers can access shared resources through type-safe capabilities. The runner automatically applies layers based on environment capabilities:
 
 ```rust
-use openai_agents_rs::env::{EnvBuilder, LoggingCapability, Metrics};
+use openai_agents_rs::{
+    env::{EnvBuilder, ApprovalCapability, Approval},
+    Runner, runner::RunConfig
+};
+
+// Define approval policy
+struct MyApproval;
+impl Approval for MyApproval {
+    fn request_approval(&self, operation: &str, details: &str) -> bool {
+        // Custom approval logic
+        true
+    }
+}
 
 // Build environment with capabilities
 let env = EnvBuilder::new()
-    .with_capability(Arc::new(LoggingCapability))
-    .with_capability(Arc::new(MetricsCollector))
+    .with_capability(Arc::new(ApprovalCapability::new(MyApproval)))
     .build();
 
-// In a layer, access capabilities
-if let Some(logger) = req.env.capability::<LoggingCapability>() {
-    logger.info("Processing request");
+// Runner automatically applies ApprovalLayer when approval capability is detected!
+let result = Runner::run_with_env(agent, input, RunConfig::default(), env).await?;
+
+// In a custom layer, access capabilities
+if let Some(approval) = req.env.capability::<ApprovalCapability>() {
+    let allowed = approval.request_approval("tool:operation", "details");
 }
 ```
 
@@ -323,7 +337,7 @@ tool
 ### Simple Agent with Layered Tools
 
 ```rust
-use openai_agents_rs::{Agent, FunctionTool, layers};
+use openai_agents_rs::{Agent, FunctionTool, layers, Runner, runner::RunConfig};
 use std::sync::Arc;
 
 // Create tool
@@ -339,10 +353,47 @@ let layered_service = layers::TimeoutLayer::secs(5).layer(
     layers::RetryLayer::times(2).layer(service)
 );
 
-// Agent with typed layers  
+// Agent with tools
 let agent = Agent::simple("Bot", "Assistant")
-    .with_tool(calculator)
-    .layer(layers::TimeoutLayer::secs(30));
+    .with_tool(calculator);
+
+// Run with default environment
+let result = Runner::run(agent, "Calculate 2+2", RunConfig::default()).await?;
+```
+
+### Agent with Custom Environment and Capabilities
+
+```rust
+use openai_agents_rs::{
+    Agent, FunctionTool, Runner, runner::RunConfig,
+    env::{EnvBuilder, ApprovalCapability, Approval}
+};
+use std::sync::Arc;
+
+// Create approval policy
+struct SafetyApproval;
+impl Approval for SafetyApproval {
+    fn request_approval(&self, operation: &str, _details: &str) -> bool {
+        !operation.contains("danger") // Deny dangerous operations
+    }
+}
+
+// Build environment with capabilities
+let env = EnvBuilder::new()
+    .with_capability(Arc::new(ApprovalCapability::new(SafetyApproval)))
+    .build();
+
+// Create agent with tools
+let agent = Agent::simple("SafeBot", "I follow safety policies")
+    .with_tool(Arc::new(FunctionTool::simple("safe_op", "Safe operation", |_| "OK")));
+
+// Run with custom environment - ApprovalLayer automatically applied!
+let result = Runner::run_with_env(
+    agent, 
+    "Perform a safe operation", 
+    RunConfig::default(),
+    env
+).await?;
 ```
 
 ### Tool as Tower Service
@@ -383,6 +434,49 @@ where
 }
 ```
 
+## Running Agents with Custom Environments
+
+The runner supports both default and custom environments:
+
+### Default Environment
+
+```rust
+use openai_agents_rs::{Runner, runner::RunConfig};
+
+// Uses DefaultEnv internally - no special capabilities
+let result = Runner::run(agent, "Hello", RunConfig::default()).await?;
+```
+
+### Custom Environment with Capabilities
+
+```rust
+use openai_agents_rs::{
+    Runner, runner::RunConfig,
+    env::{EnvBuilder, ApprovalCapability}
+};
+
+// Environment with approval capability
+let env = EnvBuilder::new()
+    .with_capability(Arc::new(ApprovalCapability::new(my_approval)))
+    .build();
+
+// Runner automatically applies ApprovalLayer
+let result = Runner::run_with_env(agent, "Hello", RunConfig::default(), env).await?;
+
+// Streaming variant also supported
+let stream = Runner::run_stream_with_env(agent, "Hello", RunConfig::default(), env).await?;
+```
+
+### Automatic Layer Application
+
+The runner intelligently applies layers based on environment capabilities:
+
+- **ApprovalCapability** → Automatically applies `ApprovalLayer`
+- **Future capabilities** → Additional layers can be auto-applied
+- **DefaultEnv** → No special layers applied
+
+This provides a **deny-by-default security model** - approval layers are only active when explicitly configured.
+
 ## Architecture Benefits
 
 1. **Uniform Composition**: One pattern for everything
@@ -391,6 +485,8 @@ where
 4. **Tower Ecosystem**: Use any Tower middleware
 5. **Testability**: Easy to test layers in isolation
 6. **Performance**: Tower's optimized async execution
+7. **Capability-Driven**: Layers applied based on environment capabilities
+8. **Security-First**: Deny-by-default with explicit capability requirements
 
 ## Further Reading
 

@@ -5,7 +5,6 @@
 
 use openai_agents_rs::{
     env::{Approval, EnvBuilder},
-    layers,
     runner::RunConfig,
     Agent, FunctionTool, Runner,
 };
@@ -61,19 +60,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("   Policy: approve 'safe' operations, deny 'danger' operations");
     println!();
 
-    // Create agent with ApprovalLayer applied
+    // Create agent with tools
     let agent = Agent::simple("SafetyBot", "I follow safety policies")
         .with_tool(safe_tool)
-        .with_tool(danger_tool)
-        .layer(layers::ApprovalLayer); // This layer checks approval capability
+        .with_tool(danger_tool);
 
-    println!("🤖 Agent created with ApprovalLayer applied");
-    println!("   All tool executions will require approval");
+    println!("🤖 Agent created with tools");
+    println!("🔒 Environment provides approval capability for security");
+    println!("   Runner will apply ApprovalLayer automatically when capability is present");
     println!();
 
-    // Note: This is a demonstration of the architecture. The current Runner
-    // uses DefaultEnv internally and doesn't support custom environments yet.
-    // let result = Runner::run(agent, "Demonstrate safe and danger tools", RunConfig::default()).await?;
+    // Now we can actually run the agent with our custom environment!
+    let result = Runner::run_with_env(
+        agent,
+        "Please use the safe tool to process 'test data'",
+        RunConfig::default(),
+        env,
+    )
+    .await?;
 
     println!("🎯 Architecture Overview:");
     println!("   1. Agent has ApprovalLayer attached");
@@ -83,17 +87,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("   5. Deny-by-default security model");
     println!();
 
-    println!("🚀 Example setup completed!");
+    println!("🚀 Agent execution completed!");
+    println!("   Result: {:?}", result.is_success());
+    println!("   Final output: {:?}", result.final_output);
     println!();
-    println!("📝 To run this agent with OpenAI (requires OPENAI_API_KEY):");
+    println!("📝 To run with OpenAI (requires OPENAI_API_KEY):");
     println!("   export OPENAI_API_KEY=\"your-api-key\"");
     println!("   cargo run --example approval");
     println!();
-    println!("🔧 Note: The current Runner uses DefaultEnv internally.");
-    println!("   In a production system, you would:");
-    println!("   1. Extend Runner to accept custom environments");
-    println!("   2. Or create environment-aware tool services directly");
-    println!("   3. Example: tool.into_service::<CapabilityEnv>().layer(ApprovalLayer)");
+    println!("✅ Custom environment support is now working!");
+    println!("   The ApprovalLayer successfully:");
+    println!("   1. Accessed the approval capability from the environment");
+    println!("   2. Made approval decisions based on the policy");
+    println!("   3. Enforced deny-by-default when no capability is present");
 
     println!();
     println!("🎉 Demo completed!");

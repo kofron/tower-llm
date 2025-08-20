@@ -202,14 +202,14 @@ impl RunConfig {
     }
 
     /// Attach dynamic run-scope policy layers (scope-agnostic, applied at run scope).
-    /// 
+    ///
     /// **Deprecated**: Use `.layer()` instead for type-safe composition.
-    /// 
+    ///
     /// # Migration
     /// ```rust,ignore
-    /// // Old: 
+    /// // Old:
     /// RunConfig::default().with_run_layers(vec![layers::boxed_timeout_secs(30)])
-    /// 
+    ///
     /// // New:
     /// RunConfig::default().layer(TimeoutLayer::secs(30))
     /// ```
@@ -223,7 +223,7 @@ impl RunConfig {
     }
 
     /// Apply a typed layer to this run config, returning a typed wrapper.
-    /// 
+    ///
     /// This is the preferred API over `with_run_layers()` as it provides
     /// compile-time type safety and follows Tower's fluent composition pattern.
     ///
@@ -231,7 +231,7 @@ impl RunConfig {
     /// ```rust,no_run
     /// use openai_agents_rs::{runner::RunConfig, service::{TimeoutLayer, RetryLayer}};
     /// use std::time::Duration;
-    /// 
+    ///
     /// let config = RunConfig::default()
     ///     .layer(TimeoutLayer::from_duration(Duration::from_secs(30)))
     ///     .layer(RetryLayer::times(3));
@@ -242,7 +242,7 @@ impl RunConfig {
 }
 
 /// A typed wrapper for a run config with layers applied.
-/// 
+///
 /// This follows Tower's `Layered` pattern, providing compile-time type safety
 /// for layer composition while maintaining the RunConfig interface.
 #[derive(Clone)]
@@ -256,7 +256,7 @@ impl<L, R> LayeredRunConfig<L, R> {
     pub fn new(layer: L, inner: R) -> Self {
         Self { layer, inner }
     }
-    
+
     /// Apply another layer, returning a new typed wrapper.
     pub fn layer<L2>(self, layer: L2) -> LayeredRunConfig<L2, Self> {
         LayeredRunConfig::new(layer, self)
@@ -289,28 +289,29 @@ impl RunConfigLike for RunConfig {
     fn max_turns(&self) -> Option<usize> {
         self.max_turns
     }
-    
+
     fn stream(&self) -> bool {
         self.stream
     }
-    
+
     fn session(&self) -> &Option<Arc<dyn crate::memory::Session>> {
         &self.session
     }
-    
+
     fn model_provider(&self) -> &Option<Arc<dyn crate::model::ModelProvider>> {
         &self.model_provider
     }
-    
+
     fn parallel_tools(&self) -> bool {
         self.parallel_tools
     }
-    
+
     fn max_concurrency(&self) -> Option<usize> {
         self.max_concurrency
     }
-    
-    fn run_layers(&self) -> &Vec<()> { // ErasedToolLayer removed in Step 8
+
+    fn run_layers(&self) -> &Vec<()> {
+        // ErasedToolLayer removed in Step 8
         &self.run_layers
     }
 }
@@ -319,28 +320,29 @@ impl<L, R: RunConfigLike> RunConfigLike for LayeredRunConfig<L, R> {
     fn max_turns(&self) -> Option<usize> {
         self.inner.max_turns()
     }
-    
+
     fn stream(&self) -> bool {
         self.inner.stream()
     }
-    
+
     fn session(&self) -> &Option<Arc<dyn crate::memory::Session>> {
         self.inner.session()
     }
-    
+
     fn model_provider(&self) -> &Option<Arc<dyn crate::model::ModelProvider>> {
         self.inner.model_provider()
     }
-    
+
     fn parallel_tools(&self) -> bool {
         self.inner.parallel_tools()
     }
-    
+
     fn max_concurrency(&self) -> Option<usize> {
         self.inner.max_concurrency()
     }
-    
-    fn run_layers(&self) -> &Vec<()> { // ErasedToolLayer removed in Step 8
+
+    fn run_layers(&self) -> &Vec<()> {
+        // ErasedToolLayer removed in Step 8
         self.inner.run_layers()
     }
 }
@@ -406,6 +408,52 @@ impl Runner {
         input: impl Into<String>,
         config: RunConfig,
     ) -> Result<RunResult> {
+        Self::run_with_env(agent, input, config, DefaultEnv).await
+    }
+
+    /// Executes an agent with a custom environment and returns the result.
+    ///
+    /// This method allows you to provide a custom environment with capabilities
+    /// that can be accessed by layers (e.g., ApprovalLayer requiring approval
+    /// capability). This enables the full Tower-based architecture with
+    /// capability-driven policies.
+    ///
+    /// # Arguments
+    ///
+    /// * `agent` - The [`Agent`] to be executed.
+    /// * `input` - The user's input to start the conversation.
+    /// * `config` - The [`RunConfig`] to control the execution.
+    /// * `env` - The custom environment providing capabilities.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use openai_agents_rs::{Agent, Runner, runner::RunConfig, env::EnvBuilder};
+    /// use std::sync::Arc;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let env = EnvBuilder::new()
+    ///     .with_capability(Arc::new(MyApprovalCapability))
+    ///     .build();
+    ///
+    /// let agent = Agent::simple("Bot", "I need approval")
+    ///     .layer(openai_agents_rs::layers::ApprovalLayer);
+    ///
+    /// let result = Runner::run_with_env(
+    ///     agent,
+    ///     "Do something that needs approval",
+    ///     RunConfig::default(),
+    ///     env
+    /// ).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn run_with_env<E: crate::env::Env>(
+        agent: Agent,
+        input: impl Into<String>,
+        config: RunConfig,
+        env: E,
+    ) -> Result<RunResult> {
         let input = input.into();
         info!(agent = %agent.name(), "Starting agent run");
 
@@ -427,9 +475,9 @@ impl Runner {
 
         messages.push(Message::user(input));
 
-        // Run the agent loop
+        // Run the agent loop with custom environment
         let (result, _state, _run_state) =
-            Self::run_loop(agent, messages, config.clone(), context.clone()).await?;
+            Self::run_loop_with_env(agent, messages, config.clone(), context.clone(), env).await?;
 
         // Save to session if configured
         if let Some(session) = &config.session {
@@ -469,6 +517,26 @@ impl Runner {
         input: impl Into<String>,
         config: RunConfig,
     ) -> Result<StreamingRunResult> {
+        Self::run_stream_with_env(agent, input, config, DefaultEnv).await
+    }
+
+    /// Executes an agent with a custom environment and returns a stream of events.
+    ///
+    /// Like `run_stream`, but allows you to provide a custom environment with
+    /// capabilities for use by layers.
+    ///
+    /// # Arguments
+    ///
+    /// * `agent` - The [`Agent`] to be executed.
+    /// * `input` - The user's input to start the conversation.
+    /// * `config` - The [`RunConfig`] to control the execution.
+    /// * `env` - The custom environment providing capabilities.
+    pub async fn run_stream_with_env<E: crate::env::Env + Clone>(
+        agent: Agent,
+        input: impl Into<String>,
+        config: RunConfig,
+        env: E,
+    ) -> Result<StreamingRunResult> {
         let mut stream_config = config;
         stream_config.stream = true;
 
@@ -478,7 +546,7 @@ impl Runner {
         // Spawn the run in a background task
         let input = input.into();
         tokio::spawn(async move {
-            let result = Self::run(agent, input, stream_config).await;
+            let result = Self::run_with_env(agent, input, stream_config, env).await;
 
             match result {
                 Ok(res) => {
@@ -506,6 +574,25 @@ impl Runner {
         mut messages: Vec<Message>,
         config: RunConfig,
         context: Arc<Mutex<TracingContext>>,
+    ) -> Result<(
+        RunResult,
+        Option<Box<dyn Any + Send>>, // per-agent contextual state
+        Option<Box<dyn Any + Send>>, // run-scoped state
+    )> {
+        Self::run_loop_with_env(agent, messages, config, context, DefaultEnv).await
+    }
+
+    /// The core logic for the agent's execution loop with custom environment.
+    ///
+    /// This private method manages the turn-by-turn interaction with the LLM,
+    /// handling tool calls, handoffs, and final responses. It propagates the
+    /// custom environment through tool requests for capability-based layers.
+    async fn run_loop_with_env<E: crate::env::Env>(
+        mut agent: Agent,
+        mut messages: Vec<Message>,
+        config: RunConfig,
+        context: Arc<Mutex<TracingContext>>,
+        env: E,
     ) -> Result<(
         RunResult,
         Option<Box<dyn Any + Send>>, // per-agent contextual state
@@ -736,47 +823,70 @@ impl Runner {
 
                             let mut stack = {
                                 // Use service-based tool path for Arc<dyn Tool>
-                                use tower::{util::BoxService, Layer};
-                                use crate::service::{InputSchemaLayer, ToolRequest, ToolResponse};
-                                use tower::BoxError;
                                 use crate::env::DefaultEnv;
+                                use crate::service::{InputSchemaLayer, ToolRequest, ToolResponse};
+                                use crate::tool::ToolResult;
                                 use std::future::Future;
                                 use std::pin::Pin;
-                                use crate::tool::ToolResult;
                                 use std::sync::Arc;
-                                
+                                use tower::BoxError;
+                                use tower::{util::BoxService, Layer};
+
                                 let schema = tool.parameters_schema();
                                 let tool_arc = tool.clone();
-                                
+
                                 // Create tool service directly for Arc<dyn Tool>
                                 #[derive(Clone)]
                                 struct ToolService {
                                     tool: Arc<dyn crate::tool::Tool>,
                                 }
-                                
+
                                 impl tower::Service<ToolRequest<DefaultEnv>> for ToolService {
                                     type Response = ToolResponse;
                                     type Error = BoxError;
-                                    type Future = Pin<Box<dyn Future<Output = std::result::Result<Self::Response, Self::Error>> + Send>>;
+                                    type Future = Pin<
+                                        Box<
+                                            dyn Future<
+                                                    Output = std::result::Result<
+                                                        Self::Response,
+                                                        Self::Error,
+                                                    >,
+                                                > + Send,
+                                        >,
+                                    >;
 
-                                    fn poll_ready(&mut self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<std::result::Result<(), Self::Error>> {
+                                    fn poll_ready(
+                                        &mut self,
+                                        _cx: &mut std::task::Context<'_>,
+                                    ) -> std::task::Poll<std::result::Result<(), Self::Error>>
+                                    {
                                         std::task::Poll::Ready(Ok(()))
                                     }
 
-                                    fn call(&mut self, req: ToolRequest<DefaultEnv>) -> Self::Future {
+                                    fn call(
+                                        &mut self,
+                                        req: ToolRequest<DefaultEnv>,
+                                    ) -> Self::Future {
                                         let tool = self.tool.clone();
                                         Box::pin(async move {
                                             match tool.execute(req.arguments).await {
-                                                Ok(ToolResult { output, is_final, error }) => {
+                                                Ok(ToolResult {
+                                                    output,
+                                                    is_final,
+                                                    error,
+                                                }) => {
                                                     if let Some(err) = error {
                                                         Ok(ToolResponse {
                                                             output: serde_json::Value::Null,
                                                             error: Some(err),
-                                                            effect: crate::service::Effect::Continue,
+                                                            effect:
+                                                                crate::service::Effect::Continue,
                                                         })
                                                     } else {
                                                         let effect = if is_final {
-                                                            crate::service::Effect::Final(output.clone())
+                                                            crate::service::Effect::Final(
+                                                                output.clone(),
+                                                            )
                                                         } else {
                                                             crate::service::Effect::Continue
                                                         };
@@ -786,30 +896,29 @@ impl Runner {
                                                             effect,
                                                         })
                                                     }
-                                                },
-                                                Err(e) => {
-                                                    Ok(ToolResponse {
-                                                        output: serde_json::Value::Null,
-                                                        error: Some(e.to_string()),
-                                                        effect: crate::service::Effect::Continue,
-                                                    })
                                                 }
+                                                Err(e) => Ok(ToolResponse {
+                                                    output: serde_json::Value::Null,
+                                                    error: Some(e.to_string()),
+                                                    effect: crate::service::Effect::Continue,
+                                                }),
                                             }
                                         })
                                     }
                                 }
-                                
+
                                 let tool_service = ToolService { tool: tool_arc };
-                                
+
                                 // Add default schema validation (to be moved to tool constructors in Step 6)
-                                let with_schema = InputSchemaLayer::lenient(schema).layer(tool_service);
+                                let with_schema =
+                                    InputSchemaLayer::lenient(schema).layer(tool_service);
                                 BoxService::new(with_schema)
                             };
                             // Step 8: LayeredTool and ErasedToolLayer removed - no dynamic layer application needed
                             // All layering now happens via typed .layer() composition at tool/agent/run creation time
                             // Apply layers Tool → Agent → Run (inner-to-outer) for runtime order Run → Agent → Tool → Base
                             // Tool layers applied first (innermost, closest to base) - no longer applied dynamically
-                            // Agent layers wrap tool layers - no longer applied dynamically  
+                            // Agent layers wrap tool layers - no longer applied dynamically
                             // Run layers wrap everything (outermost) - no longer applied dynamically
                             let req = ToolRequest::<DefaultEnv> {
                                 env: DefaultEnv,
@@ -905,6 +1014,7 @@ impl Runner {
                         .map(|n| std::sync::Arc::new(Semaphore::new(n)));
                     let run_layers_clone = config.run_layers.clone();
                     let agent_layers_clone_outer = agent.config.agent_layers.clone();
+                    let env_clone_outer = env.clone();
                     let futures_vec = response
                         .tool_calls
                         .iter()
@@ -924,6 +1034,7 @@ impl Runner {
                             let semaphore = semaphore.clone();
                             let run_layers_clone = run_layers_clone.clone();
                             let agent_layers_clone = agent_layers_clone_outer.clone();
+                            let env_clone = env_clone_outer.clone();
                             async move {
                                 let _permit = if let Some(sem) = semaphore {
                                     Some(sem.acquire_owned().await.expect("semaphore"))
@@ -934,96 +1045,30 @@ impl Runner {
                                     let span =
                                         ToolSpan::new(context.clone(), name.clone(), args.clone());
 
-                                    // LayeredTool removed in Step 8: Tools now use uniform Tower service composition  
+                                    // LayeredTool removed in Step 8: Tools now use uniform Tower service composition
                                     // No per-tool layers extracted; all layering happens via .into_service().layer(...)
                                     let tool_layers: Vec<()> = Vec::new();
 
-                                    let mut stack = {
-                                        // Use service-based tool path for Arc<dyn Tool>
-                                        use tower::{util::BoxService, Layer};
-                                        use crate::service::{InputSchemaLayer, ToolRequest, ToolResponse};
-                                use tower::BoxError;
-                                        use crate::env::DefaultEnv;
-                                        use std::future::Future;
-                                        use std::pin::Pin;
-                                        use crate::tool::ToolResult;
-                                        use std::sync::Arc;
-                                        
-                                        let schema = tool.parameters_schema();
-                                        let tool_arc = tool.clone();
-                                        
-                                        // Create tool service directly for Arc<dyn Tool>
-                                        #[derive(Clone)]
-                                        struct ToolService {
-                                            tool: Arc<dyn crate::tool::Tool>,
-                                        }
-                                        
-                                        impl tower::Service<ToolRequest<DefaultEnv>> for ToolService {
-                                            type Response = ToolResponse;
-                                            type Error = BoxError;
-                                            type Future = Pin<Box<dyn Future<Output = std::result::Result<Self::Response, Self::Error>> + Send>>;
-
-                                            fn poll_ready(&mut self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<std::result::Result<(), Self::Error>> {
-                                                std::task::Poll::Ready(Ok(()))
-                                            }
-
-                                            fn call(&mut self, req: ToolRequest<DefaultEnv>) -> Self::Future {
-                                                let tool = self.tool.clone();
-                                                Box::pin(async move {
-                                                    match tool.execute(req.arguments).await {
-                                                        Ok(ToolResult { output, is_final, error }) => {
-                                                            if let Some(err) = error {
-                                                                Ok(ToolResponse {
-                                                                    output: serde_json::Value::Null,
-                                                                    error: Some(err),
-                                                                    effect: crate::service::Effect::Continue,
-                                                                })
-                                                            } else {
-                                                                let effect = if is_final {
-                                                                    crate::service::Effect::Final(output.clone())
-                                                                } else {
-                                                                    crate::service::Effect::Continue
-                                                                };
-                                                                Ok(ToolResponse {
-                                                                    output,
-                                                                    error: None,
-                                                                    effect,
-                                                                })
-                                                            }
-                                                        },
-                                                        Err(e) => {
-                                                            Ok(ToolResponse {
-                                                                output: serde_json::Value::Null,
-                                                                error: Some(e.to_string()),
-                                                                effect: crate::service::Effect::Continue,
-                                                            })
-                                                        }
-                                                    }
-                                                })
-                                            }
-                                        }
-                                        
-                                        let tool_service = ToolService { tool: tool_arc };
-                                        
-                                        // Add default schema validation (to be moved to tool constructors in Step 6)
-                                        let with_schema = InputSchemaLayer::lenient(schema).layer(tool_service);
-                                        BoxService::new(with_schema)
-                                    };
+                                    let mut stack =
+                                        Self::create_tool_service_stack::<E>(&tool, &env_clone);
                                     // Step 8: LayeredTool and ErasedToolLayer removed - no dynamic layer application needed
                                     // All layering now happens via typed .layer() composition at tool/agent/run creation time
                                     // Apply layers Tool → Agent → Run (inner-to-outer) for runtime order Run → Agent → Tool → Base
                                     // Tool layers applied first (innermost, closest to base) - no longer applied dynamically
-                                    // Agent layers wrap tool layers - no longer applied dynamically  
+                                    // Agent layers wrap tool layers - no longer applied dynamically
                                     // Run layers wrap everything (outermost) - no longer applied dynamically
-                                    let req = ToolRequest::<DefaultEnv> {
-                                        env: DefaultEnv,
+                                    let req = ToolRequest::<E> {
+                                        env: env_clone.clone(),
                                         run_id: run_id_value.clone(),
                                         agent: agent_name,
                                         tool_call_id: id.clone(),
                                         tool_name: name.clone(),
                                         arguments: args.clone(),
                                     };
-                                    let out: std::result::Result<crate::service::ToolResponse, tower::BoxError> = stack.oneshot(req).await;
+                                    let out: std::result::Result<
+                                        crate::service::ToolResponse,
+                                        tower::BoxError,
+                                    > = stack.oneshot(req).await;
                                     match &out {
                                         Ok(_) => span.success(),
                                         Err(e) => span.error(e.to_string()),
@@ -1123,6 +1168,109 @@ impl Runner {
 
             // Complete the agent span if not already completed
             agent_span.complete();
+        }
+    }
+
+    /// Helper method to create a tool service stack generic over environment type.
+    ///
+    /// This creates the service stack that was previously in build_tool_stack,
+    /// but now it's environment-generic and applies layers based on environment capabilities.
+    fn create_tool_service_stack<E: crate::env::Env>(
+        tool: &Arc<dyn crate::tool::Tool>,
+        env: &E, // Environment used to determine which layers to apply
+    ) -> tower::util::BoxService<
+        crate::service::ToolRequest<E>,
+        crate::service::ToolResponse,
+        tower::BoxError,
+    > {
+        use crate::service::{InputSchemaLayer, ToolRequest, ToolResponse, ApprovalLayer};
+        use crate::tool::ToolResult;
+        use std::future::Future;
+        use std::pin::Pin;
+        use std::sync::Arc;
+        use tower::BoxError;
+        use tower::{util::BoxService, Layer};
+
+        let schema = tool.parameters_schema();
+        let tool_arc = tool.clone();
+
+        // Create tool service directly for Arc<dyn Tool>, generic over environment
+        #[derive(Clone)]
+        struct ToolService<E> {
+            tool: Arc<dyn crate::tool::Tool>,
+            _phantom: std::marker::PhantomData<E>,
+        }
+
+        impl<E: crate::env::Env> tower::Service<ToolRequest<E>> for ToolService<E> {
+            type Response = ToolResponse;
+            type Error = BoxError;
+            type Future = Pin<
+                Box<dyn Future<Output = std::result::Result<Self::Response, Self::Error>> + Send>,
+            >;
+
+            fn poll_ready(
+                &mut self,
+                _cx: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<std::result::Result<(), Self::Error>> {
+                std::task::Poll::Ready(Ok(()))
+            }
+
+            fn call(&mut self, req: ToolRequest<E>) -> Self::Future {
+                let tool = self.tool.clone();
+                Box::pin(async move {
+                    match tool.execute(req.arguments).await {
+                        Ok(ToolResult {
+                            output,
+                            is_final,
+                            error,
+                        }) => {
+                            if let Some(err) = error {
+                                Ok(ToolResponse {
+                                    output: serde_json::Value::Null,
+                                    error: Some(err),
+                                    effect: crate::service::Effect::Continue,
+                                })
+                            } else {
+                                let effect = if is_final {
+                                    crate::service::Effect::Final(output.clone())
+                                } else {
+                                    crate::service::Effect::Continue
+                                };
+                                Ok(ToolResponse {
+                                    output,
+                                    error: None,
+                                    effect,
+                                })
+                            }
+                        }
+                        Err(e) => Ok(ToolResponse {
+                            output: serde_json::Value::Null,
+                            error: Some(e.to_string()),
+                            effect: crate::service::Effect::Continue,
+                        }),
+                    }
+                })
+            }
+        }
+
+        let tool_service = ToolService::<E> {
+            tool: tool_arc,
+            _phantom: std::marker::PhantomData,
+        };
+
+        // Apply layers based on environment capabilities - this is the Tower way!
+        // Start with schema validation (to be moved to tool constructors in Step 6)
+        let with_schema = InputSchemaLayer::lenient(schema).layer(tool_service);
+        
+        // Auto-apply ApprovalLayer if environment has approval capability
+        // This demonstrates capability-driven layer application
+        if env.capability::<crate::env::ApprovalCapability>().is_some() 
+            || env.capability::<crate::env::AutoApprove>().is_some() 
+            || env.capability::<crate::env::ManualApproval>().is_some() {
+            let with_approval = ApprovalLayer.layer(with_schema);
+            BoxService::new(with_approval)
+        } else {
+            BoxService::new(with_schema)
         }
     }
 }
@@ -1230,18 +1378,17 @@ mod tests {
 
     #[test]
     fn test_runconfig_layer_chaining_compiles() {
-        use crate::service::{TimeoutLayer, RetryLayer};
+        use crate::service::{RetryLayer, TimeoutLayer};
         use std::time::Duration;
 
         // Test that RunConfig layer chaining compiles and can be chained
         let config = RunConfig::default()
             .layer(TimeoutLayer::from_duration(Duration::from_secs(30)))
             .layer(RetryLayer::times(3));
-            
+
         // Test double layering compiles
-        let double_layered = config
-            .layer(TimeoutLayer::from_duration(Duration::from_secs(60)));
-            
+        let double_layered = config.layer(TimeoutLayer::from_duration(Duration::from_secs(60)));
+
         // Verify it's a layered config (type check passes)
         let _: LayeredRunConfig<_, _> = double_layered;
     }
@@ -1249,18 +1396,115 @@ mod tests {
     #[tokio::test]
     async fn test_runner_uses_service_tools() {
         use crate::tool::FunctionTool;
-        
+
         // Create a simple tool
-        let tool = Arc::new(FunctionTool::simple(
-            "echo", 
-            "Echoes input", 
-            |s: String| s.to_uppercase()
-        ));
-        
-        let agent = Agent::simple("ServiceAgent", "I use service-based tools")
-            .with_tool(tool);
+        let tool = Arc::new(FunctionTool::simple("echo", "Echoes input", |s: String| {
+            s.to_uppercase()
+        }));
+
+        let agent = Agent::simple("ServiceAgent", "I use service-based tools").with_tool(tool);
 
         // Mock provider that generates one tool call then finishes
+        struct MockP {
+            call_count: std::sync::atomic::AtomicUsize,
+        }
+        impl MockP {
+            fn new() -> Self {
+                Self {
+                    call_count: std::sync::atomic::AtomicUsize::new(0),
+                }
+            }
+        }
+        #[async_trait::async_trait]
+        impl crate::model::ModelProvider for MockP {
+            async fn complete(
+                &self,
+                _messages: Vec<crate::items::Message>,
+                _tools: Vec<std::sync::Arc<dyn crate::tool::Tool>>,
+                _temperature: Option<f32>,
+                _max_tokens: Option<u32>,
+            ) -> crate::error::Result<(crate::items::ModelResponse, crate::usage::Usage)>
+            {
+                let count = self
+                    .call_count
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+                if count == 0 {
+                    // First call: return a tool call to test service integration
+                    let tool_call = crate::items::ToolCall {
+                        id: "test_1".to_string(),
+                        name: "echo".to_string(),
+                        arguments: serde_json::json!({"input": "hello"}),
+                    };
+                    Ok((
+                        crate::items::ModelResponse::new_tool_calls(vec![tool_call]),
+                        crate::usage::Usage::new(10, 20),
+                    ))
+                } else {
+                    // Subsequent calls: return a final message
+                    Ok((
+                        crate::items::ModelResponse::new_message(
+                            "Tool execution completed successfully!",
+                        ),
+                        crate::usage::Usage::new(5, 10),
+                    ))
+                }
+            }
+            fn model_name(&self) -> &str {
+                "test-service-model"
+            }
+        }
+
+        let provider = Arc::new(MockP::new());
+        let config = RunConfig {
+            model_provider: Some(provider),
+            ..Default::default()
+        };
+
+        // This test verifies that the runner successfully uses service-based tools
+        // without any BaseToolService adapter
+        let result = Runner::run(agent, "test service tools", config).await;
+
+        // The test passes if execution completes successfully using the service path
+        if let Err(e) = &result {
+            println!("Runner error: {:?}", e);
+        }
+        assert!(result.is_ok());
+        let result = result.unwrap();
+        assert!(result.is_success());
+
+        // Should have tool call and tool output (proving service path worked)
+        assert!(result
+            .items
+            .iter()
+            .any(|item| matches!(item, RunItem::ToolCall(_))));
+        assert!(result
+            .items
+            .iter()
+            .any(|item| matches!(item, RunItem::ToolOutput(_))));
+    }
+
+    #[tokio::test]
+    async fn test_runner_with_custom_env_approval_denied() {
+        use crate::env::{EnvBuilder, ApprovalCapability, Approval};
+        use crate::tool::FunctionTool;
+        
+        // Create a test approval that always denies
+        #[derive(Default)]
+        struct DenyAllApproval;
+        impl Approval for DenyAllApproval {
+            fn request_approval(&self, _operation: &str, _details: &str) -> bool {
+                false // Always deny
+            }
+        }
+        
+        let env = EnvBuilder::new()
+            .with_capability(Arc::new(ApprovalCapability::new(DenyAllApproval)))
+            .build();
+        
+        let tool = Arc::new(FunctionTool::simple("test", "Test tool", |s: String| s));
+        let agent = Agent::simple("TestAgent", "I test approval").with_tool(tool);
+        
         struct MockP {
             call_count: std::sync::atomic::AtomicUsize,
         }
@@ -1284,10 +1528,95 @@ mod tests {
                 let count = self.call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 
                 if count == 0 {
-                    // First call: return a tool call to test service integration
+                    // First call: return a tool call that should be denied
                     let tool_call = crate::items::ToolCall {
                         id: "test_1".to_string(),
-                        name: "echo".to_string(),
+                        name: "test".to_string(),
+                        arguments: serde_json::json!({"input": "test"}),
+                    };
+                    Ok((
+                        crate::items::ModelResponse::new_tool_calls(vec![tool_call]),
+                        crate::usage::Usage::new(10, 20),
+                    ))
+                } else {
+                    // Subsequent calls: return final message after seeing the denial
+                    Ok((
+                        crate::items::ModelResponse::new_message("I see the tool was denied access."),
+                        crate::usage::Usage::new(5, 10),
+                    ))
+                }
+            }
+            fn model_name(&self) -> &str {
+                "test-model"
+            }
+        }
+        
+        let config = RunConfig {
+            model_provider: Some(Arc::new(MockP::new())),
+            ..Default::default()
+        };
+
+        let result = Runner::run_with_env(agent, "test approval", config, env).await.unwrap();
+        
+        // Should have a tool call that was denied
+        assert!(result.items.iter().any(|item| matches!(item, RunItem::ToolCall(_))));
+        assert!(result.items.iter().any(|item| {
+            matches!(item, RunItem::ToolOutput(output) if output.error.as_deref() == Some("approval denied"))
+        }));
+    }
+
+    #[tokio::test]
+    async fn test_runner_with_custom_env_approval_allowed() {
+        use crate::env::{EnvBuilder, ApprovalCapability, Approval};
+        use crate::tool::FunctionTool;
+        
+        // Create a test approval that always approves
+        #[derive(Default)]
+        struct ApproveAllApproval;
+        impl Approval for ApproveAllApproval {
+            fn request_approval(&self, _operation: &str, _details: &str) -> bool {
+                true // Always approve
+            }
+        }
+        
+        let env = EnvBuilder::new()
+            .with_capability(Arc::new(ApprovalCapability::new(ApproveAllApproval)))
+            .build();
+        
+        let tool = Arc::new(FunctionTool::simple(
+            "test", 
+            "Test tool", 
+            |s: String| format!("processed: {}", s)
+        ));
+        let agent = Agent::simple("TestAgent", "I test approval").with_tool(tool);
+        
+        struct MockP {
+            call_count: std::sync::atomic::AtomicUsize,
+        }
+        impl MockP {
+            fn new() -> Self {
+                Self {
+                    call_count: std::sync::atomic::AtomicUsize::new(0),
+                }
+            }
+        }
+        #[async_trait::async_trait]
+        impl crate::model::ModelProvider for MockP {
+            async fn complete(
+                &self,
+                _messages: Vec<crate::items::Message>,
+                _tools: Vec<std::sync::Arc<dyn crate::tool::Tool>>,
+                _temperature: Option<f32>,
+                _max_tokens: Option<u32>,
+            ) -> crate::error::Result<(crate::items::ModelResponse, crate::usage::Usage)>
+            {
+                let count = self.call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                
+                if count == 0 {
+                    // First call: return a tool call that should be approved
+                    let tool_call = crate::items::ToolCall {
+                        id: "test_1".to_string(),
+                        name: "test".to_string(),
                         arguments: serde_json::json!({"input": "hello"}),
                     };
                     Ok((
@@ -1297,42 +1626,98 @@ mod tests {
                 } else {
                     // Subsequent calls: return a final message
                     Ok((
-                        crate::items::ModelResponse::new_message("Tool execution completed successfully!"),
+                        crate::items::ModelResponse::new_message("Success!"),
                         crate::usage::Usage::new(5, 10),
                     ))
                 }
             }
             fn model_name(&self) -> &str {
-                "test-service-model"
+                "test-model"
             }
         }
-
-        let provider = Arc::new(MockP::new());
+        
         let config = RunConfig {
-            model_provider: Some(provider),
+            model_provider: Some(Arc::new(MockP::new())),
             ..Default::default()
         };
 
-        // This test verifies that the runner successfully uses service-based tools
-        // without any BaseToolService adapter
-        let result = Runner::run(agent, "test service tools", config).await;
-        
-        // The test passes if execution completes successfully using the service path
-        if let Err(e) = &result {
-            println!("Runner error: {:?}", e);
-        }
-        assert!(result.is_ok());
-        let result = result.unwrap();
+        let result = Runner::run_with_env(agent, "test approval", config, env).await.unwrap();
         assert!(result.is_success());
         
-        // Should have tool call and tool output (proving service path worked)
-        assert!(result
-            .items
-            .iter()
-            .any(|item| matches!(item, RunItem::ToolCall(_))));
-        assert!(result
-            .items
-            .iter()
-            .any(|item| matches!(item, RunItem::ToolOutput(_))));
+        // Should have successful tool execution (no error)
+        assert!(result.items.iter().any(|item| matches!(item, RunItem::ToolCall(_))));
+        assert!(result.items.iter().any(|item| {
+            matches!(item, RunItem::ToolOutput(output) if output.error.is_none() && output.output.as_str() == Some("processed: hello"))
+        }));
+    }
+
+    #[tokio::test]
+    async fn test_runner_without_approval_capability_auto_applies_layer() {
+        use crate::env::DefaultEnv;
+        use crate::tool::FunctionTool;
+        
+        // Test that DefaultEnv (no approval capability) results in no ApprovalLayer applied
+        let tool = Arc::new(FunctionTool::simple("test", "Test tool", |s: String| s));
+        let agent = Agent::simple("TestAgent", "I test no approval").with_tool(tool);
+        
+        struct MockP {
+            call_count: std::sync::atomic::AtomicUsize,
+        }
+        impl MockP {
+            fn new() -> Self {
+                Self {
+                    call_count: std::sync::atomic::AtomicUsize::new(0),
+                }
+            }
+        }
+        #[async_trait::async_trait]
+        impl crate::model::ModelProvider for MockP {
+            async fn complete(
+                &self,
+                _messages: Vec<crate::items::Message>,
+                _tools: Vec<std::sync::Arc<dyn crate::tool::Tool>>,
+                _temperature: Option<f32>,
+                _max_tokens: Option<u32>,
+            ) -> crate::error::Result<(crate::items::ModelResponse, crate::usage::Usage)>
+            {
+                let count = self.call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                
+                if count == 0 {
+                    // First call: return a tool call
+                    let tool_call = crate::items::ToolCall {
+                        id: "test_1".to_string(),
+                        name: "test".to_string(),
+                        arguments: serde_json::json!({"input": "test"}),
+                    };
+                    Ok((
+                        crate::items::ModelResponse::new_tool_calls(vec![tool_call]),
+                        crate::usage::Usage::new(10, 20),
+                    ))
+                } else {
+                    // Subsequent calls: return final message
+                    Ok((
+                        crate::items::ModelResponse::new_message("Tool executed successfully without approval layer."),
+                        crate::usage::Usage::new(5, 10),
+                    ))
+                }
+            }
+            fn model_name(&self) -> &str {
+                "test-model"
+            }
+        }
+        
+        let config = RunConfig {
+            model_provider: Some(Arc::new(MockP::new())),
+            ..Default::default()
+        };
+
+        // Use DefaultEnv (no approval capability) - should work without ApprovalLayer being applied
+        let result = Runner::run_with_env(agent, "test no approval", config, DefaultEnv).await.unwrap();
+        
+        // Should execute successfully since DefaultEnv doesn't trigger ApprovalLayer application
+        assert!(result.items.iter().any(|item| matches!(item, RunItem::ToolCall(_))));
+        assert!(result.items.iter().any(|item| {
+            matches!(item, RunItem::ToolOutput(output) if output.error.is_none())
+        }));
     }
 }
