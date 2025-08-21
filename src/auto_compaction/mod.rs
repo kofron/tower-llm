@@ -309,58 +309,82 @@ where
     P::Future: Send + 'static,
     C: TokenCounter + 'static,
 {
-    /// Check if messages have orphaned tool calls (tool calls without responses)
-    fn has_orphaned_tool_calls(messages: &[ChatCompletionRequestMessage]) -> bool {
-        // Check if the last assistant message has tool calls without responses
-        for (i, msg) in messages.iter().enumerate().rev() {
-            if let ChatCompletionRequestMessage::Assistant(asst) = msg {
-                if let Some(tool_calls) = &asst.tool_calls {
-                    if !tool_calls.is_empty() {
-                        // Check if there are tool responses after this
-                        for msg in messages.iter().skip(i + 1) {
-                            if matches!(msg, ChatCompletionRequestMessage::Tool(_)) {
-                                return false; // Found responses, not orphaned
-                            }
-                        }
-                        return true; // No responses found, orphaned
-                    }
-                }
-            }
-        }
-        false
-    }
+    /// Find all orphaned tool calls in the conversation
+    fn find_orphaned_tool_calls(messages: &[ChatCompletionRequestMessage]) -> Vec<usize> {
+        let mut orphaned_indices = Vec::new();
 
-    /// Extract orphaned tool calls from messages
-    fn extract_orphaned_tool_calls(
-        messages: Vec<ChatCompletionRequestMessage>,
-    ) -> (
-        Vec<ChatCompletionRequestMessage>,
-        Option<ChatCompletionRequestMessage>,
-    ) {
-        // Find the last assistant message with tool calls
-        for (i, msg) in messages.iter().enumerate().rev() {
+        for (i, msg) in messages.iter().enumerate() {
             if let ChatCompletionRequestMessage::Assistant(asst) = msg {
                 if let Some(tool_calls) = &asst.tool_calls {
                     if !tool_calls.is_empty() {
-                        // Check if orphaned (no tool responses after)
-                        let mut has_responses = false;
-                        for msg in messages.iter().skip(i + 1) {
-                            if matches!(msg, ChatCompletionRequestMessage::Tool(_)) {
-                                has_responses = true;
+                        // Check if all tool calls have corresponding responses
+                        let mut all_calls_have_responses = true;
+                        for tool_call in tool_calls {
+                            let mut found_response = false;
+                            // Look for a tool response with matching ID after this message
+                            for subsequent_msg in messages.iter().skip(i + 1) {
+                                if let ChatCompletionRequestMessage::Tool(tool_msg) = subsequent_msg
+                                {
+                                    if tool_msg.tool_call_id == tool_call.id {
+                                        found_response = true;
+                                        break;
+                                    }
+                                }
+                                // Stop looking if we hit another assistant message (conversation moved on)
+                                if matches!(
+                                    subsequent_msg,
+                                    ChatCompletionRequestMessage::Assistant(_)
+                                ) {
+                                    break;
+                                }
+                            }
+                            if !found_response {
+                                all_calls_have_responses = false;
                                 break;
                             }
                         }
 
-                        if !has_responses {
-                            // Extract everything except the orphaned message
-                            let cleaned = messages[..i].to_vec();
-                            return (cleaned, Some(messages[i].clone()));
+                        if !all_calls_have_responses {
+                            orphaned_indices.push(i);
                         }
                     }
                 }
             }
         }
-        (messages, None)
+
+        orphaned_indices
+    }
+
+    /// Check if messages have orphaned tool calls (tool calls without responses)
+    fn has_orphaned_tool_calls(messages: &[ChatCompletionRequestMessage]) -> bool {
+        !Self::find_orphaned_tool_calls(messages).is_empty()
+    }
+
+    /// Remove all orphaned tool call messages and return them separately
+    fn extract_all_orphaned_tool_calls(
+        messages: Vec<ChatCompletionRequestMessage>,
+    ) -> (
+        Vec<ChatCompletionRequestMessage>,
+        Vec<(usize, ChatCompletionRequestMessage)>,
+    ) {
+        let orphaned_indices = Self::find_orphaned_tool_calls(&messages);
+
+        if orphaned_indices.is_empty() {
+            return (messages, Vec::new());
+        }
+
+        let mut cleaned = Vec::new();
+        let mut orphaned = Vec::new();
+
+        for (i, msg) in messages.into_iter().enumerate() {
+            if orphaned_indices.contains(&i) {
+                orphaned.push((i, msg));
+            } else {
+                cleaned.push(msg);
+            }
+        }
+
+        (cleaned, orphaned)
     }
 
     /// Compact messages based on the configured strategy
@@ -369,42 +393,60 @@ where
         messages: Vec<ChatCompletionRequestMessage>,
     ) -> Result<Vec<ChatCompletionRequestMessage>, BoxError> {
         // Handle orphaned tool calls based on strategy
-        let (messages_to_compact, orphaned_tool_call) = if Self::has_orphaned_tool_calls(&messages)
+        let (messages_to_compact, orphaned_tool_calls) = if Self::has_orphaned_tool_calls(&messages)
         {
             match self.policy.orphaned_tool_call_strategy {
                 OrphanedToolCallStrategy::DropAndReappend => {
-                    tracing::debug!("Detected orphaned tool calls, dropping and will re-append after compaction");
-                    Self::extract_orphaned_tool_calls(messages)
+                    let orphaned_count = Self::find_orphaned_tool_calls(&messages).len();
+                    tracing::debug!("Detected {} orphaned tool call message(s), dropping and will re-append after compaction", orphaned_count);
+                    Self::extract_all_orphaned_tool_calls(messages)
                 }
                 OrphanedToolCallStrategy::ExcludeFromCompaction => {
                     tracing::debug!("Detected orphaned tool calls, excluding from compaction");
-                    // Adjust range to exclude the orphaned message
-                    // This will be handled by adjusting the range below
-                    (messages, None)
+                    // For this strategy, we keep orphaned messages but exclude them from compaction
+                    // This is handled by keeping all messages and adjusting the range
+                    (messages, Vec::new())
                 }
                 OrphanedToolCallStrategy::AddPlaceholderResponses => {
                     tracing::debug!("Detected orphaned tool calls, adding placeholder responses");
-                    // Add placeholder tool responses
+                    // Add placeholder tool responses for all orphaned tool calls
                     let mut fixed_messages = messages.clone();
-                    if let Some(ChatCompletionRequestMessage::Assistant(asst)) = messages.last() {
-                        if let Some(tool_calls) = &asst.tool_calls {
-                            for tool_call in tool_calls {
-                                let placeholder = ChatCompletionRequestToolMessageArgs::default()
-                                    .content("[Pending tool execution]")
-                                    .tool_call_id(&tool_call.id)
-                                    .build()?;
-                                fixed_messages.push(placeholder.into());
+                    let orphaned_indices = Self::find_orphaned_tool_calls(&messages);
+
+                    // Process in reverse order to maintain indices
+                    for &idx in orphaned_indices.iter().rev() {
+                        if let ChatCompletionRequestMessage::Assistant(asst) = &messages[idx] {
+                            if let Some(tool_calls) = &asst.tool_calls {
+                                // Insert placeholder responses right after the assistant message
+                                let mut placeholders = Vec::new();
+                                for tool_call in tool_calls {
+                                    let placeholder =
+                                        ChatCompletionRequestToolMessageArgs::default()
+                                            .content("[Pending tool execution]")
+                                            .tool_call_id(&tool_call.id)
+                                            .build()?;
+                                    placeholders.push(placeholder.into());
+                                }
+                                // Insert all placeholders after the assistant message
+                                for (i, placeholder) in placeholders.into_iter().enumerate() {
+                                    fixed_messages.insert(idx + 1 + i, placeholder);
+                                }
                             }
                         }
                     }
-                    (fixed_messages, None)
+                    (fixed_messages, Vec::new())
                 }
                 OrphanedToolCallStrategy::FailOnOrphaned => {
-                    return Err("Cannot compact: conversation has orphaned tool calls".into());
+                    let orphaned_count = Self::find_orphaned_tool_calls(&messages).len();
+                    return Err(format!(
+                        "Cannot compact: conversation has {} orphaned tool call message(s)",
+                        orphaned_count
+                    )
+                    .into());
                 }
             }
         } else {
-            (messages, None)
+            (messages, Vec::new())
         };
 
         // Determine which messages to compact based on strategy
@@ -447,11 +489,14 @@ where
             CompactionStrategy::Custom(f) => f(&messages_to_compact),
         };
 
-        // If nothing to compact, return original with orphaned tool call if any
+        // If nothing to compact, return original with orphaned tool calls if any
         if range.start >= range.end {
             let mut result = messages_to_compact;
-            if let Some(orphaned) = orphaned_tool_call {
-                result.push(orphaned);
+            if !orphaned_tool_calls.is_empty() {
+                // Re-append orphaned messages
+                for (_, orphaned_msg) in orphaned_tool_calls {
+                    result.push(orphaned_msg);
+                }
             }
             return Ok(result);
         }
@@ -517,10 +562,22 @@ where
             result.push(msg.clone());
         }
 
-        // Re-append orphaned tool call if we dropped it earlier
-        if let Some(orphaned) = orphaned_tool_call {
-            tracing::debug!("Re-appending orphaned tool call after compaction");
-            result.push(orphaned);
+        // Re-append orphaned tool calls if we dropped them earlier
+        if !orphaned_tool_calls.is_empty() {
+            tracing::debug!(
+                "Re-appending {} orphaned tool call message(s) after compaction",
+                orphaned_tool_calls.len()
+            );
+
+            // Sort by original index to maintain relative order
+            let mut sorted_orphaned = orphaned_tool_calls;
+            sorted_orphaned.sort_by_key(|(idx, _)| *idx);
+
+            // For simplicity, append all orphaned messages at the end
+            // This maintains the conversation flow while ensuring all tool calls are preserved
+            for (_, orphaned_msg) in sorted_orphaned {
+                result.push(orphaned_msg);
+            }
         }
 
         Ok(result)
@@ -910,6 +967,202 @@ mod tests {
     }
 
     #[test]
+    fn test_multiple_orphaned_tool_calls_in_middle() {
+        use async_openai::types::{
+            ChatCompletionMessageToolCall, ChatCompletionToolType, FunctionCall,
+        };
+
+        // Test case similar to the production error - orphaned tool calls in the middle
+        let messages = vec![
+            ChatCompletionRequestUserMessageArgs::default()
+                .content("First user message")
+                .build()
+                .unwrap()
+                .into(),
+            ChatCompletionRequestAssistantMessageArgs::default()
+                .content("First response")
+                .build()
+                .unwrap()
+                .into(),
+            // First orphaned tool call (in the middle)
+            ChatCompletionRequestAssistantMessageArgs::default()
+                .content("")
+                .tool_calls(vec![ChatCompletionMessageToolCall {
+                    id: "call_middle".to_string(),
+                    r#type: ChatCompletionToolType::Function,
+                    function: FunctionCall {
+                        name: "middle_tool".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                }])
+                .build()
+                .unwrap()
+                .into(),
+            // No tool response - orphaned!
+            // Conversation continues...
+            ChatCompletionRequestUserMessageArgs::default()
+                .content("Continue conversation")
+                .build()
+                .unwrap()
+                .into(),
+            ChatCompletionRequestAssistantMessageArgs::default()
+                .content("Continuing...")
+                .build()
+                .unwrap()
+                .into(),
+            // Another orphaned tool call at the end
+            ChatCompletionRequestAssistantMessageArgs::default()
+                .content("")
+                .tool_calls(vec![ChatCompletionMessageToolCall {
+                    id: "call_end".to_string(),
+                    r#type: ChatCompletionToolType::Function,
+                    function: FunctionCall {
+                        name: "end_tool".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                }])
+                .build()
+                .unwrap()
+                .into(),
+        ];
+
+        // Should detect both orphaned tool calls
+        assert!(has_orphaned_tool_calls(&messages));
+        let orphaned_indices = find_orphaned_tool_calls_test(&messages);
+        assert_eq!(orphaned_indices.len(), 2);
+        assert_eq!(orphaned_indices[0], 2); // Middle orphaned message
+        assert_eq!(orphaned_indices[1], 5); // End orphaned message
+
+        // Extract orphaned messages
+        let (cleaned, orphaned) = extract_orphaned_tool_calls(messages.clone());
+        assert_eq!(cleaned.len(), 4); // 6 original - 2 orphaned = 4
+        assert_eq!(orphaned.len(), 2);
+
+        // Verify the correct messages were extracted
+        assert_eq!(orphaned[0].0, 2);
+        assert_eq!(orphaned[1].0, 5);
+    }
+
+    #[test]
+    fn test_mixed_orphaned_and_valid_tool_calls() {
+        use async_openai::types::{
+            ChatCompletionMessageToolCall, ChatCompletionRequestToolMessageArgs,
+            ChatCompletionToolType, FunctionCall,
+        };
+
+        let messages = vec![
+            ChatCompletionRequestUserMessageArgs::default()
+                .content("User message")
+                .build()
+                .unwrap()
+                .into(),
+            // Valid tool call with response
+            ChatCompletionRequestAssistantMessageArgs::default()
+                .content("")
+                .tool_calls(vec![ChatCompletionMessageToolCall {
+                    id: "call_valid".to_string(),
+                    r#type: ChatCompletionToolType::Function,
+                    function: FunctionCall {
+                        name: "valid_tool".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                }])
+                .build()
+                .unwrap()
+                .into(),
+            ChatCompletionRequestToolMessageArgs::default()
+                .content("Valid tool response")
+                .tool_call_id("call_valid")
+                .build()
+                .unwrap()
+                .into(),
+            // Orphaned tool call
+            ChatCompletionRequestAssistantMessageArgs::default()
+                .content("")
+                .tool_calls(vec![ChatCompletionMessageToolCall {
+                    id: "call_orphaned".to_string(),
+                    r#type: ChatCompletionToolType::Function,
+                    function: FunctionCall {
+                        name: "orphaned_tool".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                }])
+                .build()
+                .unwrap()
+                .into(),
+            // No response for orphaned call
+            ChatCompletionRequestUserMessageArgs::default()
+                .content("Another message")
+                .build()
+                .unwrap()
+                .into(),
+        ];
+
+        assert!(has_orphaned_tool_calls(&messages));
+        let orphaned_indices = find_orphaned_tool_calls_test(&messages);
+        assert_eq!(orphaned_indices.len(), 1);
+        assert_eq!(orphaned_indices[0], 3); // Only the orphaned one
+
+        let (cleaned, orphaned) = extract_orphaned_tool_calls(messages.clone());
+        assert_eq!(cleaned.len(), 4); // Valid tool call and response remain
+        assert_eq!(orphaned.len(), 1);
+        assert_eq!(orphaned[0].0, 3);
+    }
+
+    #[test]
+    fn test_multiple_tool_calls_partial_orphaned() {
+        use async_openai::types::{
+            ChatCompletionMessageToolCall, ChatCompletionRequestToolMessageArgs,
+            ChatCompletionToolType, FunctionCall,
+        };
+
+        // Assistant message with multiple tool calls, only some have responses
+        let messages = vec![
+            ChatCompletionRequestUserMessageArgs::default()
+                .content("User message")
+                .build()
+                .unwrap()
+                .into(),
+            ChatCompletionRequestAssistantMessageArgs::default()
+                .content("")
+                .tool_calls(vec![
+                    ChatCompletionMessageToolCall {
+                        id: "call_1".to_string(),
+                        r#type: ChatCompletionToolType::Function,
+                        function: FunctionCall {
+                            name: "tool_1".to_string(),
+                            arguments: "{}".to_string(),
+                        },
+                    },
+                    ChatCompletionMessageToolCall {
+                        id: "call_2".to_string(),
+                        r#type: ChatCompletionToolType::Function,
+                        function: FunctionCall {
+                            name: "tool_2".to_string(),
+                            arguments: "{}".to_string(),
+                        },
+                    },
+                ])
+                .build()
+                .unwrap()
+                .into(),
+            // Only response for call_1, not call_2
+            ChatCompletionRequestToolMessageArgs::default()
+                .content("Response for call_1")
+                .tool_call_id("call_1")
+                .build()
+                .unwrap()
+                .into(),
+            // call_2 is orphaned!
+        ];
+
+        assert!(has_orphaned_tool_calls(&messages));
+        let orphaned_indices = find_orphaned_tool_calls_test(&messages);
+        assert_eq!(orphaned_indices.len(), 1);
+        assert_eq!(orphaned_indices[0], 1); // The assistant message with partial orphaned calls
+    }
+
+    #[test]
     fn test_orphaned_tool_call_strategy_drop_and_reappend() {
         use async_openai::types::{
             ChatCompletionMessageToolCall, ChatCompletionToolType, FunctionCall,
@@ -950,69 +1203,93 @@ mod tests {
 
         // Should have removed the last message with tool calls
         assert_eq!(cleaned.len(), 3);
-        assert!(orphaned.is_some());
+        assert_eq!(orphaned.len(), 1);
 
         // The orphaned message should be the one with tool calls
-        if let Some(orphaned_msg) = orphaned {
-            if let ChatCompletionRequestMessage::Assistant(asst) = orphaned_msg {
-                assert!(asst.tool_calls.is_some());
-            } else {
-                panic!("Expected assistant message");
-            }
+        let (original_idx, orphaned_msg) = &orphaned[0];
+        assert_eq!(*original_idx, 3); // The 4th message (index 3) was orphaned
+        if let ChatCompletionRequestMessage::Assistant(asst) = orphaned_msg {
+            assert!(asst.tool_calls.is_some());
+        } else {
+            panic!("Expected assistant message");
         }
     }
 
-    // Helper functions for testing (these will be implemented in the main code)
+    // Helper functions for testing
     fn has_orphaned_tool_calls(messages: &[ChatCompletionRequestMessage]) -> bool {
-        // Check if the last assistant message has tool calls without responses
-        for (i, msg) in messages.iter().enumerate().rev() {
+        // Use the actual implementation's logic
+        !find_orphaned_tool_calls_test(messages).is_empty()
+    }
+
+    fn find_orphaned_tool_calls_test(messages: &[ChatCompletionRequestMessage]) -> Vec<usize> {
+        let mut orphaned_indices = Vec::new();
+
+        for (i, msg) in messages.iter().enumerate() {
             if let ChatCompletionRequestMessage::Assistant(asst) = msg {
                 if let Some(tool_calls) = &asst.tool_calls {
                     if !tool_calls.is_empty() {
-                        // Check if there are tool responses after this
-                        for msg in messages.iter().skip(i + 1) {
-                            if matches!(msg, ChatCompletionRequestMessage::Tool(_)) {
-                                return false; // Found responses, not orphaned
+                        // Check if all tool calls have corresponding responses
+                        let mut all_calls_have_responses = true;
+                        for tool_call in tool_calls {
+                            let mut found_response = false;
+                            // Look for a tool response with matching ID after this message
+                            for subsequent_msg in messages.iter().skip(i + 1) {
+                                if let ChatCompletionRequestMessage::Tool(tool_msg) = subsequent_msg
+                                {
+                                    if tool_msg.tool_call_id == tool_call.id {
+                                        found_response = true;
+                                        break;
+                                    }
+                                }
+                                // Stop looking if we hit another assistant message (conversation moved on)
+                                if matches!(
+                                    subsequent_msg,
+                                    ChatCompletionRequestMessage::Assistant(_)
+                                ) {
+                                    break;
+                                }
+                            }
+                            if !found_response {
+                                all_calls_have_responses = false;
+                                break;
                             }
                         }
-                        return true; // No responses found, orphaned
+
+                        if !all_calls_have_responses {
+                            orphaned_indices.push(i);
+                        }
                     }
                 }
             }
         }
-        false
+
+        orphaned_indices
     }
 
     fn extract_orphaned_tool_calls(
         messages: Vec<ChatCompletionRequestMessage>,
     ) -> (
         Vec<ChatCompletionRequestMessage>,
-        Option<ChatCompletionRequestMessage>,
+        Vec<(usize, ChatCompletionRequestMessage)>,
     ) {
-        // Find the last assistant message with tool calls
-        for (i, msg) in messages.iter().enumerate().rev() {
-            if let ChatCompletionRequestMessage::Assistant(asst) = msg {
-                if let Some(tool_calls) = &asst.tool_calls {
-                    if !tool_calls.is_empty() {
-                        // Check if orphaned (no tool responses after)
-                        let mut has_responses = false;
-                        for msg in messages.iter().skip(i + 1) {
-                            if matches!(msg, ChatCompletionRequestMessage::Tool(_)) {
-                                has_responses = true;
-                                break;
-                            }
-                        }
+        let orphaned_indices = find_orphaned_tool_calls_test(&messages);
 
-                        if !has_responses {
-                            // Extract everything except the orphaned message
-                            let cleaned = messages[..i].to_vec();
-                            return (cleaned, Some(messages[i].clone()));
-                        }
-                    }
-                }
+        if orphaned_indices.is_empty() {
+            return (messages, Vec::new());
+        }
+
+        let mut cleaned = Vec::new();
+        let mut orphaned = Vec::new();
+
+        for (i, msg) in messages.into_iter().enumerate() {
+            if orphaned_indices.contains(&i) {
+                orphaned.push((i, msg));
+            } else {
+                cleaned.push(msg);
             }
         }
-        (messages, None)
+
+        (cleaned, orphaned)
     }
 
     // Dummy types for testing
