@@ -39,6 +39,7 @@ use async_openai::{
 use futures::stream;
 use futures::Stream;
 use tower::BoxError;
+use tracing::{debug, trace};
 
 pub use crate::streaming::{StepChunk, StepProvider};
 
@@ -112,14 +113,40 @@ impl tower::Service<CreateChatCompletionRequest> for OpenAIProvider {
 
     fn call(&mut self, req: CreateChatCompletionRequest) -> Self::Future {
         let client = self.client.clone();
+
+        // Log the actual model being sent to OpenAI API
+        debug!(
+            model = ?req.model,
+            temperature = ?req.temperature,
+            messages_count = req.messages.len(),
+            tools_count = req.tools.as_ref().map(|t| t.len()).unwrap_or(0),
+            "OpenAIProvider sending request to API"
+        );
+
         Box::pin(async move {
-            let resp = client.chat().create(req).await?;
+            let model_debug = format!("{:?}", req.model);
+            let resp = client.chat().create(req).await.map_err(|e| {
+                // Log API errors with model information
+                debug!(
+                    model = %model_debug,
+                    error = %e,
+                    "OpenAI API error"
+                );
+                e
+            })?;
             let usage = resp.usage.unwrap_or_default();
             let choice = resp
                 .choices
                 .into_iter()
                 .next()
                 .ok_or_else(|| "no choices".to_string())?;
+
+            trace!(
+                prompt_tokens = usage.prompt_tokens,
+                completion_tokens = usage.completion_tokens,
+                "OpenAI API response received"
+            );
+
             Ok(ProviderResponse {
                 assistant: choice.message,
                 prompt_tokens: usage.prompt_tokens as usize,
