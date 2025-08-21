@@ -6,8 +6,9 @@ use async_openai::types::{
 use std::sync::Arc;
 use tower::ServiceExt;
 use tower_llm::{
+    policies,
     provider::{FixedProvider, ProviderResponse},
-    Agent, CompositePolicy, policies,
+    Agent, CompositePolicy,
 };
 
 #[tokio::main]
@@ -30,7 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             role: async_openai::types::Role::Assistant,
             function_call: None,
             refusal: None,
-            audio: None,  // Add missing field
+            audio: None, // Add missing field
         },
         prompt_tokens: 50,
         completion_tokens: 10,
@@ -58,14 +59,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("\nScenario 1: Request with explicit model override (gpt-4o)");
     println!("==========================================================");
     let req1 = CreateChatCompletionRequestArgs::default()
-        .model("gpt-4o")  // Override with gpt-4o
+        .model("gpt-4o") // Override with gpt-4o
         .messages(messages.clone())
         .build()?;
 
     println!("Request model field: {:?}\n", req1.model);
-    
+
     let mut agent1 = Agent::builder(client.clone())
-        .model("gpt-5")  // Agent configured with gpt-5
+        .model("gpt-5") // Agent configured with gpt-5
         .temperature(0.7)
         .max_tokens(1000)
         .with_provider(mock_provider.clone())
@@ -78,14 +79,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("===========================================");
     // Create request without explicit model (should use agent's default)
     let req2 = CreateChatCompletionRequestArgs::default()
-        .model("gpt-5")  // Use agent's model
+        .model("gpt-5") // Use agent's model
         .messages(messages)
         .build()?;
 
     println!("Request model field: {:?}\n", req2.model);
-    
+
     let mut agent2 = Agent::builder(client.clone())
-        .model("gpt-5")  // Agent configured with gpt-5
+        .model("gpt-5") // Agent configured with gpt-5
         .temperature(0.7)
         .max_tokens(1000)
         .with_provider(mock_provider)
