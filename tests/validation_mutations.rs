@@ -150,8 +150,7 @@ proptest! {
     fn mutation_tool_responses_not_contiguous_detected(mut msgs in gen::valid_conversation(gen::GeneratorConfig { must_have_tool_calls: true, min_tool_calls: 1, ..Default::default() })) {
         let applied = mutate::apply_violation(&mut msgs, mutate::MutationKind::ToolResponsesNotContiguous);
         prop_assume!(applied);
-        let mut policy = ValidationPolicy::default();
-        policy.enforce_contiguous_tool_responses = true;
+        let policy = ValidationPolicy { enforce_contiguous_tool_responses: true, ..Default::default() };
         let out = validate_conversation(&msgs, &policy).expect("violations after mutation");
         prop_assert!(has_violation(&out, is_tool_responses_not_contiguous));
     }
@@ -160,9 +159,7 @@ proptest! {
     fn mutation_remove_all_users_detected(mut msgs in gen::valid_conversation(gen::GeneratorConfig::default())) {
         let applied = mutate::apply_violation(&mut msgs, mutate::MutationKind::RemoveAllUsers);
         prop_assume!(applied);
-        let mut policy = ValidationPolicy::default();
-        policy.require_user_present = true;
-        policy.require_user_first = false;
+        let policy = ValidationPolicy { require_user_present: true, require_user_first: false, ..Default::default() };
         let out = validate_conversation(&msgs, &policy).expect("violations after mutation");
         prop_assert!(has_violation(&out, is_no_user_message));
     }

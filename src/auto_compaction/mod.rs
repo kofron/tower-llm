@@ -974,6 +974,7 @@ mod tests {
             use crate::provider::FixedProvider;
             use crate::provider::ProviderResponse;
             // Provider that returns a dummy assistant content for summaries
+            #[allow(deprecated)]
             let provider = FixedProvider::new(ProviderResponse{
                 assistant: async_openai::types::ChatCompletionResponseMessage {
                     content: Some("summary".into()),
@@ -995,7 +996,7 @@ mod tests {
             let counter = SimpleTokenCounter::new();
             // Build minimal AutoCompaction directly (we are inside the module, fields are accessible)
             let dummy_inner = (); // unused by compact_messages
-            let mut ac = AutoCompaction {
+            let ac = AutoCompaction {
                 inner: Arc::new(tokio::sync::Mutex::new(dummy_inner)),
                 policy,
                 provider: Arc::new(tokio::sync::Mutex::new(provider)),
@@ -1003,13 +1004,15 @@ mod tests {
             };
             let rt = tokio::runtime::Runtime::new().unwrap();
             let out = rt.block_on(async move { ac.compact_messages(msgs).await.unwrap() });
-            let mut vp = ValidationPolicy::default();
-            vp.require_user_first = false;
-            vp.require_user_present = false;
-            vp.allow_system_anywhere = true;
-            vp.allow_repeated_roles = true;
-            vp.allow_dangling_tool_calls = true;
-            vp.allow_developer_and_function = true;
+            let vp = ValidationPolicy {
+                require_user_first: false,
+                require_user_present: false,
+                allow_system_anywhere: true,
+                allow_repeated_roles: true,
+                allow_dangling_tool_calls: true,
+                allow_developer_and_function: true,
+                ..Default::default()
+            };
             let v = validate_conversation(&out, &vp);
             if let Some(violations) = v {
                 // For pathological inputs like a lone tool message, AutoCompaction cannot fabricate an assistant context.

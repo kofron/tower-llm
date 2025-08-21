@@ -252,13 +252,11 @@ pub fn validate_conversation(
     let mut last_role: Option<R> = None;
     for (i, m) in messages.iter().enumerate() {
         // System not first
-        if !policy.allow_system_anywhere {
-            if first_non_system_seen {
-                if let ReqMsg::System(_) = m {
-                    violations.push(Violation::new(ViolationCode::SystemNotFirst {
-                        system_index: i,
-                    }));
-                }
+        if !policy.allow_system_anywhere && first_non_system_seen {
+            if let ReqMsg::System(_) = m {
+                violations.push(Violation::new(ViolationCode::SystemNotFirst {
+                    system_index: i,
+                }));
             }
         }
 
@@ -268,14 +266,13 @@ pub fn validate_conversation(
             _ => {
                 if !first_non_system_seen {
                     first_non_system_seen = true;
-                    if policy.require_user_first {
-                        if !matches!(m, ReqMsg::User(_)) {
-                            if matches!(m, ReqMsg::Assistant(_)) {
-                                violations.push(Violation::new(
-                                    ViolationCode::AssistantBeforeUser { assistant_index: i },
-                                ));
-                            }
-                        }
+                    if policy.require_user_first
+                        && !matches!(m, ReqMsg::User(_))
+                        && matches!(m, ReqMsg::Assistant(_))
+                    {
+                        violations.push(Violation::new(ViolationCode::AssistantBeforeUser {
+                            assistant_index: i,
+                        }));
                     }
                 }
             }
@@ -384,24 +381,22 @@ pub fn validate_conversation(
                         }));
                     }
                     // Order check
-                    if policy.enforce_tool_response_order {
-                        if !exp.seen_order.is_empty() {
-                            // Compare sequence of first occurrences to the prefix of expected_ids of same length
-                            let expected_prefix: Vec<String> = exp
-                                .expected_ids
-                                .iter()
-                                .take(exp.seen_order.len())
-                                .cloned()
-                                .collect();
-                            if exp.seen_order != expected_prefix {
-                                violations.push(Violation::new(
-                                    ViolationCode::ToolResponsesOutOfOrder {
-                                        assistant_index: exp.assistant_index,
-                                        expected: expected_prefix,
-                                        observed: exp.seen_order,
-                                    },
-                                ));
-                            }
+                    if policy.enforce_tool_response_order && !exp.seen_order.is_empty() {
+                        // Compare sequence of first occurrences to the prefix of expected_ids of same length
+                        let expected_prefix: Vec<String> = exp
+                            .expected_ids
+                            .iter()
+                            .take(exp.seen_order.len())
+                            .cloned()
+                            .collect();
+                        if exp.seen_order != expected_prefix {
+                            violations.push(Violation::new(
+                                ViolationCode::ToolResponsesOutOfOrder {
+                                    assistant_index: exp.assistant_index,
+                                    expected: expected_prefix,
+                                    observed: exp.seen_order,
+                                },
+                            ));
                         }
                     }
                 }
@@ -417,10 +412,8 @@ pub fn validate_conversation(
                             if tc.id.is_empty() {
                                 empties.push(k);
                             }
-                            if !tc.id.is_empty() {
-                                if !seen.insert(tc.id.as_str()) {
-                                    dups.push(tc.id.clone());
-                                }
+                            if !tc.id.is_empty() && !seen.insert(tc.id.as_str()) {
+                                dups.push(tc.id.clone());
                             }
                         }
                         if !dups.is_empty() {
@@ -573,21 +566,19 @@ pub fn validate_conversation(
                 missing_ids: missing,
             }));
         }
-        if policy.enforce_tool_response_order {
-            if !exp.seen_order.is_empty() {
-                let expected_prefix: Vec<String> = exp
-                    .expected_ids
-                    .iter()
-                    .take(exp.seen_order.len())
-                    .cloned()
-                    .collect();
-                if exp.seen_order != expected_prefix {
-                    violations.push(Violation::new(ViolationCode::ToolResponsesOutOfOrder {
-                        assistant_index: exp.assistant_index,
-                        expected: expected_prefix,
-                        observed: exp.seen_order,
-                    }));
-                }
+        if policy.enforce_tool_response_order && !exp.seen_order.is_empty() {
+            let expected_prefix: Vec<String> = exp
+                .expected_ids
+                .iter()
+                .take(exp.seen_order.len())
+                .cloned()
+                .collect();
+            if exp.seen_order != expected_prefix {
+                violations.push(Violation::new(ViolationCode::ToolResponsesOutOfOrder {
+                    assistant_index: exp.assistant_index,
+                    expected: expected_prefix,
+                    observed: exp.seen_order,
+                }));
             }
         }
     }
@@ -685,8 +676,10 @@ mod tests {
             ChatCompletionRequestMessage::Assistant(asst),
             ChatCompletionRequestMessage::Tool(tool),
         ]);
-        let mut policy = ValidationPolicy::default();
-        policy.require_user_first = false;
+        let policy = ValidationPolicy {
+            require_user_first: false,
+            ..Default::default()
+        };
         let out = validate_conversation(&msgs, &policy);
         assert!(out.is_none());
     }
@@ -729,9 +722,11 @@ mod tests {
             .build()
             .unwrap();
         let msgs = req(vec![ChatCompletionRequestMessage::Assistant(asst)]);
-        let mut policy = ValidationPolicy::default();
-        policy.require_user_first = false;
-        policy.allow_dangling_tool_calls = true;
+        let policy = ValidationPolicy {
+            require_user_first: false,
+            allow_dangling_tool_calls: true,
+            ..Default::default()
+        };
         let out = validate_conversation(&msgs, &policy);
         assert!(out.is_none());
     }
@@ -872,8 +867,10 @@ mod tests {
             .build()
             .unwrap();
         let msgs = req(vec![ChatCompletionRequestMessage::Assistant(asst)]);
-        let mut policy = ValidationPolicy::default();
-        policy.require_user_first = false;
+        let policy = ValidationPolicy {
+            require_user_first: false,
+            ..Default::default()
+        };
         let out = validate_conversation(&msgs, &policy).unwrap();
         assert!(out.iter().any(|v| matches!(
             v.code,
@@ -897,8 +894,10 @@ mod tests {
             .build()
             .unwrap();
         let msgs = req(vec![ChatCompletionRequestMessage::Assistant(asst)]);
-        let mut policy = ValidationPolicy::default();
-        policy.require_user_first = false;
+        let policy = ValidationPolicy {
+            require_user_first: false,
+            ..Default::default()
+        };
         let out = validate_conversation(&msgs, &policy).unwrap();
         assert!(out
             .iter()
@@ -963,9 +962,11 @@ mod tests {
             ChatCompletionRequestMessage::User(user),
             ChatCompletionRequestMessage::Tool(tool),
         ]);
-        let mut policy = ValidationPolicy::default();
-        policy.require_user_first = false;
-        policy.enforce_contiguous_tool_responses = true;
+        let policy = ValidationPolicy {
+            require_user_first: false,
+            enforce_contiguous_tool_responses: true,
+            ..Default::default()
+        };
         let out = validate_conversation(&msgs, &policy).unwrap();
         assert!(out
             .iter()
@@ -979,9 +980,11 @@ mod tests {
             .build()
             .unwrap();
         let msgs = req(vec![ChatCompletionRequestMessage::Assistant(asst)]);
-        let mut policy = ValidationPolicy::default();
-        policy.require_user_present = true;
-        policy.require_user_first = false;
+        let policy = ValidationPolicy {
+            require_user_present: true,
+            require_user_first: false,
+            ..Default::default()
+        };
         let out = validate_conversation(&msgs, &policy).unwrap();
         assert!(out
             .iter()

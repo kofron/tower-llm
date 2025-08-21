@@ -170,16 +170,15 @@ pub fn apply_violation(
                         .as_ref()
                         .map(|v| !v.is_empty())
                         .unwrap_or(false)
+                        && i + 1 < messages.len()
                     {
-                        if i + 1 < messages.len() {
-                            // Insert a user immediately after assistant
-                            let u = ChatCompletionRequestUserMessageArgs::default()
-                                .content("interrupt")
-                                .build()
-                                .unwrap();
-                            messages.insert(i + 1, ChatCompletionRequestMessage::User(u));
-                            return true;
-                        }
+                        // Insert a user immediately after assistant
+                        let u = ChatCompletionRequestUserMessageArgs::default()
+                            .content("interrupt")
+                            .build()
+                            .unwrap();
+                        messages.insert(i + 1, ChatCompletionRequestMessage::User(u));
+                        return true;
                     }
                 }
             }
