@@ -64,7 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     });
 
     let timeout_layer = tower_llm::resilience::TimeoutLayer::new(Duration::from_millis(500));
-    let mut timeout_service = timeout_layer.layer(slow_service.clone());
+    let mut timeout_service = timeout_layer.layer(slow_service);
 
     println!("  Calling service with 500ms timeout...");
     match timeout_service.ready().await?.call(()).await {

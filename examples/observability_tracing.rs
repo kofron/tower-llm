@@ -139,14 +139,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
         let outcome = traced_service.ready().await?.call(req).await?;
 
-        match outcome {
-            tower_llm::StepOutcome::Done { aux, .. } => {
-                info!(
-                    "Step {} complete: {} prompt, {} completion tokens",
-                    i, aux.prompt_tokens, aux.completion_tokens
-                );
-            }
-            _ => {}
+        if let tower_llm::StepOutcome::Done { aux, .. } = outcome {
+            info!(
+                "Step {} complete: {} prompt, {} completion tokens",
+                i, aux.prompt_tokens, aux.completion_tokens
+            );
         }
     }
 

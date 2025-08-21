@@ -202,11 +202,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("\n--- Example 3: Load-Based Routing ---");
 
     // Track agent loads
-    let agent_loads = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::from([
-        ("math".to_string(), 0),
-        ("writing".to_string(), 0),
-        ("code".to_string(), 0),
-    ])));
+    let agent_loads: Arc<tokio::sync::Mutex<std::collections::HashMap<String, i32>>> =
+        Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::from([
+            ("math".to_string(), 0),
+            ("writing".to_string(), 0),
+            ("code".to_string(), 0),
+        ])));
 
     let load_picker = {
         let loads = agent_loads.clone();
@@ -262,7 +263,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             let mut loads = agent_loads.lock().await;
             // Decrement a random agent's load
             if let Some(load) = loads.get_mut("math") {
-                *load = (*load as usize).saturating_sub(1);
+                *load = (*load).saturating_sub(1i32);
             }
         }
     }

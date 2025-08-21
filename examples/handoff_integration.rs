@@ -8,9 +8,8 @@
 use async_openai::{
     config::OpenAIConfig,
     types::{
-        ChatCompletionRequestMessage, ChatCompletionRequestUserMessageArgs,
-        ChatCompletionRequestSystemMessageArgs,
-        CreateChatCompletionRequestArgs,
+        ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs,
+        ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequestArgs,
     },
     Client,
 };
@@ -42,6 +41,7 @@ struct ContentGenerateArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct EditorialReviewArgs {
     /// Content to review
+    #[allow(dead_code)]
     content: String,
     /// Type of review (grammar, style, technical)
     review_type: String,
@@ -51,6 +51,7 @@ struct EditorialReviewArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct SeoOptimizeArgs {
     /// Content to optimize
+    #[allow(dead_code)]
     content: String,
     /// Target keywords
     keywords: Vec<String>,
@@ -91,10 +92,16 @@ impl Service<PickRequest> for ContentPicker {
                 })
                 .unwrap_or_default();
 
-            if content.contains("edit") || content.contains("review") || content.contains("proofread") {
+            if content.contains("edit")
+                || content.contains("review")
+                || content.contains("proofread")
+            {
                 println!("📝 Picker: Routing to editor_agent (editorial task detected)");
                 Ok("editor_agent".to_string())
-            } else if content.contains("seo") || content.contains("optimize") || content.contains("keywords") {
+            } else if content.contains("seo")
+                || content.contains("optimize")
+                || content.contains("keywords")
+            {
                 println!("🔍 Picker: Routing to seo_agent (SEO task detected)");
                 Ok("seo_agent".to_string())
             } else {
@@ -110,18 +117,21 @@ fn create_content_agent(client: Arc<Client<OpenAIConfig>>) -> AgentSvc {
         "generate_content",
         "Generate various types of content",
         |args: ContentGenerateArgs| async move {
-            println!("  ✍️ Generating {} content about: {}", args.content_type, args.topic);
-            
+            println!(
+                "  ✍️ Generating {} content about: {}",
+                args.content_type, args.topic
+            );
+
             let word_count = args.word_count.unwrap_or(200);
             let result = json!({
                 "content_type": args.content_type,
                 "topic": args.topic,
                 "word_count": word_count,
-                "preview": format!("Generated {} content about {} ({} words)", 
+                "preview": format!("Generated {} content about {} ({} words)",
                     args.content_type, args.topic, word_count),
                 "status": "draft_complete"
             });
-            
+
             Ok::<_, tower::BoxError>(result)
         },
     );
@@ -143,14 +153,14 @@ fn create_editor_agent(client: Arc<Client<OpenAIConfig>>) -> AgentSvc {
         "Review and edit content",
         |args: EditorialReviewArgs| async move {
             println!("  📝 Reviewing content (type: {})", args.review_type);
-            
+
             let improvements = match args.review_type.as_str() {
                 "grammar" => vec!["Fixed 3 grammar issues", "Improved punctuation"],
                 "style" => vec!["Enhanced readability", "Improved flow between paragraphs"],
                 "technical" => vec!["Verified technical accuracy", "Added clarifying examples"],
-                _ => vec!["General improvements applied"]
+                _ => vec!["General improvements applied"],
             };
-            
+
             Ok::<_, tower::BoxError>(json!({
                 "review_type": args.review_type,
                 "improvements": improvements,
@@ -177,7 +187,7 @@ fn create_seo_agent(client: Arc<Client<OpenAIConfig>>) -> AgentSvc {
         "Optimize content for search engines",
         |args: SeoOptimizeArgs| async move {
             println!("  🔍 Optimizing for keywords: {:?}", args.keywords);
-            
+
             Ok::<_, tower::BoxError>(json!({
                 "keywords": args.keywords,
                 "keyword_density": 2.3,
@@ -224,7 +234,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .init();
 
     println!("=== Integration Example: Handoffs + Tower Ecosystem ===\n");
-    
+
     println!("This example demonstrates complete integration:");
     println!("• Handoff coordination with full Tower middleware stack");
     println!("• Policy enforcement for both agents and handoffs");
@@ -244,7 +254,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut handoffs = HashMap::new();
     handoffs.insert("handoff_to_editor".to_string(), "editor_agent".to_string());
     handoffs.insert("handoff_to_seo".to_string(), "seo_agent".to_string());
-    handoffs.insert("handoff_to_content".to_string(), "content_agent".to_string());
+    handoffs.insert(
+        "handoff_to_content".to_string(),
+        "content_agent".to_string(),
+    );
     let handoff_policy = MultiExplicitHandoffPolicy::new(handoffs);
 
     // Create picker
@@ -276,7 +289,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // For this example, we'll demonstrate the layers conceptually
     // In production, you'd apply these layers to individual agents before handoff coordination
-    
+
     println!("--- Layer Stack Architecture ---");
     println!("The full Tower ecosystem would be applied as:");
     println!();
@@ -285,7 +298,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("   - Handoff policy enforcement");
     println!();
     println!("2. **Policy Layer**: AgentLoopLayer (per agent)");
-    println!("   - Budget enforcement");  
+    println!("   - Budget enforcement");
     println!("   - Step limits");
     println!("   - Termination conditions");
     println!();
@@ -318,7 +331,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .model("gpt-4o-mini")
         .messages(vec![
             ChatCompletionRequestMessage::System(system_msg),
-            ChatCompletionRequestMessage::User(user_message)
+            ChatCompletionRequestMessage::User(user_message),
         ])
         .build()?;
 
@@ -333,12 +346,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             println!("   - Total messages: {}", result.messages.len());
             println!("   - Total steps: {}", result.steps);
             println!("   - Stop reason: {:?}", result.stop);
-            
+
             // Show the final result
             if let Some(ChatCompletionRequestMessage::Assistant(msg)) = result.messages.last() {
                 if let Some(content) = &msg.content {
                     let text = match content {
-                        async_openai::types::ChatCompletionRequestAssistantMessageContent::Text(t) => t,
+                        async_openai::types::ChatCompletionRequestAssistantMessageContent::Text(
+                            t,
+                        ) => t,
                         _ => "(non-text content)",
                     };
                     let preview = if text.len() > 300 {
@@ -350,7 +365,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     println!("{}", preview);
                 }
             }
-        },
+        }
         Err(e) => println!("❌ Production workflow failed: {}", e),
     }
 

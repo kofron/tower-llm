@@ -41,12 +41,13 @@ use async_openai::types::{
 };
 use futures::{Stream, StreamExt};
 use serde_json::Value;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Semaphore};
 use tokio_stream::wrappers::ReceiverStream;
 use tower::{BoxError, Layer, Service, ServiceExt};
 
 use crate::core::{
-    AgentPolicy, AgentRun, LoopState, StepAux, StepOutcome, ToolInvocation, ToolOutput,
+    AgentPolicy, AgentRun, LoopState, StepAux, StepOutcome, ToolInvocation, ToolJoinPolicy,
+    ToolOutput,
 };
 
 /// Streaming step-level items.
@@ -93,22 +94,43 @@ pub trait StepProvider: Send + Sync + 'static {
 /// final `StepComplete` outcome.
 pub struct StepStreamService<P, T> {
     provider: Arc<P>,
-    tools: Arc<tokio::sync::Mutex<T>>, // routed tool service
+    tools: T, // routed tool service (clonable for parallel)
+    parallel_tools: bool,
+    tool_concurrency_limit: Option<usize>,
+    join_policy: ToolJoinPolicy,
 }
 
 impl<P, T> StepStreamService<P, T> {
     pub fn new(provider: Arc<P>, tools: T) -> Self {
         Self {
             provider,
-            tools: Arc::new(tokio::sync::Mutex::new(tools)),
+            tools,
+            parallel_tools: false,
+            tool_concurrency_limit: None,
+            join_policy: ToolJoinPolicy::FailFast,
         }
+    }
+
+    pub fn parallel_tools(mut self, enabled: bool) -> Self {
+        self.parallel_tools = enabled;
+        self
+    }
+
+    pub fn tool_concurrency_limit(mut self, limit: usize) -> Self {
+        self.tool_concurrency_limit = Some(limit);
+        self
+    }
+
+    pub fn tool_join_policy(mut self, policy: ToolJoinPolicy) -> Self {
+        self.join_policy = policy;
+        self
     }
 }
 
 impl<P, T> Service<CreateChatCompletionRequest> for StepStreamService<P, T>
 where
     P: StepProvider,
-    T: Service<ToolInvocation, Response = ToolOutput, Error = BoxError> + Send + 'static,
+    T: Service<ToolInvocation, Response = ToolOutput, Error = BoxError> + Clone + Send + 'static,
     T::Future: Send + 'static,
 {
     type Response = Pin<Box<dyn Stream<Item = StepChunk> + Send>>;
@@ -125,6 +147,9 @@ where
     fn call(&mut self, req: CreateChatCompletionRequest) -> Self::Future {
         let provider = self.provider.clone();
         let tools = self.tools.clone();
+        let parallel = self.parallel_tools;
+        let _limit = self.tool_concurrency_limit;
+        let join_policy = self.join_policy;
         Box::pin(async move {
             let mut token_buf = String::new();
             let mut tool_calls: Vec<(String, String, Value)> = Vec::new();
@@ -204,19 +229,85 @@ where
                     }
                 }
 
-                // Execute tools sequentially and emit ends
-                for (id, name, args) in tool_calls.into_iter() {
-                    invoked_tool_names.push(name.clone());
-                    let inv = ToolInvocation {
-                        id: id.clone(),
-                        name: name.clone(),
-                        arguments: args,
-                    };
-                    match tools.lock().await.ready().await {
-                        Ok(svc) => match svc.call(inv).await {
-                            Ok(ToolOutput { id: out_id, result }) => {
+                // Execute tools (parallel if enabled) and emit ends preserving order
+                if tool_calls.len() > 1 && parallel {
+                    let sem = _limit.map(|n| Arc::new(Semaphore::new(n)));
+                    let mut futures = Vec::with_capacity(tool_calls.len());
+                    for (idx, (id, name, args)) in tool_calls.iter().cloned().enumerate() {
+                        invoked_tool_names.push(name.clone());
+                        let inv = ToolInvocation {
+                            id,
+                            name,
+                            arguments: args,
+                        };
+                        let mut svc = tools.clone();
+                        let sem_cl = sem.clone();
+                        futures.push(async move {
+                            let _permit = match &sem_cl {
+                                Some(s) => {
+                                    Some(s.clone().acquire_owned().await.expect("semaphore"))
+                                }
+                                None => None,
+                            };
+                            let ToolOutput { id: out_id, result } =
+                                ServiceExt::ready(&mut svc).await?.call(inv).await?;
+                            Ok::<(usize, String, Value), BoxError>((idx, out_id, result))
+                        });
+                    }
+                    match join_policy {
+                        ToolJoinPolicy::FailFast => {
+                            let results = futures::future::try_join_all(futures).await;
+                            match results {
+                                Ok(mut items) => {
+                                    items.sort_by_key(|(idx, _, _)| *idx);
+                                    for (_idx, out_id, result) in items.into_iter() {
+                                        aux.tool_invocations += 1;
+                                        match ChatCompletionRequestToolMessageArgs::default()
+                                            .tool_call_id(out_id.clone())
+                                            .content(result.to_string())
+                                            .build()
+                                        {
+                                            Ok(tool_msg) => messages.push(tool_msg.into()),
+                                            Err(e) => {
+                                                let _ = tx
+                                                    .send(StepChunk::Error(format!(
+                                                        "tool msg build: {}",
+                                                        e
+                                                    )))
+                                                    .await;
+                                                return;
+                                            }
+                                        }
+                                        let _ = tx
+                                            .send(StepChunk::ToolCallEnd {
+                                                id: out_id,
+                                                output: result,
+                                            })
+                                            .await;
+                                    }
+                                }
+                                Err(e) => {
+                                    let _ = tx
+                                        .send(StepChunk::Error(format!("tool error: {}", e)))
+                                        .await;
+                                    return;
+                                }
+                            }
+                        }
+                        ToolJoinPolicy::JoinAll => {
+                            // Wait for all, emit successes, then emit a single aggregated error if any failed
+                            let results = futures::future::join_all(futures).await;
+                            let mut items: Vec<(usize, String, Value)> = Vec::new();
+                            let mut errors: Vec<String> = Vec::new();
+                            for r in results.into_iter() {
+                                match r {
+                                    Ok((idx, id, result)) => items.push((idx, id, result)),
+                                    Err(e) => errors.push(format!("{}", e)),
+                                }
+                            }
+                            items.sort_by_key(|(idx, _, _)| *idx);
+                            for (_idx, out_id, result) in items.into_iter() {
                                 aux.tool_invocations += 1;
-                                // Append tool message
                                 match ChatCompletionRequestToolMessageArgs::default()
                                     .tool_call_id(out_id.clone())
                                     .content(result.to_string())
@@ -240,18 +331,66 @@ where
                                     })
                                     .await;
                             }
-                            Err(e) => {
+                            if !errors.is_empty() {
                                 let _ = tx
-                                    .send(StepChunk::Error(format!("tool error: {}", e)))
+                                    .send(StepChunk::Error(format!(
+                                        "one or more tools failed: {}",
+                                        errors.join("; ")
+                                    )))
                                     .await;
                                 return;
                             }
-                        },
-                        Err(e) => {
-                            let _ = tx
-                                .send(StepChunk::Error(format!("tool not ready: {}", e)))
-                                .await;
-                            return;
+                        }
+                    }
+                } else {
+                    for (id, name, args) in tool_calls.into_iter() {
+                        invoked_tool_names.push(name.clone());
+                        let inv = ToolInvocation {
+                            id: id.clone(),
+                            name: name.clone(),
+                            arguments: args,
+                        };
+                        let mut svc = tools.clone();
+                        match ServiceExt::ready(&mut svc).await {
+                            Ok(ready) => match ready.call(inv).await {
+                                Ok(ToolOutput { id: out_id, result }) => {
+                                    aux.tool_invocations += 1;
+                                    match ChatCompletionRequestToolMessageArgs::default()
+                                        .tool_call_id(out_id.clone())
+                                        .content(result.to_string())
+                                        .build()
+                                    {
+                                        Ok(tool_msg) => messages.push(tool_msg.into()),
+                                        Err(e) => {
+                                            let _ = tx
+                                                .send(StepChunk::Error(format!(
+                                                    "tool msg build: {}",
+                                                    e
+                                                )))
+                                                .await;
+                                            return;
+                                        }
+                                    }
+                                    let _ = tx
+                                        .send(StepChunk::ToolCallEnd {
+                                            id: out_id,
+                                            output: result,
+                                        })
+                                        .await;
+                                }
+                                Err(e) => {
+                                    let _ = tx
+                                        .send(StepChunk::Error(format!("tool error: {}", e)))
+                                        .await;
+                                    return;
+                                }
+                            },
+                            Err(e) => {
+                                let _ = tx
+                                    .send(StepChunk::Error(format!("tool not ready: {}", e)))
+                                    .await;
+                                return;
+                            }
                         }
                     }
                 }
@@ -538,6 +677,7 @@ mod tests {
     use super::*;
     use futures::stream;
     use serde_json::json;
+    use tokio::time::{sleep, Duration};
     use tower::service_fn;
 
     struct FakeProvider {
@@ -668,8 +808,8 @@ mod tests {
         });
         let step = StepStreamService::new(provider, tool);
         let loop_layer = AgentLoopStreamLayer::new(crate::core::policies::max_steps(1));
-        let mut agent = loop_layer.layer(step);
-        let mut tap_log: Arc<tokio::sync::Mutex<Vec<String>>> =
+        let agent = loop_layer.layer(step);
+        let tap_log: Arc<tokio::sync::Mutex<Vec<String>>> =
             Arc::new(tokio::sync::Mutex::new(vec![]));
         let tap_log_clone = tap_log.clone();
         let tap = StreamTapLayer::new(move |ev: &AgentEvent| {
@@ -689,5 +829,266 @@ mod tests {
         // Drain
         while let Some(_ev) = stream.next().await {}
         assert!(!tap_log.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn step_stream_parallel_preserve_order() {
+        // Provider emits two tool calls
+        let provider = Arc::new(FakeProvider {
+            items: vec![
+                StepChunk::ToolCallStart {
+                    id: "c1".into(),
+                    name: "slow".into(),
+                    arguments: json!({}),
+                },
+                StepChunk::ToolCallStart {
+                    id: "c2".into(),
+                    name: "fast".into(),
+                    arguments: json!({}),
+                },
+            ],
+        });
+        // Tools with different latency
+        let tool = service_fn(|inv: ToolInvocation| async move {
+            if inv.name == "slow" {
+                sleep(Duration::from_millis(40)).await;
+            } else {
+                sleep(Duration::from_millis(5)).await;
+            }
+            Ok::<_, BoxError>(ToolOutput {
+                id: inv.id,
+                result: json!({"label": inv.name}),
+            })
+        });
+        let mut svc = StepStreamService::new(provider, tool).parallel_tools(true);
+        let req = CreateChatCompletionRequestArgs::default()
+            .model("gpt-4o")
+            .messages(vec![])
+            .build()
+            .unwrap();
+        let mut stream = svc.call(req).await.unwrap();
+        let mut end_ids: Vec<String> = Vec::new();
+        let mut saw_complete = false;
+        while let Some(item) = stream.next().await {
+            match item {
+                StepChunk::ToolCallEnd { id, .. } => end_ids.push(id),
+                StepChunk::StepComplete { .. } => saw_complete = true,
+                _ => {}
+            }
+        }
+        assert!(saw_complete);
+        assert_eq!(end_ids, vec!["c1".to_string(), "c2".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn step_stream_parallel_error_propagation() {
+        // Provider emits two tool calls; one will fail
+        let provider = Arc::new(FakeProvider {
+            items: vec![
+                StepChunk::ToolCallStart {
+                    id: "g1".into(),
+                    name: "good".into(),
+                    arguments: json!({}),
+                },
+                StepChunk::ToolCallStart {
+                    id: "b1".into(),
+                    name: "bad".into(),
+                    arguments: json!({}),
+                },
+            ],
+        });
+        let tool = service_fn(|inv: ToolInvocation| async move {
+            if inv.name == "bad" {
+                Err::<ToolOutput, BoxError>("boom".into())
+            } else {
+                Ok::<_, BoxError>(ToolOutput {
+                    id: inv.id,
+                    result: json!({}),
+                })
+            }
+        });
+        let mut svc = StepStreamService::new(provider, tool).parallel_tools(true);
+        let req = CreateChatCompletionRequestArgs::default()
+            .model("gpt-4o")
+            .messages(vec![])
+            .build()
+            .unwrap();
+        let mut stream = svc.call(req).await.unwrap();
+        let mut saw_error = false;
+        let mut saw_complete = false;
+        while let Some(item) = stream.next().await {
+            match item {
+                StepChunk::Error(e) => {
+                    saw_error = true;
+                    assert!(e.contains("tool error"));
+                }
+                StepChunk::StepComplete { .. } => saw_complete = true,
+                _ => {}
+            }
+        }
+        assert!(saw_error);
+        assert!(!saw_complete);
+    }
+
+    #[tokio::test]
+    async fn step_stream_parallel_concurrency_limit() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static CURRENT: AtomicUsize = AtomicUsize::new(0);
+        static MAX_OBSERVED: AtomicUsize = AtomicUsize::new(0);
+
+        let mut items = Vec::new();
+        for i in 0..8 {
+            items.push(StepChunk::ToolCallStart {
+                id: format!("c{}", i),
+                name: "gate".into(),
+                arguments: json!({}),
+            });
+        }
+        let provider = Arc::new(FakeProvider { items });
+        let tool = service_fn(|inv: ToolInvocation| async move {
+            let now = CURRENT.fetch_add(1, Ordering::SeqCst) + 1;
+            let max = MAX_OBSERVED.load(Ordering::SeqCst);
+            if now > max {
+                let _ = MAX_OBSERVED.compare_exchange(max, now, Ordering::SeqCst, Ordering::SeqCst);
+            }
+            sleep(Duration::from_millis(10)).await;
+            CURRENT.fetch_sub(1, Ordering::SeqCst);
+            Ok::<_, BoxError>(ToolOutput {
+                id: inv.id,
+                result: json!({}),
+            })
+        });
+
+        let mut svc = StepStreamService::new(provider, tool)
+            .parallel_tools(true)
+            .tool_concurrency_limit(3);
+        let req = CreateChatCompletionRequestArgs::default()
+            .model("gpt-4o")
+            .messages(vec![])
+            .build()
+            .unwrap();
+        let mut stream = svc.call(req).await.unwrap();
+        while let Some(_item) = stream.next().await {}
+        assert!(MAX_OBSERVED.load(Ordering::SeqCst) <= 3);
+    }
+
+    #[tokio::test]
+    async fn step_stream_parallel_failfast_early_termination() {
+        use serde_json::json;
+        // Provider emits two tool calls
+        let provider = Arc::new(FakeProvider {
+            items: vec![
+                StepChunk::ToolCallStart {
+                    id: "b1".into(),
+                    name: "bad".into(),
+                    arguments: json!({}),
+                },
+                StepChunk::ToolCallStart {
+                    id: "s1".into(),
+                    name: "slow".into(),
+                    arguments: json!({}),
+                },
+            ],
+        });
+        let tool = service_fn(|inv: ToolInvocation| async move {
+            if inv.name == "bad" {
+                Err::<ToolOutput, BoxError>("boom".into())
+            } else {
+                sleep(Duration::from_millis(40)).await;
+                Ok::<_, BoxError>(ToolOutput {
+                    id: inv.id,
+                    result: json!({"ok":true}),
+                })
+            }
+        });
+        let mut svc = StepStreamService::new(provider, tool)
+            .parallel_tools(true)
+            .tool_join_policy(crate::core::ToolJoinPolicy::FailFast);
+        let req = CreateChatCompletionRequestArgs::default()
+            .model("gpt-4o")
+            .messages(vec![])
+            .build()
+            .unwrap();
+        let mut stream = svc.call(req).await.unwrap();
+        let mut saw_slow_end = false;
+        let mut saw_error = false;
+        while let Some(item) = stream.next().await {
+            match item {
+                StepChunk::ToolCallEnd { id, .. } => {
+                    if id == "s1" {
+                        saw_slow_end = true;
+                    }
+                }
+                StepChunk::Error(_) => {
+                    saw_error = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_error);
+        assert!(!saw_slow_end);
+    }
+
+    #[tokio::test]
+    async fn step_stream_parallel_joinall_emits_successes_then_error() {
+        use serde_json::json;
+        // Provider emits two tool calls
+        let provider = Arc::new(FakeProvider {
+            items: vec![
+                StepChunk::ToolCallStart {
+                    id: "b1".into(),
+                    name: "bad".into(),
+                    arguments: json!({}),
+                },
+                StepChunk::ToolCallStart {
+                    id: "s1".into(),
+                    name: "slow".into(),
+                    arguments: json!({}),
+                },
+            ],
+        });
+        let tool = service_fn(|inv: ToolInvocation| async move {
+            if inv.name == "bad" {
+                Err::<ToolOutput, BoxError>("boom".into())
+            } else {
+                sleep(Duration::from_millis(20)).await;
+                Ok::<_, BoxError>(ToolOutput {
+                    id: inv.id,
+                    result: json!({"ok":true}),
+                })
+            }
+        });
+        let mut svc = StepStreamService::new(provider, tool)
+            .parallel_tools(true)
+            .tool_join_policy(crate::core::ToolJoinPolicy::JoinAll)
+            .tool_concurrency_limit(1);
+        let req = CreateChatCompletionRequestArgs::default()
+            .model("gpt-4o")
+            .messages(vec![])
+            .build()
+            .unwrap();
+        let mut stream = svc.call(req).await.unwrap();
+        let mut saw_slow_end = false;
+        let mut saw_error = false;
+        let mut saw_complete = false;
+        while let Some(item) = stream.next().await {
+            match item {
+                StepChunk::ToolCallEnd { id, .. } => {
+                    if id == "s1" {
+                        saw_slow_end = true;
+                    }
+                }
+                StepChunk::Error(_) => {
+                    saw_error = true;
+                }
+                StepChunk::StepComplete { .. } => {
+                    saw_complete = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_slow_end);
+        assert!(saw_error);
+        assert!(!saw_complete);
     }
 }

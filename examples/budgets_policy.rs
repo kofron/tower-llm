@@ -27,7 +27,7 @@ async fn main() {
         max_time: None,
     };
 
-    let time_budget = tower_llm::budgets::Budget {
+    let _time_budget = tower_llm::budgets::Budget {
         max_prompt_tokens: None,
         max_completion_tokens: None,
         max_tool_invocations: None,
@@ -127,7 +127,7 @@ async fn main() {
     println!("  - Max tool invocations: 10");
     println!("  - Max time: 60 seconds");
 
-    let combined_policy = tower_llm::budgets::budget_policy(combined_budget);
+    let _combined_policy = tower_llm::budgets::budget_policy(combined_budget);
 
     println!("\n=== Key Takeaways ===");
     println!("1. Budget policies provide fine-grained control over agent execution");

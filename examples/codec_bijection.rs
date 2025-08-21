@@ -56,7 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Original messages ({} total):", original_messages.len());
     for (i, msg) in original_messages.iter().enumerate() {
-        println!("  {}: {:?}", i, message_type(&msg));
+        println!("  {}: {:?}", i, message_type(msg));
     }
 
     // Convert to RunItems
@@ -95,7 +95,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Reconstructed messages ({} total):", reconstructed.len());
     for (i, msg) in reconstructed.iter().enumerate() {
-        println!("  {}: {:?}", i, message_type(&msg));
+        println!("  {}: {:?}", i, message_type(msg));
     }
 
     // Verify bijection

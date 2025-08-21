@@ -1,7 +1,7 @@
 //! Example demonstrating recording and replay functionality.
 //! Shows how to capture agent runs and replay them deterministically.
 
-use std::sync::Arc;
+//
 
 use tower::{Layer, Service, ServiceExt};
 
@@ -9,72 +9,14 @@ use tower::{Layer, Service, ServiceExt};
 // Core module is now at root level
 // use tower_llm directly
 
-// Simple in-memory trace store for demonstration
-#[derive(Clone, Default)]
-struct InMemoryTraceStore {
-    traces: Arc<tokio::sync::Mutex<std::collections::HashMap<String, tower_llm::recording::Trace>>>,
-}
-
-impl Service<tower_llm::recording::WriteTrace> for InMemoryTraceStore {
-    type Response = ();
-    type Error = tower::BoxError;
-    type Future =
-        std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), tower::BoxError>> + Send>>;
-
-    fn poll_ready(
-        &mut self,
-        _cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<(), Self::Error>> {
-        std::task::Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, req: tower_llm::recording::WriteTrace) -> Self::Future {
-        let traces = self.traces.clone();
-        Box::pin(async move {
-            let mut t = traces.lock().await;
-            t.insert(
-                req.id.clone(),
-                tower_llm::recording::Trace { items: req.items },
-            );
-            Ok(())
-        })
-    }
-}
-
-impl Service<tower_llm::recording::ReadTrace> for InMemoryTraceStore {
-    type Response = tower_llm::recording::Trace;
-    type Error = tower::BoxError;
-    type Future = std::pin::Pin<
-        Box<
-            dyn std::future::Future<Output = Result<tower_llm::recording::Trace, tower::BoxError>>
-                + Send,
-        >,
-    >;
-
-    fn poll_ready(
-        &mut self,
-        _cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<(), Self::Error>> {
-        std::task::Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, req: tower_llm::recording::ReadTrace) -> Self::Future {
-        let traces = self.traces.clone();
-        Box::pin(async move {
-            let t = traces.lock().await;
-            t.get(&req.id)
-                .cloned()
-                .ok_or_else(|| format!("Trace {} not found", req.id).into())
-        })
-    }
-}
+// Use the library-provided in-memory trace store
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("=== Recording & Replay Example ===\n");
 
     // Create a trace store
-    let store = InMemoryTraceStore::default();
+    let store = tower_llm::recording::InMemoryTraceStore::default();
 
     println!("--- Phase 1: Recording an Agent Run ---");
 
@@ -133,19 +75,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Execute and record
     let outcome = recording_agent.ready().await?.call(req).await?;
 
-    match &outcome {
-        tower_llm::StepOutcome::Done { messages, .. } => {
-            println!("  ✅ Recorded run with {} final messages", messages.len());
+    if let tower_llm::StepOutcome::Done { messages, .. } = &outcome {
+        println!("  ✅ Recorded run with {} final messages", messages.len());
 
-            // Convert to RunItems for storage
-            let items = tower_llm::codec::messages_to_items(&messages)?;
-            println!(
-                "  📼 Stored {} RunItems in trace '{}'",
-                items.len(),
-                trace_id
-            );
-        }
-        _ => {}
+        // Convert to RunItems for storage
+        let items = tower_llm::codec::messages_to_items(messages)?;
+        println!(
+            "  📼 Stored {} RunItems in trace '{}'",
+            items.len(),
+            trace_id
+        );
     }
 
     println!("\n--- Phase 2: Replaying the Recorded Run ---");
@@ -168,23 +107,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let replayed = replayer.ready().await?.call(replay_req).await?;
 
-    match replayed {
-        tower_llm::StepOutcome::Done { messages, .. } => {
-            println!("  ✅ Replayed run returned {} messages", messages.len());
+    if let tower_llm::StepOutcome::Done { messages, .. } = replayed {
+        println!("  ✅ Replayed run returned {} messages", messages.len());
 
-            // Verify it matches the original
-            if let tower_llm::StepOutcome::Done {
-                messages: original, ..
-            } = outcome
-            {
-                if messages.len() == original.len() {
-                    println!("  ✅ Replay matches original perfectly!");
-                } else {
-                    println!("  ❌ Replay differs from original");
-                }
+        // Verify it matches the original
+        if let tower_llm::StepOutcome::Done {
+            messages: original, ..
+        } = outcome
+        {
+            if messages.len() == original.len() {
+                println!("  ✅ Replay matches original perfectly!");
+            } else {
+                println!("  ❌ Replay differs from original");
             }
         }
-        _ => {}
     }
 
     println!("\n--- Phase 3: Multiple Recordings ---");
@@ -198,7 +134,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 let mut msgs = req.messages.clone();
                 msgs.push(
                     async_openai::types::ChatCompletionRequestAssistantMessageArgs::default()
-                        .content(format!("Response from trace"))
+                        .content("Response from trace")
                         .build()?
                         .into(),
                 );
@@ -223,10 +159,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         println!("  📼 Recorded trace-{:03}", i);
     }
 
-    // List all stored traces
-    let traces = store.traces.lock().await;
+    // List stored traces by reading known IDs
     println!("\n📚 Trace Library:");
-    for (id, trace) in traces.iter() {
+    for id in [
+        "demo-trace-001".to_string(),
+        "trace-001".to_string(),
+        "trace-002".to_string(),
+        "trace-003".to_string(),
+    ]
+    .into_iter()
+    {
+        let trace = tower::Service::call(
+            &mut store.clone(),
+            tower_llm::recording::ReadTrace { id: id.clone() },
+        )
+        .await
+        .unwrap_or_default();
         println!("  - {}: {} items", id, trace.items.len());
     }
 

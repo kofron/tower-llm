@@ -66,9 +66,14 @@ use chrono::Utc;
 use sqlx::{Pool, Row, Sqlite, SqlitePool};
 use std::path::Path;
 
+use crate::codec::{items_to_messages, messages_to_items};
 use crate::error::Result;
 use crate::items::RunItem;
 use crate::memory::Session;
+use crate::sessions::{History, LoadSession, SaveSession};
+use std::future::Future;
+use std::pin::Pin;
+use tower::{BoxError, Service};
 
 /// A [`Session`] implementation that uses SQLite for persistent storage.
 ///
@@ -318,6 +323,157 @@ impl std::fmt::Debug for SqliteSession {
     }
 }
 
+/// Tower-native SQLite session store that implements Load/Save services used by MemoryLayer.
+#[derive(Clone)]
+pub struct SqliteSessionStore {
+    pool: SqlitePool,
+}
+
+impl SqliteSessionStore {
+    /// Create a new file-backed store
+    pub async fn new(db_path: impl AsRef<Path>) -> Result<Self> {
+        let db_url = format!("sqlite:{}", db_path.as_ref().display());
+        let pool = SqlitePool::connect(&db_url).await?;
+        Self::run_migrations(&pool).await?;
+        Ok(Self { pool })
+    }
+
+    /// Create a new in-memory store (for tests)
+    pub async fn new_in_memory() -> Result<Self> {
+        let pool = SqlitePool::connect("sqlite::memory:").await?;
+        Self::run_migrations(&pool).await?;
+        Ok(Self { pool })
+    }
+
+    async fn run_migrations(pool: &Pool<Sqlite>) -> Result<()> {
+        // Reuse same schema as SqliteSession (RunItem rows)
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                item_type TEXT NOT NULL,
+                item_data TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                sequence_num INTEGER NOT NULL,
+                UNIQUE(session_id, sequence_num)
+            )
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_session_id
+            ON sessions(session_id, sequence_num)
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
+        Ok(())
+    }
+}
+
+impl Service<LoadSession> for SqliteSessionStore {
+    type Response = History;
+    type Error = BoxError;
+    type Future =
+        Pin<Box<dyn Future<Output = std::result::Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(
+        &mut self,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::result::Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, req: LoadSession) -> Self::Future {
+        let pool = self.pool.clone();
+        let sid = req.id.0.clone();
+        Box::pin(async move {
+            let rows = sqlx::query(
+                r#"
+                SELECT item_data
+                FROM sessions
+                WHERE session_id = ?
+                ORDER BY sequence_num ASC
+                "#,
+            )
+            .bind(&sid)
+            .fetch_all(&pool)
+            .await?;
+            let mut items: Vec<RunItem> = Vec::with_capacity(rows.len());
+            for row in rows {
+                let data: String = row.get("item_data");
+                let item: RunItem = serde_json::from_str(&data)?;
+                items.push(item);
+            }
+            let messages = items_to_messages(&items);
+            Ok(messages)
+        })
+    }
+}
+
+impl Service<SaveSession> for SqliteSessionStore {
+    type Response = ();
+    type Error = BoxError;
+    type Future =
+        Pin<Box<dyn Future<Output = std::result::Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(
+        &mut self,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::result::Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, req: SaveSession) -> Self::Future {
+        let pool = self.pool.clone();
+        let sid = req.id.0.clone();
+        let history = req.history.clone();
+        Box::pin(async move {
+            // Convert messages to items using codec
+            let items = messages_to_items(&history).map_err(|e| -> BoxError { e.into() })?;
+
+            // Clear existing rows
+            sqlx::query("DELETE FROM sessions WHERE session_id = ?")
+                .bind(&sid)
+                .execute(&pool)
+                .await?;
+
+            // Insert in order
+            let mut sequence_num: i64 = 1;
+            for item in items {
+                let item_type = match &item {
+                    RunItem::Message(_) => "message",
+                    RunItem::ToolCall(_) => "tool_call",
+                    RunItem::ToolOutput(_) => "tool_output",
+                    RunItem::Handoff(_) => "handoff",
+                };
+                let item_data = serde_json::to_string(&item)?;
+                let created_at = chrono::Utc::now().to_rfc3339();
+                sqlx::query(
+                    r#"
+                    INSERT INTO sessions (session_id, item_type, item_data, created_at, sequence_num)
+                    VALUES (?, ?, ?, ?, ?)
+                    "#,
+                )
+                .bind(&sid)
+                .bind(item_type)
+                .bind(item_data)
+                .bind(created_at)
+                .bind(sequence_num)
+                .execute(&pool)
+                .await?;
+                sequence_num += 1;
+            }
+            Ok(())
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -536,5 +692,86 @@ mod tests {
         }
 
         // No cleanup needed for in-memory databases
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_session_store_load_save_roundtrip() {
+        use async_openai::types::{
+            ChatCompletionMessageToolCall, ChatCompletionRequestAssistantMessageArgs,
+            ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs,
+            ChatCompletionRequestToolMessageArgs, ChatCompletionRequestUserMessageArgs,
+            ChatCompletionToolType, FunctionCall,
+        };
+
+        let store = SqliteSessionStore::new_in_memory().await.unwrap();
+        let session_id = crate::sessions::SessionId("s_sqlite".into());
+
+        // Build a history with system, user, assistant(tool_call), tool
+        let sys = ChatCompletionRequestSystemMessageArgs::default()
+            .content("sys")
+            .build()
+            .unwrap();
+        let usr = ChatCompletionRequestUserMessageArgs::default()
+            .content("hi")
+            .build()
+            .unwrap();
+        let tc = ChatCompletionMessageToolCall {
+            id: "c1".to_string(),
+            r#type: ChatCompletionToolType::Function,
+            function: FunctionCall {
+                name: "calc".to_string(),
+                arguments: "{\"a\":1}".to_string(),
+            },
+        };
+        let asst = ChatCompletionRequestAssistantMessageArgs::default()
+            .content("")
+            .tool_calls(vec![tc])
+            .build()
+            .unwrap();
+        let tool = ChatCompletionRequestToolMessageArgs::default()
+            .content("{\"sum\":2}")
+            .tool_call_id("c1")
+            .build()
+            .unwrap();
+
+        let history = vec![
+            ChatCompletionRequestMessage::System(sys),
+            ChatCompletionRequestMessage::User(usr),
+            ChatCompletionRequestMessage::Assistant(asst),
+            ChatCompletionRequestMessage::Tool(tool),
+        ];
+
+        // Save
+        let mut save_store = store.clone();
+        Service::call(
+            &mut save_store,
+            SaveSession {
+                id: session_id.clone(),
+                history: history.clone(),
+            },
+        )
+        .await
+        .unwrap();
+
+        // Load
+        let mut load_store = store.clone();
+        let loaded = Service::call(&mut load_store, LoadSession { id: session_id })
+            .await
+            .unwrap();
+
+        assert_eq!(loaded.len(), history.len());
+        // Verify the tool message content still parses
+        if let ChatCompletionRequestMessage::Tool(t) = &loaded[3] {
+            if let async_openai::types::ChatCompletionRequestToolMessageContent::Text(txt) =
+                &t.content
+            {
+                let v: serde_json::Value = serde_json::from_str(txt).unwrap();
+                assert_eq!(v, serde_json::json!({"sum":2}));
+            } else {
+                panic!("expected text content");
+            }
+        } else {
+            panic!("expected tool message at index 3");
+        }
     }
 }

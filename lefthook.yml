@@ -1,0 +1,5 @@
+pre-commit:
+  parallel: true
+  jobs:
+    - run: cargo clippy --all-targets --all-features -- -D warnings
+    - run: cargo fmt --all

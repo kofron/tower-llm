@@ -16,7 +16,7 @@ use tracing::info;
 // Core module is now at root level
 // use tower_llm directly
 
-use tower_llm::AgentPolicy;
+// no additional imports needed
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct MathArgs {
@@ -165,12 +165,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let collector = tower::service_fn(move |record: tower_llm::observability::MetricRecord| {
         let metrics = metrics_clone.clone();
         async move {
-            match record {
-                tower_llm::observability::MetricRecord::Counter { name, value } => {
-                    let mut m = metrics.lock().unwrap();
-                    *m.entry(name).or_insert(0u64) += value;
-                }
-                _ => {}
+            if let tower_llm::observability::MetricRecord::Counter { name, value } = record {
+                let mut m = metrics.lock().unwrap();
+                *m.entry(name).or_insert(0u64) += value;
             }
             Ok::<_, tower::BoxError>(())
         }

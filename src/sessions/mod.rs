@@ -68,6 +68,31 @@ pub struct SessionId(pub String);
 
 /// History of chat messages for a session.
 pub type History = Vec<ChatCompletionRequestMessage>;
+/// Trait for extracting conversation messages from various response types.
+pub trait ConversationMessages {
+    fn to_messages(&self) -> Vec<ChatCompletionRequestMessage>;
+}
+
+impl ConversationMessages for CreateChatCompletionRequest {
+    fn to_messages(&self) -> Vec<ChatCompletionRequestMessage> {
+        self.messages.clone()
+    }
+}
+
+impl ConversationMessages for crate::core::AgentRun {
+    fn to_messages(&self) -> Vec<ChatCompletionRequestMessage> {
+        self.messages.clone()
+    }
+}
+
+impl ConversationMessages for crate::core::StepOutcome {
+    fn to_messages(&self) -> Vec<ChatCompletionRequestMessage> {
+        match self {
+            crate::core::StepOutcome::Next { messages, .. } => messages.clone(),
+            crate::core::StepOutcome::Done { messages, .. } => messages.clone(),
+        }
+    }
+}
 
 /// Load request for a session.
 #[derive(Debug, Clone)]
@@ -176,10 +201,10 @@ where
     }
 }
 
-impl<S, Ls, Ss> Service<CreateChatCompletionRequest> for Memory<S, Ls, Ss>
+impl<S, Ls, Ss, R> Service<CreateChatCompletionRequest> for Memory<S, Ls, Ss>
 where
-    S: Service<CreateChatCompletionRequest> + Send + 'static,
-    S::Response: Send + 'static,
+    S: Service<CreateChatCompletionRequest, Response = R> + Send + 'static,
+    R: ConversationMessages + Send + 'static,
     S::Error: Into<BoxError>,
     S::Future: Send + 'static,
     Ls: Service<LoadSession, Response = History, Error = BoxError> + Send + Sync + Clone + 'static,
@@ -187,7 +212,7 @@ where
     Ss: Service<SaveSession, Response = (), Error = BoxError> + Send + Sync + Clone + 'static,
     Ss::Future: Send + 'static,
 {
-    type Response = S::Response;
+    type Response = R;
     type Error = BoxError;
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
@@ -234,17 +259,15 @@ where
                 .map_err(|e| -> BoxError { e.to_string().into() })?;
 
             // Call inner
-            let resp = {
+            let resp: R = {
                 let mut guard = inner.lock().await;
                 Service::call(&mut *guard, combined_req)
                     .await
-                    .map_err(|e| Into::<BoxError>::into(e))?
+                    .map_err(Into::<BoxError>::into)?
             };
 
             // Persist the latest messages; for simplicity, overwrite full history
-            let latest_messages = match &resp {
-                _ => combined, // if inner rewrites messages, we could inspect resp; simplified here
-            };
+            let latest_messages = resp.to_messages();
             let mut save_svc = save;
             Service::call(
                 &mut save_svc,
@@ -266,7 +289,7 @@ mod tests {
     use async_openai::types::{
         ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
     };
-    use tower::{service_fn, ServiceExt};
+    use tower::service_fn;
 
     fn req_with_messages(
         messages: Vec<ChatCompletionRequestMessage>,
@@ -333,5 +356,151 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(history.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn memory_layer_persists_step_outcome_done_messages() {
+        let store = InMemorySessionStore::default();
+        let session_id = SessionId("s2".into());
+
+        // Seed prior history
+        let prior = vec![
+            ChatCompletionRequestSystemMessageArgs::default()
+                .content("sys")
+                .build()
+                .unwrap()
+                .into(),
+            ChatCompletionRequestUserMessageArgs::default()
+                .content("prev")
+                .build()
+                .unwrap()
+                .into(),
+        ];
+        let mut save_clone = store.clone();
+        tower::Service::call(
+            &mut save_clone,
+            SaveSession {
+                id: session_id.clone(),
+                history: prior.clone(),
+            },
+        )
+        .await
+        .unwrap();
+
+        // Inner builds StepOutcome::Done with appended assistant message based on incoming request
+        let inner = service_fn(|req: CreateChatCompletionRequest| async move {
+            let mut msgs = req.messages.clone();
+            let asst = async_openai::types::ChatCompletionRequestAssistantMessageArgs::default()
+                .content("ok")
+                .build()
+                .unwrap();
+            msgs.push(asst.into());
+            Ok::<_, BoxError>(crate::core::StepOutcome::Done {
+                messages: msgs,
+                aux: Default::default(),
+            })
+        });
+
+        let layer = MemoryLayer::new(
+            Arc::new(store.clone()),
+            Arc::new(store.clone()),
+            session_id.clone(),
+        );
+        let mut svc = layer.layer(inner);
+
+        let req = req_with_messages(vec![ChatCompletionRequestUserMessageArgs::default()
+            .content("hello")
+            .build()
+            .unwrap()
+            .into()]);
+        let _ = tower::Service::call(&mut svc, req).await.unwrap();
+
+        let mut load = store.clone();
+        let history = tower::Service::call(&mut load, LoadSession { id: session_id })
+            .await
+            .unwrap();
+        assert_eq!(history.len(), 4); // prior(2) + new user + appended assistant
+    }
+
+    #[tokio::test]
+    async fn memory_layer_persists_step_outcome_next_messages() {
+        let store = InMemorySessionStore::default();
+        let session_id = SessionId("s3".into());
+
+        // No prior history
+        let inner = service_fn(|req: CreateChatCompletionRequest| async move {
+            let mut msgs = req.messages.clone();
+            let asst = async_openai::types::ChatCompletionRequestAssistantMessageArgs::default()
+                .content("next")
+                .build()
+                .unwrap();
+            msgs.push(asst.into());
+            Ok::<_, BoxError>(crate::core::StepOutcome::Next {
+                messages: msgs,
+                aux: Default::default(),
+                invoked_tools: vec![],
+            })
+        });
+
+        let layer = MemoryLayer::new(
+            Arc::new(store.clone()),
+            Arc::new(store.clone()),
+            session_id.clone(),
+        );
+        let mut svc = layer.layer(inner);
+
+        let req = req_with_messages(vec![ChatCompletionRequestUserMessageArgs::default()
+            .content("hey")
+            .build()
+            .unwrap()
+            .into()]);
+        let _ = tower::Service::call(&mut svc, req).await.unwrap();
+
+        let mut load = store.clone();
+        let history = tower::Service::call(&mut load, LoadSession { id: session_id })
+            .await
+            .unwrap();
+        assert_eq!(history.len(), 2); // user + assistant("next")
+    }
+
+    #[tokio::test]
+    async fn memory_layer_persists_agent_run_messages() {
+        let store = InMemorySessionStore::default();
+        let session_id = SessionId("s4".into());
+
+        // Inner returns AgentRun echoing request messages plus one assistant
+        let inner = service_fn(|req: CreateChatCompletionRequest| async move {
+            let mut msgs = req.messages.clone();
+            let asst = async_openai::types::ChatCompletionRequestAssistantMessageArgs::default()
+                .content("from agent")
+                .build()
+                .unwrap();
+            msgs.push(asst.into());
+            Ok::<_, BoxError>(crate::core::AgentRun {
+                messages: msgs,
+                steps: 1,
+                stop: crate::core::AgentStopReason::DoneNoToolCalls,
+            })
+        });
+
+        let layer = MemoryLayer::new(
+            Arc::new(store.clone()),
+            Arc::new(store.clone()),
+            session_id.clone(),
+        );
+        let mut svc = layer.layer(inner);
+
+        let req = req_with_messages(vec![ChatCompletionRequestUserMessageArgs::default()
+            .content("hey")
+            .build()
+            .unwrap()
+            .into()]);
+        let _ = tower::Service::call(&mut svc, req).await.unwrap();
+
+        let mut load = store.clone();
+        let history = tower::Service::call(&mut load, LoadSession { id: session_id })
+            .await
+            .unwrap();
+        assert_eq!(history.len(), 2); // user + assistant("from agent")
     }
 }

@@ -17,7 +17,7 @@
 //! - **Policy**: Define collaboration patterns between agents
 //!
 //! These work together but serve different purposes:
-//! ```rust
+//! ```rust,ignore
 //! let group = GroupBuilder::new()
 //!     .picker(route_by_topic())           // WHO: Route by message topic
 //!     .handoff_policy(explicit_handoffs()) // HOW: Agents use handoff tools
@@ -60,15 +60,20 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 
 use async_openai::types::{ChatCompletionTool, CreateChatCompletionRequest};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tower::{BoxError, Layer, Service, ServiceExt};
-use tracing::{debug, info, warn, error, instrument, trace};
+use tracing::{debug, error, info, instrument, trace, warn};
 
-use crate::core::{AgentRun, AgentStopReason, AgentSvc, LoopState, StepOutcome, ToolInvocation, ToolOutput};
+use crate::core::{
+    AgentRun, AgentStopReason, AgentSvc, LoopState, StepOutcome, ToolInvocation, ToolOutput,
+};
 
 pub type AgentName = String;
 
@@ -127,15 +132,15 @@ pub trait HandoffPolicy: Send + Sync + 'static {
     /// Generate handoff tools that the LLM can call.
     /// These tools will be injected into the agent's available tools.
     fn handoff_tools(&self) -> Vec<ChatCompletionTool>;
-    
+
     /// Handle a handoff tool call by converting it to a HandoffRequest.
     /// This is called when the LLM invokes one of the handoff tools.
     fn handle_handoff_tool(&self, invocation: &ToolInvocation) -> Result<HandoffRequest, BoxError>;
-    
+
     /// Make runtime handoff decisions based on agent state and step outcome.
     /// This allows for automatic handoffs based on conditions (e.g., no tools called).
     fn should_handoff(&self, state: &LoopState, outcome: &StepOutcome) -> Option<HandoffRequest>;
-    
+
     /// Check if a tool call is a handoff tool managed by this policy.
     fn is_handoff_tool(&self, tool_name: &str) -> bool;
 }
@@ -156,12 +161,18 @@ impl GroupBuilder<(), ()> {
     }
 }
 
+impl Default for GroupBuilder<(), ()> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<P, H> GroupBuilder<P, H> {
     pub fn agent(mut self, name: impl Into<String>, svc: AgentSvc) -> Self {
         self.agents.insert(name.into(), svc);
         self
     }
-    
+
     pub fn picker<NewP>(self, p: NewP) -> GroupBuilder<NewP, H> {
         GroupBuilder {
             agents: self.agents,
@@ -169,7 +180,7 @@ impl<P, H> GroupBuilder<P, H> {
             handoff_policy: self.handoff_policy,
         }
     }
-    
+
     /// Add handoff policy to enable agent coordination
     pub fn handoff_policy<NewH>(self, policy: NewH) -> GroupBuilder<P, NewH>
     where
@@ -197,8 +208,8 @@ impl<P> GroupBuilder<P, ()> {
     }
 }
 
-impl<P, H> GroupBuilder<P, H> 
-where 
+impl<P, H> GroupBuilder<P, H>
+where
     H: HandoffPolicy + Clone + Send + 'static,
 {
     /// Build a handoff-enabled group coordinator
@@ -262,7 +273,7 @@ where
 // ================================================================================================
 
 /// Enhanced group coordinator that manages handoffs between agents.
-/// 
+///
 /// This coordinator:
 /// 1. Uses AgentPicker for initial agent selection
 /// 2. Integrates HandoffLayer with agent tools to detect handoffs
@@ -274,7 +285,8 @@ pub struct HandoffCoordinator<P, H> {
     picker: P,
     handoff_policy: H,
     current_agent: Arc<tokio::sync::Mutex<Option<AgentName>>>,
-    conversation_context: Arc<tokio::sync::Mutex<Vec<async_openai::types::ChatCompletionRequestMessage>>>,
+    conversation_context:
+        Arc<tokio::sync::Mutex<Vec<async_openai::types::ChatCompletionRequestMessage>>>,
 }
 
 impl<P, H> HandoffCoordinator<P, H>
@@ -292,12 +304,11 @@ where
             conversation_context: Arc::new(tokio::sync::Mutex::new(Vec::new())),
         }
     }
-    
+
     /// Get the handoff tools that will be available to agents.
     pub fn handoff_tools(&self) -> Vec<ChatCompletionTool> {
         self.handoff_policy.handoff_tools()
     }
-    
 }
 
 impl<P, H> Service<CreateChatCompletionRequest> for HandoffCoordinator<P, H>
@@ -324,19 +335,19 @@ where
         let handoff_policy = self.handoff_policy.clone();
         let current_agent = self.current_agent.clone();
         let conversation_context = self.conversation_context.clone();
-        
+
         Box::pin(async move {
             const MAX_HANDOFFS: usize = 10;
             let mut handoff_count = 0;
             let mut all_messages = Vec::new();
             let mut total_steps = 0;
-            
+
             info!("🚀 Starting handoff coordinator");
             debug!("Initial request has {} messages", request.messages.len());
-            
+
             // Store the original request messages
             let original_messages = request.messages.clone();
-            
+
             // Pick the initial agent
             debug!("Invoking picker to determine initial agent");
             let initial_pick = ServiceExt::ready(&mut picker)
@@ -346,16 +357,16 @@ where
                     last_stop: AgentStopReason::DoneNoToolCalls,
                 })
                 .await?;
-            
+
             info!("📍 Initial agent selected: {}", initial_pick);
             let mut current_agent_name = initial_pick;
-            
+
             // Update current agent tracking
             {
                 let mut current = current_agent.lock().await;
                 *current = Some(current_agent_name.clone());
             }
-            
+
             // Main handoff loop
             loop {
                 // Check handoff limit
@@ -363,27 +374,36 @@ where
                     error!("❌ Maximum handoffs exceeded ({})", MAX_HANDOFFS);
                     return Err("Maximum handoffs exceeded".into());
                 }
-                
-                info!("🤖 Executing agent: {} (handoff #{}/{})", 
-                    current_agent_name, handoff_count + 1, MAX_HANDOFFS);
-                
+
+                info!(
+                    "🤖 Executing agent: {} (handoff #{}/{})",
+                    current_agent_name,
+                    handoff_count + 1,
+                    MAX_HANDOFFS
+                );
+
                 // Get the current agent
                 let mut agents_guard = agents.lock().await;
-                let agent = agents_guard
-                    .get_mut(&current_agent_name)
-                    .ok_or_else(|| {
-                        error!("Agent not found: {}", current_agent_name);
-                        format!("Unknown agent: {}", current_agent_name)
-                    })?;
-                
+                let agent = agents_guard.get_mut(&current_agent_name).ok_or_else(|| {
+                    error!("Agent not found: {}", current_agent_name);
+                    format!("Unknown agent: {}", current_agent_name)
+                })?;
+
                 // Inject handoff tools into the request
                 let handoff_tools = handoff_policy.handoff_tools();
                 if !handoff_tools.is_empty() {
-                    debug!("Injecting {} handoff tools into request", handoff_tools.len());
-                    trace!("Handoff tools: {:?}", handoff_tools.iter()
-                        .map(|t| &t.function.name)
-                        .collect::<Vec<_>>());
-                    
+                    debug!(
+                        "Injecting {} handoff tools into request",
+                        handoff_tools.len()
+                    );
+                    trace!(
+                        "Handoff tools: {:?}",
+                        handoff_tools
+                            .iter()
+                            .map(|t| &t.function.name)
+                            .collect::<Vec<_>>()
+                    );
+
                     // Add handoff tools to the request if not already present
                     if request.tools.is_none() {
                         request.tools = Some(handoff_tools);
@@ -392,52 +412,64 @@ where
                         request.tools.as_mut().unwrap().extend(handoff_tools);
                     }
                 }
-                
+
                 // Execute the current agent
                 debug!("Calling agent with {} messages", request.messages.len());
+                // Capture prefix length to examine only new messages later
+                let delta_start = request.messages.len();
                 let agent_run = ServiceExt::ready(agent)
                     .await?
                     .call(request.clone())
                     .await?;
-                
-                info!("✅ Agent {} completed: {} messages, {} steps, stop reason: {:?}", 
-                    current_agent_name, agent_run.messages.len(), 
-                    agent_run.steps, agent_run.stop);
-                
+
+                info!(
+                    "✅ Agent {} completed: {} messages, {} steps, stop reason: {:?}",
+                    current_agent_name,
+                    agent_run.messages.len(),
+                    agent_run.steps,
+                    agent_run.stop
+                );
+
                 // Add messages from this run
                 all_messages.extend(agent_run.messages.clone());
                 total_steps += agent_run.steps;
-                
+
                 // Check for handoff in the agent's response
                 let mut handoff_requested = None;
-                
+
                 // Look for handoff tool calls in the response messages
                 debug!("Checking for handoff tool calls in agent response");
-                for message in &agent_run.messages {
-                    if let async_openai::types::ChatCompletionRequestMessage::Assistant(msg) = message {
+                for message in agent_run.messages.iter().skip(delta_start) {
+                    if let async_openai::types::ChatCompletionRequestMessage::Assistant(msg) =
+                        message
+                    {
                         if let Some(tool_calls) = &msg.tool_calls {
                             trace!("Found {} tool calls in message", tool_calls.len());
                             for tool_call in tool_calls {
                                 if handoff_policy.is_handoff_tool(&tool_call.function.name) {
                                     info!("🔄 Handoff tool detected: {}", tool_call.function.name);
-                                    
+
                                     // Parse the handoff request from the tool call
                                     let invocation = ToolInvocation {
                                         id: tool_call.id.clone(),
                                         name: tool_call.function.name.clone(),
-                                        arguments: serde_json::from_str(&tool_call.function.arguments)
-                                            .unwrap_or_else(|e| {
-                                                warn!("Failed to parse handoff tool arguments: {}", e);
-                                                serde_json::json!({})
-                                            }),
+                                        arguments: serde_json::from_str(
+                                            &tool_call.function.arguments,
+                                        )
+                                        .unwrap_or_else(|e| {
+                                            warn!("Failed to parse handoff tool arguments: {}", e);
+                                            serde_json::json!({})
+                                        }),
                                     };
-                                    
+
                                     match handoff_policy.handle_handoff_tool(&invocation) {
                                         Ok(handoff_req) => {
-                                            info!("📋 Handoff request: {} → {} (reason: {:?})", 
-                                                current_agent_name, 
+                                            info!(
+                                                "📋 Handoff request: {} → {} (reason: {:?})",
+                                                current_agent_name,
                                                 handoff_req.target_agent,
-                                                handoff_req.reason);
+                                                handoff_req.reason
+                                            );
                                             handoff_requested = Some(handoff_req);
                                             break;
                                         }
@@ -453,16 +485,19 @@ where
                         break;
                     }
                 }
-                
+
                 // If no explicit handoff via tool, check policy for automatic handoff
                 if handoff_requested.is_none() {
-                    debug!("No explicit handoff tool called, checking policy for automatic handoff");
-                    
+                    debug!(
+                        "No explicit handoff tool called, checking policy for automatic handoff"
+                    );
+
                     // Create a LoopState for the policy check
                     let loop_state = LoopState { steps: total_steps };
-                    
+
                     // Convert AgentRun to StepOutcome for policy check
-                    let step_outcome = if matches!(agent_run.stop, AgentStopReason::DoneNoToolCalls) {
+                    let step_outcome = if matches!(agent_run.stop, AgentStopReason::DoneNoToolCalls)
+                    {
                         StepOutcome::Done {
                             messages: agent_run.messages.clone(),
                             aux: crate::core::StepAux::default(),
@@ -474,55 +509,68 @@ where
                             invoked_tools: vec![],
                         }
                     };
-                    
-                    if let Some(handoff) = handoff_policy.should_handoff(&loop_state, &step_outcome) {
-                        info!("🔀 Automatic handoff triggered by policy: {} → {} (reason: {:?})",
-                            current_agent_name, handoff.target_agent, handoff.reason);
+
+                    if let Some(handoff) = handoff_policy.should_handoff(&loop_state, &step_outcome)
+                    {
+                        info!(
+                            "🔀 Automatic handoff triggered by policy: {} → {} (reason: {:?})",
+                            current_agent_name, handoff.target_agent, handoff.reason
+                        );
                         handoff_requested = Some(handoff);
                     } else {
                         debug!("No automatic handoff triggered");
                     }
                 }
-                
+
                 // Handle handoff if requested
                 if let Some(handoff) = handoff_requested {
-                    info!("🚦 Processing handoff: {} → {}", 
-                        current_agent_name, handoff.target_agent);
-                    
+                    info!(
+                        "🚦 Processing handoff: {} → {}",
+                        current_agent_name, handoff.target_agent
+                    );
+
                     // Update the current agent
                     let previous_agent = current_agent_name.clone();
                     current_agent_name = handoff.target_agent.clone();
                     handoff_count += 1;
-                    
+
                     // Update current agent tracking
                     {
                         let mut current = current_agent.lock().await;
                         *current = Some(current_agent_name.clone());
                     }
-                    
+
                     // Update conversation context
                     {
                         let mut context = conversation_context.lock().await;
                         context.extend(agent_run.messages.clone());
-                        debug!("Updated conversation context with {} messages", 
-                            agent_run.messages.len());
+                        debug!(
+                            "Updated conversation context with {} messages",
+                            agent_run.messages.len()
+                        );
                     }
-                    
+
                     // Prepare request for next agent with accumulated context
                     request.messages = original_messages.clone();
                     request.messages.extend(all_messages.clone());
-                    
-                    info!("🔗 Handoff complete: {} → {} (total handoffs: {})", 
-                        previous_agent, current_agent_name, handoff_count);
-                    
+
+                    info!(
+                        "🔗 Handoff complete: {} → {} (total handoffs: {})",
+                        previous_agent, current_agent_name, handoff_count
+                    );
+
                     // Continue to next iteration with new agent
                     continue;
                 }
-                
+
                 // No handoff, we're done
-                info!("🎯 Workflow complete: {} total messages, {} steps, final agent: {}",
-                    all_messages.len(), total_steps, current_agent_name);
-                
+                info!(
+                    "🎯 Workflow complete: {} total messages, {} steps, final agent: {}",
+                    all_messages.len(),
+                    total_steps,
+                    current_agent_name
+                );
+
                 return Ok(AgentRun {
                     messages: all_messages,
                     steps: total_steps,
@@ -555,22 +603,22 @@ impl ExplicitHandoffPolicy {
             description: None,
         }
     }
-    
+
     /// Set custom tool name (default: "handoff_to_{target}")
     pub fn with_tool_name(mut self, name: impl Into<String>) -> Self {
         self.tool_name = Some(name.into());
         self
     }
-    
+
     /// Set custom tool description
     pub fn with_description(mut self, desc: impl Into<String>) -> Self {
         self.description = Some(desc.into());
         self
     }
-    
+
     fn tool_name(&self) -> String {
-        self.tool_name.as_ref()
-            .map(|n| n.clone())
+        self.tool_name
+            .clone()
             .unwrap_or_else(|| format!("handoff_to_{}", self.target_agent))
     }
 }
@@ -579,12 +627,16 @@ impl HandoffPolicy for ExplicitHandoffPolicy {
     #[instrument(skip(self))]
     fn handoff_tools(&self) -> Vec<ChatCompletionTool> {
         let tool_name = self.tool_name();
-        let description = self.description.as_ref()
-            .map(|d| d.clone())
+        let description = self
+            .description
+            .clone()
             .unwrap_or_else(|| format!("Hand off the conversation to {}", self.target_agent));
-        
-        debug!("ExplicitHandoffPolicy generating tool: {} → {}", tool_name, self.target_agent);
-        
+
+        debug!(
+            "ExplicitHandoffPolicy generating tool: {} → {}",
+            tool_name, self.target_agent
+        );
+
         vec![ChatCompletionTool {
             r#type: async_openai::types::ChatCompletionToolType::Function,
             function: async_openai::types::FunctionObject {
@@ -598,39 +650,41 @@ impl HandoffPolicy for ExplicitHandoffPolicy {
                             "description": "Reason for the handoff"
                         },
                         "context": {
-                            "type": "object", 
+                            "type": "object",
                             "description": "Optional context to pass to the target agent"
                         }
                     }
                 })),
                 ..Default::default()
-            }
+            },
         }]
     }
-    
+
     fn handle_handoff_tool(&self, invocation: &ToolInvocation) -> Result<HandoffRequest, BoxError> {
         if !self.is_handoff_tool(&invocation.name) {
             return Err(format!("Not a handoff tool: {}", invocation.name).into());
         }
-        
-        let reason = invocation.arguments.get("reason")
+
+        let reason = invocation
+            .arguments
+            .get("reason")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-            
+
         let context = invocation.arguments.get("context").cloned();
-        
+
         Ok(HandoffRequest {
             target_agent: self.target_agent.clone(),
             context,
             reason,
         })
     }
-    
+
     fn should_handoff(&self, _state: &LoopState, _outcome: &StepOutcome) -> Option<HandoffRequest> {
         // Explicit handoffs only trigger via tool calls, not automatically
         None
     }
-    
+
     fn is_handoff_tool(&self, tool_name: &str) -> bool {
         tool_name == self.tool_name()
     }
@@ -652,7 +706,7 @@ impl SequentialHandoffPolicy {
             current_index: Arc::new(AtomicUsize::new(0)),
         }
     }
-    
+
     fn next_agent(&self) -> Option<String> {
         let current = self.current_index.fetch_add(1, Ordering::SeqCst);
         if current + 1 < self.agents.len() {
@@ -670,13 +724,20 @@ impl HandoffPolicy for SequentialHandoffPolicy {
         debug!("SequentialHandoffPolicy: no tools (automatic handoffs only)");
         vec![]
     }
-    
+
     #[instrument(skip(self, invocation))]
     fn handle_handoff_tool(&self, invocation: &ToolInvocation) -> Result<HandoffRequest, BoxError> {
-        warn!("Sequential policy received unexpected handoff tool call: {}", invocation.name);
-        Err(format!("Sequential policy has no handoff tools: {}", invocation.name).into())
+        warn!(
+            "Sequential policy received unexpected handoff tool call: {}",
+            invocation.name
+        );
+        Err(format!(
+            "Sequential policy has no handoff tools: {}",
+            invocation.name
+        )
+        .into())
     }
-    
+
     #[instrument(skip(self, _state, outcome))]
     fn should_handoff(&self, _state: &LoopState, outcome: &StepOutcome) -> Option<HandoffRequest> {
         match outcome {
@@ -684,8 +745,12 @@ impl HandoffPolicy for SequentialHandoffPolicy {
                 // When agent completes without tool calls, move to next agent
                 if let Some(target) = self.next_agent() {
                     let current_idx = self.current_index.load(Ordering::SeqCst);
-                    info!("📈 Sequential handoff: step {}/{} → {}", 
-                        current_idx, self.agents.len(), target);
+                    info!(
+                        "📈 Sequential handoff: step {}/{} → {}",
+                        current_idx,
+                        self.agents.len(),
+                        target
+                    );
                     Some(HandoffRequest {
                         target_agent: target,
                         context: None,
@@ -702,7 +767,7 @@ impl HandoffPolicy for SequentialHandoffPolicy {
             }
         }
     }
-    
+
     fn is_handoff_tool(&self, _tool_name: &str) -> bool {
         false // No handoff tools for sequential policy
     }
@@ -720,7 +785,7 @@ impl MultiExplicitHandoffPolicy {
     pub fn new(handoffs: HashMap<String, String>) -> Self {
         Self { handoffs }
     }
-    
+
     /// Add a handoff mapping.
     pub fn add_handoff(mut self, tool_name: impl Into<String>, target: impl Into<String>) -> Self {
         self.handoffs.insert(tool_name.into(), target.into());
@@ -731,55 +796,65 @@ impl MultiExplicitHandoffPolicy {
 impl HandoffPolicy for MultiExplicitHandoffPolicy {
     #[instrument(skip(self))]
     fn handoff_tools(&self) -> Vec<ChatCompletionTool> {
-        debug!("MultiExplicitHandoffPolicy generating {} handoff tools", self.handoffs.len());
-        self.handoffs.iter().map(|(tool_name, target_agent)| {
-            trace!("  Tool: {} → {}", tool_name, target_agent);
-            ChatCompletionTool {
-                r#type: async_openai::types::ChatCompletionToolType::Function,
-                function: async_openai::types::FunctionObject {
-                    name: tool_name.clone(),
-                    description: Some(format!("Hand off the conversation to {}", target_agent)),
-                    parameters: Some(serde_json::json!({
-                        "type": "object",
-                        "properties": {
-                            "reason": {
-                                "type": "string",
-                                "description": "Reason for the handoff"
-                            },
-                            "context": {
-                                "type": "object",
-                                "description": "Optional context to pass to the target agent"
+        debug!(
+            "MultiExplicitHandoffPolicy generating {} handoff tools",
+            self.handoffs.len()
+        );
+        self.handoffs
+            .iter()
+            .map(|(tool_name, target_agent)| {
+                trace!("  Tool: {} → {}", tool_name, target_agent);
+                ChatCompletionTool {
+                    r#type: async_openai::types::ChatCompletionToolType::Function,
+                    function: async_openai::types::FunctionObject {
+                        name: tool_name.clone(),
+                        description: Some(format!("Hand off the conversation to {}", target_agent)),
+                        parameters: Some(serde_json::json!({
+                            "type": "object",
+                            "properties": {
+                                "reason": {
+                                    "type": "string",
+                                    "description": "Reason for the handoff"
+                                },
+                                "context": {
+                                    "type": "object",
+                                    "description": "Optional context to pass to the target agent"
+                                }
                             }
-                        }
-                    })),
-                    ..Default::default()
+                        })),
+                        ..Default::default()
+                    },
                 }
-            }
-        }).collect()
+            })
+            .collect()
     }
-    
+
     fn handle_handoff_tool(&self, invocation: &ToolInvocation) -> Result<HandoffRequest, BoxError> {
-        let target_agent = self.handoffs.get(&invocation.name)
+        let target_agent = self
+            .handoffs
+            .get(&invocation.name)
             .ok_or_else(|| format!("Not a handoff tool: {}", invocation.name))?;
-        
-        let reason = invocation.arguments.get("reason")
+
+        let reason = invocation
+            .arguments
+            .get("reason")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-            
+
         let context = invocation.arguments.get("context").cloned();
-        
+
         Ok(HandoffRequest {
             target_agent: target_agent.clone(),
             context,
             reason,
         })
     }
-    
+
     fn should_handoff(&self, _state: &LoopState, _outcome: &StepOutcome) -> Option<HandoffRequest> {
         // Multi-explicit handoffs only trigger via tool calls, not automatically
         None
     }
-    
+
     fn is_handoff_tool(&self, tool_name: &str) -> bool {
         self.handoffs.contains_key(tool_name)
     }
@@ -827,7 +902,7 @@ impl HandoffPolicy for AnyHandoffPolicy {
             AnyHandoffPolicy::Composite(p) => p.handoff_tools(),
         }
     }
-    
+
     fn handle_handoff_tool(&self, invocation: &ToolInvocation) -> Result<HandoffRequest, BoxError> {
         match self {
             AnyHandoffPolicy::Explicit(p) => p.handle_handoff_tool(invocation),
@@ -836,7 +911,7 @@ impl HandoffPolicy for AnyHandoffPolicy {
             AnyHandoffPolicy::Composite(p) => p.handle_handoff_tool(invocation),
         }
     }
-    
+
     fn should_handoff(&self, state: &LoopState, outcome: &StepOutcome) -> Option<HandoffRequest> {
         match self {
             AnyHandoffPolicy::Explicit(p) => p.should_handoff(state, outcome),
@@ -845,7 +920,7 @@ impl HandoffPolicy for AnyHandoffPolicy {
             AnyHandoffPolicy::Composite(p) => p.should_handoff(state, outcome),
         }
     }
-    
+
     fn is_handoff_tool(&self, tool_name: &str) -> bool {
         match self {
             AnyHandoffPolicy::Explicit(p) => p.is_handoff_tool(tool_name),
@@ -876,7 +951,7 @@ impl HandoffPolicy for CompositeHandoffPolicy {
             .flat_map(|p| p.handoff_tools())
             .collect()
     }
-    
+
     fn handle_handoff_tool(&self, invocation: &ToolInvocation) -> Result<HandoffRequest, BoxError> {
         for policy in &self.policies {
             if policy.is_handoff_tool(&invocation.name) {
@@ -885,7 +960,7 @@ impl HandoffPolicy for CompositeHandoffPolicy {
         }
         Err(format!("No policy handles handoff tool: {}", invocation.name).into())
     }
-    
+
     fn should_handoff(&self, state: &LoopState, outcome: &StepOutcome) -> Option<HandoffRequest> {
         // Return first handoff decision from any policy
         for policy in &self.policies {
@@ -895,7 +970,7 @@ impl HandoffPolicy for CompositeHandoffPolicy {
         }
         None
     }
-    
+
     fn is_handoff_tool(&self, tool_name: &str) -> bool {
         self.policies.iter().any(|p| p.is_handoff_tool(tool_name))
     }
@@ -906,9 +981,9 @@ impl HandoffPolicy for CompositeHandoffPolicy {
 // ================================================================================================
 
 /// Create an explicit handoff policy for a target agent.
-/// 
+///
 /// Example:
-/// ```rust
+/// ```rust,ignore
 /// let policy = explicit_handoff_to("specialist")
 ///     .with_description("Escalate complex issues to specialist");
 /// ```
@@ -917,9 +992,9 @@ pub fn explicit_handoff_to(target: impl Into<String>) -> ExplicitHandoffPolicy {
 }
 
 /// Create a sequential handoff policy with agent sequence.
-/// 
+///
 /// Example:
-/// ```rust  
+/// ```rust,ignore  
 /// let policy = sequential_handoff(vec!["researcher", "writer", "reviewer"]);
 /// ```
 pub fn sequential_handoff(agents: Vec<String>) -> SequentialHandoffPolicy {
@@ -927,9 +1002,9 @@ pub fn sequential_handoff(agents: Vec<String>) -> SequentialHandoffPolicy {
 }
 
 /// Create a composite handoff policy combining multiple policies.
-/// 
+///
 /// Example:
-/// ```rust
+/// ```rust,ignore
 /// let policy = composite_handoff(vec![
 ///     AnyHandoffPolicy::Explicit(explicit_handoff_to("specialist")),
 ///     AnyHandoffPolicy::Sequential(sequential_handoff(vec!["a".to_string(), "b".to_string()])),
@@ -959,7 +1034,7 @@ impl From<ToolOutput> for ToolOutputResult {
 }
 
 /// Layer that adds handoff capabilities to tool services.
-/// 
+///
 /// This layer:
 /// 1. Wraps an existing tool service
 /// 2. Adds handoff tools from the policy to the available tools
@@ -980,7 +1055,7 @@ where
             handoff_policy: policy,
         }
     }
-    
+
     /// Get the handoff tools that this layer will inject.
     pub fn handoff_tools(&self) -> Vec<ChatCompletionTool> {
         self.handoff_policy.handoff_tools()
@@ -992,21 +1067,34 @@ where
     P: HandoffPolicy + Clone,
 {
     type Service = HandoffService<S, P>;
-    
+
     fn layer(&self, inner: S) -> Self::Service {
         HandoffService::new(inner, self.handoff_policy.clone())
     }
 }
 
 /// Service that wraps a tool service and adds handoff capabilities.
-/// 
+///
 /// This service handles both regular tool calls and handoff tool calls:
 /// - Regular tools: Pass through to inner service, return ToolOutputResult::Tool
 /// - Handoff tools: Process with policy, return ToolOutputResult::Handoff
-#[derive(Debug, Clone)]  
+#[derive(Debug, Clone)]
 pub struct HandoffService<S, P> {
     inner: S,
     handoff_policy: P,
+}
+
+/// Helper to wrap a `ToolRouter` with handoff interception and return a boxed tool service.
+pub fn layer_tool_router_with_handoff<P>(
+    router: crate::core::ToolRouter,
+    policy: P,
+) -> crate::core::ToolSvc
+where
+    P: HandoffPolicy + Clone,
+{
+    let layer = HandoffLayer::new(policy);
+    let svc = layer.layer(router);
+    tower::util::BoxCloneService::new(svc)
 }
 
 impl<S, P> HandoffService<S, P>
@@ -1028,7 +1116,7 @@ where
     S::Future: Send + 'static,
     P: HandoffPolicy + Clone,
 {
-    type Response = ToolOutputResult;
+    type Response = ToolOutput;
     type Error = BoxError;
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
@@ -1046,57 +1134,63 @@ where
             let policy = self.handoff_policy.clone();
             Box::pin(async move {
                 let handoff_request = policy.handle_handoff_tool(&req)?;
-                Ok(ToolOutputResult::Handoff(handoff_request))
+                let out = ToolOutput {
+                    id: req.id,
+                    result: serde_json::json!({
+                        "handoff": handoff_request.target_agent,
+                        "ack": true,
+                        "reason": handoff_request.reason,
+                        "context": handoff_request.context,
+                    }),
+                };
+                Ok(out)
             })
         } else {
             // Regular tool call - pass through to inner service
             let future = self.inner.call(req);
-            Box::pin(async move {
-                let output = future.await?;
-                Ok(ToolOutputResult::Tool(output))
-            })
+            Box::pin(future)
         }
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_openai::types::{
-        CreateChatCompletionRequest, CreateChatCompletionRequestArgs,
-    };
+    use async_openai::types::{CreateChatCompletionRequest, CreateChatCompletionRequestArgs};
     use tower::util::BoxService;
 
     // ================================================================================================
     // Handoff Policy Tests
     // ================================================================================================
-    
+
     mod handoff_policy_tests {
         use super::*;
-        
+
         #[test]
         fn explicit_handoff_policy_generates_correct_tools() {
-            let policy = explicit_handoff_to("specialist")
-                .with_description("Escalate to specialist");
-            
+            let policy =
+                explicit_handoff_to("specialist").with_description("Escalate to specialist");
+
             let tools = policy.handoff_tools();
             assert_eq!(tools.len(), 1);
-            
+
             let tool = &tools[0];
             assert_eq!(tool.function.name, "handoff_to_specialist");
-            assert_eq!(tool.function.description, Some("Escalate to specialist".to_string()));
-            
+            assert_eq!(
+                tool.function.description,
+                Some("Escalate to specialist".to_string())
+            );
+
             // Verify tool parameters schema
             let params = tool.function.parameters.as_ref().unwrap();
             assert!(params.get("properties").is_some());
             assert!(params["properties"]["reason"].is_object());
         }
-        
-        #[test] 
+
+        #[test]
         fn explicit_handoff_policy_handles_tool_calls() {
             let policy = explicit_handoff_to("specialist");
-            
+
             let invocation = ToolInvocation {
                 id: "test_id".to_string(),
                 name: "handoff_to_specialist".to_string(),
@@ -1105,28 +1199,31 @@ mod tests {
                     "context": {"priority": "high"}
                 }),
             };
-            
+
             let result = policy.handle_handoff_tool(&invocation).unwrap();
             assert_eq!(result.target_agent, "specialist");
             assert_eq!(result.reason, Some("Complex technical issue".to_string()));
             assert!(result.context.is_some());
         }
-        
+
         #[test]
         fn explicit_handoff_policy_rejects_wrong_tools() {
             let policy = explicit_handoff_to("specialist");
-            
+
             let invocation = ToolInvocation {
                 id: "test_id".to_string(),
                 name: "some_other_tool".to_string(),
                 arguments: serde_json::json!({}),
             };
-            
+
             let result = policy.handle_handoff_tool(&invocation);
             assert!(result.is_err());
-            assert!(result.unwrap_err().to_string().contains("Not a handoff tool"));
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("Not a handoff tool"));
         }
-        
+
         #[test]
         fn explicit_handoff_policy_no_automatic_handoffs() {
             let policy = explicit_handoff_to("specialist");
@@ -1135,123 +1232,120 @@ mod tests {
                 messages: vec![],
                 aux: crate::core::StepAux::default(),
             };
-            
+
             // Explicit policies don't trigger automatic handoffs
             assert!(policy.should_handoff(&state, &outcome).is_none());
         }
-        
+
         #[test]
         fn sequential_handoff_policy_advances_correctly() {
             let agents = vec!["a".to_string(), "b".to_string(), "c".to_string()];
             let policy = sequential_handoff(agents.clone());
-            
+
             let state = LoopState { steps: 1 };
             let outcome = StepOutcome::Done {
                 messages: vec![],
                 aux: crate::core::StepAux::default(),
             };
-            
+
             // First handoff: a -> b
             let handoff1 = policy.should_handoff(&state, &outcome).unwrap();
             assert_eq!(handoff1.target_agent, "b");
             assert!(handoff1.reason.is_some());
-            
-            // Second handoff: b -> c  
+
+            // Second handoff: b -> c
             let handoff2 = policy.should_handoff(&state, &outcome).unwrap();
             assert_eq!(handoff2.target_agent, "c");
-            
+
             // Third call: no more agents
             let handoff3 = policy.should_handoff(&state, &outcome);
             assert!(handoff3.is_none());
         }
-        
+
         #[test]
         fn sequential_handoff_policy_no_tools() {
             let policy = sequential_handoff(vec!["a".to_string(), "b".to_string()]);
-            
+
             // Sequential policies don't generate tools
             assert!(policy.handoff_tools().is_empty());
             assert!(!policy.is_handoff_tool("any_tool"));
         }
-        
+
         #[test]
         fn composite_handoff_policy_combines_tools() {
             let explicit1 = explicit_handoff_to("specialist");
             let explicit2 = explicit_handoff_to("supervisor");
             let sequential = sequential_handoff(vec!["a".to_string(), "b".to_string()]);
-            
+
             let composite = composite_handoff(vec![
                 AnyHandoffPolicy::Explicit(explicit1),
                 AnyHandoffPolicy::Explicit(explicit2),
                 AnyHandoffPolicy::Sequential(sequential),
             ]);
-            
+
             let tools = composite.handoff_tools();
             // Should have 2 tools (from explicit policies), sequential has none
             assert_eq!(tools.len(), 2);
-            
-            let tool_names: Vec<&str> = tools.iter()
-                .map(|t| t.function.name.as_str())
-                .collect();
+
+            let tool_names: Vec<&str> = tools.iter().map(|t| t.function.name.as_str()).collect();
             assert!(tool_names.contains(&"handoff_to_specialist"));
             assert!(tool_names.contains(&"handoff_to_supervisor"));
         }
-        
+
         #[test]
         fn composite_handoff_policy_routes_to_correct_handler() {
             let explicit = explicit_handoff_to("specialist");
             let sequential = sequential_handoff(vec!["a".to_string()]);
-            
+
             let composite = composite_handoff(vec![
                 AnyHandoffPolicy::Explicit(explicit),
                 AnyHandoffPolicy::Sequential(sequential),
             ]);
-            
+
             let invocation = ToolInvocation {
                 id: "test_id".to_string(),
                 name: "handoff_to_specialist".to_string(),
                 arguments: serde_json::json!({"reason": "test"}),
             };
-            
+
             let result = composite.handle_handoff_tool(&invocation).unwrap();
             assert_eq!(result.target_agent, "specialist");
         }
-        
+
         #[test]
         fn composite_handoff_policy_first_match_wins() {
             let explicit = explicit_handoff_to("specialist");
             let sequential = sequential_handoff(vec!["a".to_string(), "b".to_string()]);
-            
+
             let composite = composite_handoff(vec![
                 AnyHandoffPolicy::Explicit(explicit),
                 AnyHandoffPolicy::Sequential(sequential),
             ]);
-            
+
             let state = LoopState { steps: 1 };
             let outcome = StepOutcome::Done {
                 messages: vec![],
                 aux: crate::core::StepAux::default(),
             };
-            
+
             // Explicit policy returns None, sequential returns Some
             // Should get sequential result since explicit is first but returns None
             let result = composite.should_handoff(&state, &outcome).unwrap();
             assert_eq!(result.target_agent, "b"); // First handoff in sequential
         }
-        
+
         #[test]
         fn any_handoff_policy_conversions_work() {
             let explicit = explicit_handoff_to("specialist");
             let sequential = sequential_handoff(vec!["a".to_string()]);
-            
+
             // Test From impls
             let _any1: AnyHandoffPolicy = explicit.into();
             let _any2: AnyHandoffPolicy = sequential.into();
-            
-            // Should compile and work
-            assert!(true);
+
+            // Should compile and work: conversions successful
         }
-        
+
         #[test]
         fn handoff_request_serialization() {
             let request = HandoffRequest {
@@ -1259,11 +1353,11 @@ mod tests {
                 context: Some(serde_json::json!({"priority": "high"})),
                 reason: Some("Complex issue".to_string()),
             };
-            
+
             // Should serialize/deserialize correctly
             let json = serde_json::to_string(&request).unwrap();
             let deserialized: HandoffRequest = serde_json::from_str(&json).unwrap();
-            
+
             assert_eq!(deserialized.target_agent, request.target_agent);
             assert_eq!(deserialized.reason, request.reason);
             assert_eq!(deserialized.context, request.context);
@@ -1271,13 +1365,13 @@ mod tests {
     }
 
     // ================================================================================================
-    // Handoff Layer Integration Tests  
+    // Handoff Layer Integration Tests
     // ================================================================================================
-    
+
     mod handoff_layer_tests {
         use super::*;
         use tower::{service_fn, ServiceExt};
-        
+
         // Mock tool service for testing
         fn mock_tool_service() -> tower::util::BoxService<ToolInvocation, ToolOutput, BoxError> {
             tower::util::BoxService::new(service_fn(|req: ToolInvocation| async move {
@@ -1287,111 +1381,106 @@ mod tests {
                 })
             }))
         }
-        
+
         #[tokio::test]
         async fn handoff_layer_passes_through_regular_tools() {
             let policy = explicit_handoff_to("specialist");
             let layer = HandoffLayer::new(policy);
             let mut service = layer.layer(mock_tool_service());
-            
+
             let invocation = ToolInvocation {
                 id: "test_id".to_string(),
                 name: "regular_tool".to_string(),
                 arguments: serde_json::json!({"param": "value"}),
             };
-            
-            let result = ServiceExt::ready(&mut service).await.unwrap()
-                .call(invocation).await.unwrap();
-            
-            match result {
-                ToolOutputResult::Tool(output) => {
-                    assert_eq!(output.id, "test_id");
-                    assert_eq!(output.result["tool"], "regular_tool");
-                }
-                ToolOutputResult::Handoff(_) => panic!("Expected tool output, got handoff"),
-            }
+
+            let result = ServiceExt::ready(&mut service)
+                .await
+                .unwrap()
+                .call(invocation)
+                .await
+                .unwrap();
+            assert_eq!(result.id, "test_id");
+            assert_eq!(result.result["tool"], "regular_tool");
         }
-        
+
         #[tokio::test]
         async fn handoff_layer_intercepts_handoff_tools() {
             let policy = explicit_handoff_to("specialist");
             let layer = HandoffLayer::new(policy);
             let mut service = layer.layer(mock_tool_service());
-            
+
             let invocation = ToolInvocation {
                 id: "test_id".to_string(),
                 name: "handoff_to_specialist".to_string(),
                 arguments: serde_json::json!({"reason": "Complex issue"}),
             };
-            
-            let result = ServiceExt::ready(&mut service).await.unwrap()
-                .call(invocation).await.unwrap();
-            
-            match result {
-                ToolOutputResult::Handoff(handoff) => {
-                    assert_eq!(handoff.target_agent, "specialist");
-                    assert_eq!(handoff.reason, Some("Complex issue".to_string()));
-                }
-                ToolOutputResult::Tool(_) => panic!("Expected handoff, got tool output"),
-            }
+
+            let result = ServiceExt::ready(&mut service)
+                .await
+                .unwrap()
+                .call(invocation)
+                .await
+                .unwrap();
+            assert_eq!(result.id, "test_id");
+            assert_eq!(result.result["handoff"], "specialist");
         }
-        
+
         #[tokio::test]
         async fn handoff_layer_exposes_policy_tools() {
-            let policy = explicit_handoff_to("specialist")
-                .with_description("Escalate to specialist");
+            let policy =
+                explicit_handoff_to("specialist").with_description("Escalate to specialist");
             let layer = HandoffLayer::new(policy);
-            
+
             let tools = layer.handoff_tools();
             assert_eq!(tools.len(), 1);
             assert_eq!(tools[0].function.name, "handoff_to_specialist");
-            assert_eq!(tools[0].function.description, Some("Escalate to specialist".to_string()));
+            assert_eq!(
+                tools[0].function.description,
+                Some("Escalate to specialist".to_string())
+            );
         }
-        
+
         #[tokio::test]
         async fn handoff_layer_with_composite_policy() {
             let composite = composite_handoff(vec![
                 AnyHandoffPolicy::Explicit(explicit_handoff_to("specialist")),
                 AnyHandoffPolicy::Explicit(explicit_handoff_to("supervisor")),
             ]);
-            
+
             let layer = HandoffLayer::new(composite.clone());
             let mut service = layer.layer(mock_tool_service());
-            
+
             // Test first handoff tool
             let invocation1 = ToolInvocation {
                 id: "test_id1".to_string(),
                 name: "handoff_to_specialist".to_string(),
                 arguments: serde_json::json!({"reason": "Technical issue"}),
             };
-            
-            let result1 = ServiceExt::ready(&mut service).await.unwrap()
-                .call(invocation1).await.unwrap();
-            
-            match result1 {
-                ToolOutputResult::Handoff(handoff) => {
-                    assert_eq!(handoff.target_agent, "specialist");
-                }
-                _ => panic!("Expected handoff"),
-            }
-            
+
+            let result1 = ServiceExt::ready(&mut service)
+                .await
+                .unwrap()
+                .call(invocation1)
+                .await
+                .unwrap();
+            assert_eq!(result1.result["handoff"], "specialist");
+
             // Test second handoff tool
             let invocation2 = ToolInvocation {
-                id: "test_id2".to_string(), 
+                id: "test_id2".to_string(),
                 name: "handoff_to_supervisor".to_string(),
                 arguments: serde_json::json!({"reason": "Escalation needed"}),
             };
-            
-            let result2 = ServiceExt::ready(&mut service).await.unwrap()
-                .call(invocation2).await.unwrap();
-            
-            match result2 {
-                ToolOutputResult::Handoff(handoff) => {
-                    assert_eq!(handoff.target_agent, "supervisor");
-                }
-                _ => panic!("Expected handoff"),
-            }
-            
+
+            let result2 = ServiceExt::ready(&mut service)
+                .await
+                .unwrap()
+                .call(invocation2)
+                .await
+                .unwrap();
+            assert_eq!(result2.result["handoff"], "supervisor");
+
             // Verify layer exposes both tools
             let tools = layer.handoff_tools();
             assert_eq!(tools.len(), 2);
@@ -1399,42 +1488,44 @@ mod tests {
             assert!(tool_names.contains(&"handoff_to_specialist"));
             assert!(tool_names.contains(&"handoff_to_supervisor"));
         }
-        
-        #[tokio::test] 
+
+        #[tokio::test]
         async fn handoff_layer_error_handling() {
             let policy = explicit_handoff_to("specialist");
             let layer = HandoffLayer::new(policy);
             let mut service = layer.layer(mock_tool_service());
-            
+
             // Try to call handoff tool with invalid arguments
             let invocation = ToolInvocation {
                 id: "test_id".to_string(),
                 name: "handoff_to_specialist".to_string(),
                 arguments: serde_json::json!({}), // Missing required fields - should still work
             };
-            
+
             // Should succeed even with minimal arguments
-            let result = ServiceExt::ready(&mut service).await.unwrap()
-                .call(invocation).await.unwrap();
-            
-            match result {
-                ToolOutputResult::Handoff(handoff) => {
-                    assert_eq!(handoff.target_agent, "specialist");
-                    assert_eq!(handoff.reason, None); // No reason provided
-                }
-                _ => panic!("Expected handoff"),
-            }
+            let result = ServiceExt::ready(&mut service)
+                .await
+                .unwrap()
+                .call(invocation)
+                .await
+                .unwrap();
+            assert_eq!(result.result["handoff"], "specialist");
         }
     }
 
     // ================================================================================================
     // End-to-End Handoff Coordinator Tests
     // ================================================================================================
-    
+
     mod handoff_coordinator_tests {
+        #![allow(deprecated)]
         use super::*;
+        use crate::provider::{FixedProvider, ProviderResponse};
+        use crate::Agent;
+        use async_openai::{config::OpenAIConfig, Client};
+        use std::sync::Arc;
         use tower::{service_fn, ServiceExt};
-        
+
         // Mock agents for testing
         fn mock_agent(name: &'static str, response: &'static str) -> AgentSvc {
             let name = name.to_string();
@@ -1443,12 +1534,14 @@ mod tests {
                 let name = name.clone();
                 let response = response.clone();
                 async move {
-                    use async_openai::types::{ChatCompletionRequestMessage, ChatCompletionRequestAssistantMessageArgs};
-                    
+                    use async_openai::types::{
+                        ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
+                    };
+
                     let message = ChatCompletionRequestAssistantMessageArgs::default()
                         .content(format!("[{}]: {}", name, response))
                         .build()?;
-                    
+
                     Ok::<AgentRun, BoxError>(AgentRun {
                         messages: vec![ChatCompletionRequestMessage::Assistant(message)],
                         steps: 1,
@@ -1457,23 +1550,26 @@ mod tests {
                 }
             }))
         }
-        
+
         // Mock picker that selects based on message content
         #[derive(Clone)]
         struct MockPicker;
-        
+
         impl Service<PickRequest> for MockPicker {
             type Response = String;
             type Error = BoxError;
             type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
-            
-            fn poll_ready(&mut self, _: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
+
+            fn poll_ready(
+                &mut self,
+                _: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<Result<(), Self::Error>> {
                 std::task::Poll::Ready(Ok(()))
             }
-            
+
             fn call(&mut self, req: PickRequest) -> Self::Future {
                 Box::pin(async move {
-                let content = req.messages.first()
+                    let content = req.messages.first()
                     .and_then(|msg| match msg {
                         async_openai::types::ChatCompletionRequestMessage::User(user_msg) => {
                             match &user_msg.content {
@@ -1486,83 +1582,94 @@ mod tests {
                         _ => None,
                     })
                     .unwrap_or("");
-                    
-                let agent = if content.contains("billing") {
-                    "billing_agent"
-                } else if content.contains("technical") {
-                    "tech_agent" 
-                } else {
-                    "triage_agent"
-                };
-                
+
+                    let agent = if content.contains("billing") {
+                        "billing_agent"
+                    } else if content.contains("technical") {
+                        "tech_agent"
+                    } else {
+                        "triage_agent"
+                    };
+
                     Ok::<String, BoxError>(agent.to_string())
                 })
             }
         }
-        
+
         fn mock_picker() -> MockPicker {
             MockPicker
         }
-        
+
         #[tokio::test]
         async fn handoff_coordinator_basic_operation() -> Result<(), BoxError> {
             let coordinator = GroupBuilder::new()
-                .agent("triage_agent", mock_agent("triage", "I'll handle your request"))
-                .agent("billing_agent", mock_agent("billing", "Billing issue resolved"))
+                .agent(
+                    "triage_agent",
+                    mock_agent("triage", "I'll handle your request"),
+                )
+                .agent(
+                    "billing_agent",
+                    mock_agent("billing", "Billing issue resolved"),
+                )
                 .picker(mock_picker())
                 .handoff_policy(explicit_handoff_to("billing_agent"))
                 .build();
-                
+
             let mut service = coordinator;
-            
-            use async_openai::types::{ChatCompletionRequestMessage, ChatCompletionRequestUserMessageArgs};
+
+            use async_openai::types::{
+                ChatCompletionRequestMessage, ChatCompletionRequestUserMessageArgs,
+            };
             let user_message = ChatCompletionRequestUserMessageArgs::default()
                 .content("I have a general question")
                 .build()?;
-            
+
             let request = CreateChatCompletionRequest {
                 messages: vec![ChatCompletionRequestMessage::User(user_message)],
                 model: "gpt-4o".to_string(),
                 ..Default::default()
             };
-            
-            let result = ServiceExt::ready(&mut service).await?
-                .call(request).await?;
-                
+
+            let result = ServiceExt::ready(&mut service).await?.call(request).await?;
+
             // Should route to triage_agent and return its response
             assert_eq!(result.messages.len(), 1);
-            assert!(format!("{:?}", result.messages[0]).contains("[triage]: I'll handle your request"));
+            assert!(
+                format!("{:?}", result.messages[0]).contains("[triage]: I'll handle your request")
+            );
             assert_eq!(result.steps, 1);
-            
+
             Ok(())
         }
-        
+
         #[tokio::test]
         async fn handoff_coordinator_sequential_workflow() -> Result<(), BoxError> {
             let sequential_policy = sequential_handoff(vec![
-                "researcher".to_string(), 
-                "writer".to_string(), 
-                "reviewer".to_string()
+                "researcher".to_string(),
+                "writer".to_string(),
+                "reviewer".to_string(),
             ]);
-            
+
             #[derive(Clone)]
             struct ResearchPicker;
             impl Service<PickRequest> for ResearchPicker {
                 type Response = String;
                 type Error = BoxError;
-                type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
-                
-                fn poll_ready(&mut self, _: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
+                type Future =
+                    Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+                fn poll_ready(
+                    &mut self,
+                    _: &mut std::task::Context<'_>,
+                ) -> std::task::Poll<Result<(), Self::Error>> {
                     std::task::Poll::Ready(Ok(()))
                 }
-                
+
                 fn call(&mut self, _req: PickRequest) -> Self::Future {
-                    Box::pin(async move {
-                        Ok::<String, BoxError>("researcher".to_string())
-                    })
+                    Box::pin(async move { Ok::<String, BoxError>("researcher".to_string()) })
                 }
             }
-            
+
             let coordinator = GroupBuilder::new()
                 .agent("researcher", mock_agent("researcher", "Research complete"))
                 .agent("writer", mock_agent("writer", "Article written"))
@@ -1570,32 +1677,33 @@ mod tests {
                 .picker(ResearchPicker)
                 .handoff_policy(sequential_policy)
                 .build();
-                
+
             let mut service = coordinator;
-            
-            use async_openai::types::{ChatCompletionRequestMessage, ChatCompletionRequestUserMessageArgs};
+
+            use async_openai::types::{
+                ChatCompletionRequestMessage, ChatCompletionRequestUserMessageArgs,
+            };
             let user_message = ChatCompletionRequestUserMessageArgs::default()
                 .content("Write an article about AI")
                 .build()?;
-            
+
             let request = CreateChatCompletionRequest {
                 messages: vec![ChatCompletionRequestMessage::User(user_message)],
                 model: "gpt-4o".to_string(),
                 ..Default::default()
             };
-            
-            let result = ServiceExt::ready(&mut service).await?
-                .call(request).await?;
-                
+
+            let result = ServiceExt::ready(&mut service).await?.call(request).await?;
+
             // Should start with researcher and proceed through the sequence
-            assert!(result.messages.len() >= 1);
+            assert!(!result.messages.is_empty());
             // The sequential policy doesn't have automatic handoff implemented in our mock agents
             // So it should just return the researcher's response
             assert!(format!("{:?}", result.messages[0]).contains("[researcher]: Research complete"));
-            
+
             Ok(())
         }
-        
+
         #[tokio::test]
         async fn handoff_coordinator_picker_routing() -> Result<(), BoxError> {
             let coordinator = GroupBuilder::new()
@@ -1605,109 +1713,124 @@ mod tests {
                 .picker(mock_picker())
                 .handoff_policy(explicit_handoff_to("tech_agent"))
                 .build();
-                
+
             let mut service = coordinator;
-            
+
             // Test billing routing
-            use async_openai::types::{ChatCompletionRequestMessage, ChatCompletionRequestUserMessageArgs};
+            use async_openai::types::{
+                ChatCompletionRequestMessage, ChatCompletionRequestUserMessageArgs,
+            };
             let billing_message = ChatCompletionRequestUserMessageArgs::default()
                 .content("I have a billing question")
                 .build()?;
-            
+
             let billing_request = CreateChatCompletionRequest {
                 messages: vec![ChatCompletionRequestMessage::User(billing_message)],
                 model: "gpt-4o".to_string(),
                 ..Default::default()
             };
-            
-            let result = ServiceExt::ready(&mut service).await?
-                .call(billing_request).await?;
-                
+
+            let result = ServiceExt::ready(&mut service)
+                .await?
+                .call(billing_request)
+                .await?;
+
             // Should route directly to billing_agent
             assert!(format!("{:?}", result.messages[0]).contains("billing"));
-            
+
             // Test technical routing
             let tech_message = ChatCompletionRequestUserMessageArgs::default()
                 .content("I have a technical issue")
                 .build()?;
-            
+
             let tech_request = CreateChatCompletionRequest {
                 messages: vec![ChatCompletionRequestMessage::User(tech_message)],
                 model: "gpt-4o".to_string(),
                 ..Default::default()
             };
-            
-            let result2 = ServiceExt::ready(&mut service).await?
-                .call(tech_request).await?;
-                
-            // Should route directly to tech_agent  
+
+            let result2 = ServiceExt::ready(&mut service)
+                .await?
+                .call(tech_request)
+                .await?;
+
+            // Should route directly to tech_agent
             assert!(format!("{:?}", result2.messages[0]).contains("tech"));
-            
+
             Ok(())
         }
-        
+
         #[tokio::test]
         async fn handoff_coordinator_composite_policy() -> Result<(), BoxError> {
             let composite_policy = composite_handoff(vec![
                 AnyHandoffPolicy::Explicit(explicit_handoff_to("specialist")),
-                AnyHandoffPolicy::Sequential(sequential_handoff(vec!["a".to_string(), "b".to_string()])),
+                AnyHandoffPolicy::Sequential(sequential_handoff(vec![
+                    "a".to_string(),
+                    "b".to_string(),
+                ])),
             ]);
-            
+
             #[derive(Clone)]
             struct TriagePicker;
             impl Service<PickRequest> for TriagePicker {
                 type Response = String;
                 type Error = BoxError;
-                type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
-                
-                fn poll_ready(&mut self, _: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
+                type Future =
+                    Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+                fn poll_ready(
+                    &mut self,
+                    _: &mut std::task::Context<'_>,
+                ) -> std::task::Poll<Result<(), Self::Error>> {
                     std::task::Poll::Ready(Ok(()))
                 }
-                
+
                 fn call(&mut self, _req: PickRequest) -> Self::Future {
-                    Box::pin(async move {
-                        Ok::<String, BoxError>("triage".to_string())
-                    })
+                    Box::pin(async move { Ok::<String, BoxError>("triage".to_string()) })
                 }
             }
-            
+
             let coordinator = GroupBuilder::new()
                 .agent("triage", mock_agent("triage", "Triage response"))
-                .agent("specialist", mock_agent("specialist", "Specialist response"))
+                .agent(
+                    "specialist",
+                    mock_agent("specialist", "Specialist response"),
+                )
                 .agent("a", mock_agent("a", "Agent A response"))
                 .agent("b", mock_agent("b", "Agent B response"))
                 .picker(TriagePicker)
                 .handoff_policy(composite_policy)
                 .build();
-                
+
             // Verify handoff tools are exposed
             let tools = coordinator.handoff_tools();
             assert_eq!(tools.len(), 1); // Only explicit policy generates tools
             assert_eq!(tools[0].function.name, "handoff_to_specialist");
-            
+
             let mut service = coordinator;
-            
-            use async_openai::types::{ChatCompletionRequestMessage, ChatCompletionRequestUserMessageArgs};
+
+            use async_openai::types::{
+                ChatCompletionRequestMessage, ChatCompletionRequestUserMessageArgs,
+            };
             let user_message = ChatCompletionRequestUserMessageArgs::default()
                 .content("Help me")
                 .build()?;
-            
+
             let request = CreateChatCompletionRequest {
                 messages: vec![ChatCompletionRequestMessage::User(user_message)],
                 model: "gpt-4o".to_string(),
                 ..Default::default()
             };
-            
-            let result = ServiceExt::ready(&mut service).await?
-                .call(request).await?;
-                
+
+            let result = ServiceExt::ready(&mut service).await?.call(request).await?;
+
             // Should execute triage agent
-            assert!(result.messages.len() >= 1);
+            assert!(!result.messages.is_empty());
             assert!(format!("{:?}", result.messages[0]).contains("[triage]: Triage response"));
-            
+
             Ok(())
         }
-        
+
         #[tokio::test]
         async fn handoff_coordinator_error_handling() -> Result<(), BoxError> {
             #[derive(Clone)]
@@ -1715,56 +1838,64 @@ mod tests {
             impl Service<PickRequest> for AgentAPicker {
                 type Response = String;
                 type Error = BoxError;
-                type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
-                
-                fn poll_ready(&mut self, _: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
+                type Future =
+                    Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+                fn poll_ready(
+                    &mut self,
+                    _: &mut std::task::Context<'_>,
+                ) -> std::task::Poll<Result<(), Self::Error>> {
                     std::task::Poll::Ready(Ok(()))
                 }
-                
+
                 fn call(&mut self, _req: PickRequest) -> Self::Future {
-                    Box::pin(async move {
-                        Ok::<String, BoxError>("agent_a".to_string())
-                    })
+                    Box::pin(async move { Ok::<String, BoxError>("agent_a".to_string()) })
                 }
             }
-            
+
             let coordinator = GroupBuilder::new()
                 .agent("agent_a", mock_agent("a", "Response A"))
                 .picker(AgentAPicker)
                 .handoff_policy(explicit_handoff_to("nonexistent_agent"))
                 .build();
-                
+
             let mut service = coordinator;
-            
-            use async_openai::types::{ChatCompletionRequestMessage, ChatCompletionRequestUserMessageArgs};
+
+            use async_openai::types::{
+                ChatCompletionRequestMessage, ChatCompletionRequestUserMessageArgs,
+            };
             let user_message = ChatCompletionRequestUserMessageArgs::default()
                 .content("Test message")
                 .build()?;
-            
+
             let request = CreateChatCompletionRequest {
                 messages: vec![ChatCompletionRequestMessage::User(user_message)],
                 model: "gpt-4o".to_string(),
                 ..Default::default()
             };
-            
+
             // Should complete without handoff since explicit policy doesn't auto-handoff
-            let result = ServiceExt::ready(&mut service).await?
-                .call(request).await?;
-                
+            let result = ServiceExt::ready(&mut service).await?.call(request).await?;
+
             assert_eq!(result.messages.len(), 1);
             assert!(format!("{:?}", result.messages[0]).contains("[a]: Response A"));
-            
+
             Ok(())
         }
-        
+
         #[tokio::test]
         async fn handoff_coordinator_max_handoffs_protection() -> Result<(), BoxError> {
             // Create a policy that always hands off to create infinite loop
             struct InfiniteHandoffPolicy;
-            
+
             impl HandoffPolicy for InfiniteHandoffPolicy {
-                fn handoff_tools(&self) -> Vec<ChatCompletionTool> { vec![] }
-                fn handle_handoff_tool(&self, _: &ToolInvocation) -> Result<HandoffRequest, BoxError> {
+                fn handoff_tools(&self) -> Vec<ChatCompletionTool> {
+                    vec![]
+                }
+                fn handle_handoff_tool(
+                    &self,
+                    _: &ToolInvocation,
+                ) -> Result<HandoffRequest, BoxError> {
                     Err("No tools".into())
                 }
                 fn should_handoff(&self, _: &LoopState, _: &StepOutcome) -> Option<HandoffRequest> {
@@ -1774,58 +1905,170 @@ mod tests {
                         reason: Some("Infinite handoff test".to_string()),
                     })
                 }
-                fn is_handoff_tool(&self, _: &str) -> bool { false }
+                fn is_handoff_tool(&self, _: &str) -> bool {
+                    false
+                }
             }
-            
+
             impl Clone for InfiniteHandoffPolicy {
-                fn clone(&self) -> Self { InfiniteHandoffPolicy }
+                fn clone(&self) -> Self {
+                    InfiniteHandoffPolicy
+                }
             }
-            
+
             #[derive(Clone)]
             struct StartPicker;
             impl Service<PickRequest> for StartPicker {
                 type Response = String;
                 type Error = BoxError;
-                type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
-                
-                fn poll_ready(&mut self, _: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
+                type Future =
+                    Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+                fn poll_ready(
+                    &mut self,
+                    _: &mut std::task::Context<'_>,
+                ) -> std::task::Poll<Result<(), Self::Error>> {
                     std::task::Poll::Ready(Ok(()))
                 }
-                
+
                 fn call(&mut self, _req: PickRequest) -> Self::Future {
-                    Box::pin(async move {
-                        Ok::<String, BoxError>("agent_a".to_string())
-                    })
+                    Box::pin(async move { Ok::<String, BoxError>("agent_a".to_string()) })
                 }
             }
-            
+
             let coordinator = GroupBuilder::new()
                 .agent("agent_a", mock_agent("a", "Response A"))
                 .agent("agent_b", mock_agent("b", "Response B"))
                 .picker(StartPicker)
                 .handoff_policy(InfiniteHandoffPolicy)
                 .build();
-                
+
             let mut service = coordinator;
-            
-            use async_openai::types::{ChatCompletionRequestMessage, ChatCompletionRequestUserMessageArgs};
+
+            use async_openai::types::{
+                ChatCompletionRequestMessage, ChatCompletionRequestUserMessageArgs,
+            };
             let user_message = ChatCompletionRequestUserMessageArgs::default()
                 .content("Test infinite handoff protection")
                 .build()?;
-            
+
             let request = CreateChatCompletionRequest {
                 messages: vec![ChatCompletionRequestMessage::User(user_message)],
                 model: "gpt-4o".to_string(),
                 ..Default::default()
             };
-            
-            let result = ServiceExt::ready(&mut service).await?
-                .call(request).await;
-                
+
+            let result = ServiceExt::ready(&mut service).await?.call(request).await;
+
             // Should error due to max handoffs exceeded
             assert!(result.is_err());
-            assert!(result.unwrap_err().to_string().contains("Maximum handoffs exceeded"));
-            
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("Maximum handoffs exceeded"));
+
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn handoff_coordinator_explicit_tool_transition() -> Result<(), BoxError> {
+            // Build two agents with custom providers (no network)
+            // Agent "triage" emits a handoff tool call to "specialist"
+            let tool_name = "handoff_to_specialist".to_string();
+            let tc = async_openai::types::ChatCompletionMessageToolCall {
+                id: "call_1".to_string(),
+                r#type: async_openai::types::ChatCompletionToolType::Function,
+                function: async_openai::types::FunctionCall {
+                    name: tool_name.clone(),
+                    arguments: "{\"reason\":\"escalate\"}".to_string(),
+                },
+            };
+            let assistant_triage = async_openai::types::ChatCompletionResponseMessage {
+                content: None,
+                role: async_openai::types::Role::Assistant,
+                tool_calls: Some(vec![tc]),
+                function_call: None,
+                refusal: None,
+                audio: None,
+            };
+            let triage_provider = FixedProvider::new(ProviderResponse {
+                assistant: assistant_triage,
+                prompt_tokens: 1,
+                completion_tokens: 1,
+            });
+
+            // Agent "specialist" returns a plain assistant message
+            let assistant_specialist = async_openai::types::ChatCompletionResponseMessage {
+                content: Some("[specialist]: done".to_string()),
+                role: async_openai::types::Role::Assistant,
+                tool_calls: None,
+                function_call: None,
+                refusal: None,
+                audio: None,
+            };
+            let specialist_provider = FixedProvider::new(ProviderResponse {
+                assistant: assistant_specialist,
+                prompt_tokens: 1,
+                completion_tokens: 1,
+            });
+
+            let client = Arc::new(Client::<OpenAIConfig>::new());
+            let triage_agent = Agent::builder(client.clone())
+                .model("gpt-4o")
+                .handoff_policy(explicit_handoff_to("specialist").into())
+                .with_provider(triage_provider)
+                .policy(crate::CompositePolicy::new(vec![
+                    crate::core::policies::max_steps(2),
+                ]))
+                .build();
+            let specialist_agent = Agent::builder(client.clone())
+                .model("gpt-4o")
+                .with_provider(specialist_provider)
+                .policy(crate::CompositePolicy::new(vec![
+                    crate::core::policies::max_steps(1),
+                ]))
+                .build();
+
+            #[derive(Clone)]
+            struct Picker;
+            impl Service<PickRequest> for Picker {
+                type Response = String;
+                type Error = BoxError;
+                type Future =
+                    Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+                fn poll_ready(
+                    &mut self,
+                    _cx: &mut std::task::Context<'_>,
+                ) -> std::task::Poll<Result<(), Self::Error>> {
+                    std::task::Poll::Ready(Ok(()))
+                }
+                fn call(&mut self, _req: PickRequest) -> Self::Future {
+                    Box::pin(async move { Ok::<_, BoxError>("triage".to_string()) })
+                }
+            }
+
+            let coordinator = GroupBuilder::new()
+                .agent("triage", triage_agent)
+                .agent("specialist", specialist_agent)
+                .picker(Picker)
+                .handoff_policy(explicit_handoff_to("specialist"))
+                .build();
+
+            let mut svc = coordinator;
+            let user = async_openai::types::ChatCompletionRequestUserMessageArgs::default()
+                .content("start")
+                .build()?;
+            let req = CreateChatCompletionRequest {
+                messages: vec![async_openai::types::ChatCompletionRequestMessage::User(
+                    user,
+                )],
+                model: "gpt-4o".to_string(),
+                ..Default::default()
+            };
+
+            let out = ServiceExt::ready(&mut svc).await?.call(req).await?;
+            // Should include specialist message at the end after handoff
+            assert!(format!("{:?}", out.messages).contains("[specialist]: done"));
             Ok(())
         }
     }

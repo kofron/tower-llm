@@ -36,9 +36,9 @@ use async_openai::types::{CreateChatCompletionRequest, CreateChatCompletionReque
 use tokio::sync::Mutex;
 use tower::{BoxError, Layer, Service, ServiceExt};
 
-use crate::items::RunItem;
 use crate::codec::{items_to_messages, messages_to_items};
 use crate::core::StepOutcome;
+use crate::items::RunItem;
 
 #[derive(Debug, Clone)]
 pub struct WriteTrace {
@@ -294,6 +294,157 @@ mod tests {
             .unwrap();
         match out {
             StepOutcome::Done { messages, .. } => assert!(!messages.is_empty()),
+            _ => panic!("expected done"),
+        }
+    }
+
+    #[tokio::test]
+    async fn recording_preserves_tool_output_and_calls() {
+        // Build a messages vector with assistant tool call and tool output JSON
+        use async_openai::types::{
+            ChatCompletionMessageToolCall, ChatCompletionRequestAssistantMessageArgs,
+            ChatCompletionRequestMessage, ChatCompletionRequestToolMessageArgs,
+            ChatCompletionToolType, FunctionCall,
+        };
+
+        // Assistant with one tool call
+        let tc = ChatCompletionMessageToolCall {
+            id: "call_1".to_string(),
+            r#type: ChatCompletionToolType::Function,
+            function: FunctionCall {
+                name: "calc".to_string(),
+                arguments: "{\"a\":1}".to_string(),
+            },
+        };
+        let asst = ChatCompletionRequestAssistantMessageArgs::default()
+            .content("")
+            .tool_calls(vec![tc])
+            .build()
+            .unwrap();
+        let tool = ChatCompletionRequestToolMessageArgs::default()
+            .content("{\"sum\":2}")
+            .tool_call_id("call_1")
+            .build()
+            .unwrap();
+
+        let out_messages = vec![
+            ChatCompletionRequestMessage::Assistant(asst),
+            ChatCompletionRequestMessage::Tool(tool),
+        ];
+
+        // Inner returns Done with those messages
+        let inner = service_fn(move |_req: CreateChatCompletionRequest| {
+            let msgs = out_messages.clone();
+            async move {
+                Ok::<_, BoxError>(StepOutcome::Done {
+                    messages: msgs,
+                    aux: Default::default(),
+                })
+            }
+        });
+
+        let writer = InMemoryTraceStore::default();
+        let mut svc = RecorderLayer::new(writer.clone(), "t3").layer(inner);
+        let req = req_with_user("start");
+        let _ = ServiceExt::ready(&mut svc)
+            .await
+            .unwrap()
+            .call(req)
+            .await
+            .unwrap();
+
+        // Read back trace and assert ToolCall + ToolOutput present with JSON preserved
+        let trace = tower::Service::call(&mut writer.clone(), ReadTrace { id: "t3".into() })
+            .await
+            .unwrap();
+        assert!(trace
+            .items
+            .iter()
+            .any(|it| matches!(it, RunItem::ToolCall(_))));
+        let out = trace
+            .items
+            .iter()
+            .find_map(|it| {
+                if let RunItem::ToolOutput(o) = it {
+                    Some(o)
+                } else {
+                    None
+                }
+            })
+            .unwrap();
+        assert_eq!(out.tool_call_id, "call_1");
+        assert_eq!(out.output, serde_json::json!({"sum":2}));
+    }
+
+    #[tokio::test]
+    async fn replay_reconstructs_tool_messages_fidelity() {
+        use async_openai::types::{
+            ChatCompletionMessageToolCall, ChatCompletionRequestAssistantMessageArgs,
+            ChatCompletionRequestMessage, ChatCompletionRequestToolMessageArgs,
+            ChatCompletionToolType, FunctionCall,
+        };
+
+        // Prepare items via codec from messages including tool output
+        let tc = ChatCompletionMessageToolCall {
+            id: "id1".to_string(),
+            r#type: ChatCompletionToolType::Function,
+            function: FunctionCall {
+                name: "echo".to_string(),
+                arguments: "{}".to_string(),
+            },
+        };
+        let asst = ChatCompletionRequestAssistantMessageArgs::default()
+            .content("")
+            .tool_calls(vec![tc])
+            .build()
+            .unwrap();
+        let tool = ChatCompletionRequestToolMessageArgs::default()
+            .content("{\"ok\":true}")
+            .tool_call_id("id1")
+            .build()
+            .unwrap();
+        let msgs = vec![
+            ChatCompletionRequestMessage::Assistant(asst),
+            ChatCompletionRequestMessage::Tool(tool),
+        ];
+        let items = messages_to_items(&msgs).unwrap();
+
+        // Store and replay
+        let store = InMemoryTraceStore::default();
+        tower::Service::call(
+            &mut store.clone(),
+            WriteTrace {
+                id: "t4".into(),
+                items,
+            },
+        )
+        .await
+        .unwrap();
+        let mut replay = ReplayService::new(store, "t4", "gpt-4o");
+        let out = ServiceExt::ready(&mut replay)
+            .await
+            .unwrap()
+            .call(req_with_user("ignored"))
+            .await
+            .unwrap();
+        match out {
+            StepOutcome::Done { messages, .. } => {
+                // Ensure there is a tool message and its content parses back to JSON
+                let tool_msg = messages
+                    .iter()
+                    .find(|m| matches!(m, ChatCompletionRequestMessage::Tool(_)))
+                    .unwrap();
+                if let ChatCompletionRequestMessage::Tool(t) = tool_msg {
+                    if let async_openai::types::ChatCompletionRequestToolMessageContent::Text(txt) =
+                        &t.content
+                    {
+                        let val: serde_json::Value = serde_json::from_str(txt).unwrap();
+                        assert_eq!(val, serde_json::json!({"ok": true}));
+                    } else {
+                        panic!("expected text content");
+                    }
+                }
+            }
             _ => panic!("expected done"),
         }
     }
