@@ -65,7 +65,9 @@ use std::sync::{
     Arc,
 };
 
-use async_openai::types::{ChatCompletionTool, CreateChatCompletionRequest};
+use async_openai::types::{
+    ChatCompletionRequestMessage, ChatCompletionTool, CreateChatCompletionRequest,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tower::{BoxError, Layer, Service, ServiceExt};
@@ -143,6 +145,27 @@ pub trait HandoffPolicy: Send + Sync + 'static {
 
     /// Check if a tool call is a handoff tool managed by this policy.
     fn is_handoff_tool(&self, tool_name: &str) -> bool;
+
+    /// Transform messages during handoff.
+    ///
+    /// This method is called after a handoff is confirmed but before the messages
+    /// are passed to the next agent. It allows for message transformation such as:
+    /// - Compaction to manage context length
+    /// - Privacy redaction when crossing trust boundaries
+    /// - Context enrichment with relevant information
+    /// - Translation between agents that operate in different languages
+    ///
+    /// The default implementation returns the messages unchanged.
+    fn transform_on_handoff(
+        &self,
+        messages: Vec<ChatCompletionRequestMessage>,
+        _from_agent: &str,
+        _to_agent: &str,
+        _handoff: &HandoffRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ChatCompletionRequestMessage>, BoxError>> + Send>>
+    {
+        Box::pin(async move { Ok(messages) })
+    }
 }
 
 pub struct GroupBuilder<P = (), H = ()> {
@@ -550,9 +573,41 @@ where
                         );
                     }
 
-                    // Prepare request for next agent with accumulated context
-                    request.messages = original_messages.clone();
-                    request.messages.extend(all_messages.clone());
+                    // Prepare messages for next agent with accumulated context
+                    let mut messages_for_next = original_messages.clone();
+                    messages_for_next.extend(all_messages.clone());
+
+                    // Apply transformation if the policy provides one
+                    debug!(
+                        "Applying handoff transformation from {} to {}",
+                        previous_agent, current_agent_name
+                    );
+                    match handoff_policy
+                        .transform_on_handoff(
+                            messages_for_next,
+                            &previous_agent,
+                            &current_agent_name,
+                            &handoff,
+                        )
+                        .await
+                    {
+                        Ok(transformed) => {
+                            debug!(
+                                "Handoff transformation complete: {} -> {} messages",
+                                original_messages.len() + all_messages.len(),
+                                transformed.len()
+                            );
+                            request.messages = transformed;
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Handoff transformation failed, using original messages: {}",
+                                e
+                            );
+                            request.messages = original_messages.clone();
+                            request.messages.extend(all_messages.clone());
+                        }
+                    }
 
                     info!(
                         "🔗 Handoff complete: {} → {} (total handoffs: {})",
@@ -977,6 +1032,146 @@ impl HandoffPolicy for CompositeHandoffPolicy {
 }
 
 // ================================================================================================
+// CompactingHandoffPolicy - Wrapper that adds compaction on handoff
+// ================================================================================================
+
+/// A handoff policy wrapper that applies conversation compaction during handoffs.
+///
+/// This policy wraps another handoff policy and adds automatic conversation compaction
+/// when messages are transferred between agents. This helps manage context length
+/// and can improve performance with long conversations.
+#[derive(Clone)]
+pub struct CompactingHandoffPolicy<P> {
+    inner: P,
+    compaction_policy: crate::auto_compaction::CompactionPolicy,
+    provider: Arc<tokio::sync::Mutex<crate::provider::OpenAIProvider>>,
+    token_counter: Arc<crate::auto_compaction::SimpleTokenCounter>,
+}
+
+impl<P> CompactingHandoffPolicy<P> {
+    /// Create a new compacting handoff policy wrapping the given policy.
+    pub fn new(
+        inner: P,
+        compaction_policy: crate::auto_compaction::CompactionPolicy,
+        provider: Arc<tokio::sync::Mutex<crate::provider::OpenAIProvider>>,
+    ) -> Self {
+        Self {
+            inner,
+            compaction_policy,
+            provider,
+            token_counter: Arc::new(crate::auto_compaction::SimpleTokenCounter::new()),
+        }
+    }
+}
+
+// Dummy service for the compactor (we only use the compact_messages method)
+struct DummyStepService;
+
+impl Service<CreateChatCompletionRequest> for DummyStepService {
+    type Response = crate::core::StepOutcome;
+    type Error = BoxError;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(
+        &mut self,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, _: CreateChatCompletionRequest) -> Self::Future {
+        Box::pin(async {
+            Ok(crate::core::StepOutcome::Done {
+                messages: vec![],
+                aux: Default::default(),
+            })
+        })
+    }
+}
+
+impl<P> HandoffPolicy for CompactingHandoffPolicy<P>
+where
+    P: HandoffPolicy + Clone,
+{
+    fn handoff_tools(&self) -> Vec<ChatCompletionTool> {
+        self.inner.handoff_tools()
+    }
+
+    fn handle_handoff_tool(&self, invocation: &ToolInvocation) -> Result<HandoffRequest, BoxError> {
+        self.inner.handle_handoff_tool(invocation)
+    }
+
+    fn should_handoff(&self, state: &LoopState, outcome: &StepOutcome) -> Option<HandoffRequest> {
+        self.inner.should_handoff(state, outcome)
+    }
+
+    fn is_handoff_tool(&self, tool_name: &str) -> bool {
+        self.inner.is_handoff_tool(tool_name)
+    }
+
+    fn transform_on_handoff(
+        &self,
+        messages: Vec<ChatCompletionRequestMessage>,
+        from_agent: &str,
+        to_agent: &str,
+        handoff: &HandoffRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ChatCompletionRequestMessage>, BoxError>> + Send>>
+    {
+        let compaction_policy = self.compaction_policy.clone();
+        let provider = self.provider.clone();
+        let token_counter = self.token_counter.clone();
+        let inner_policy = self.inner.clone();
+        let from_agent = from_agent.to_string();
+        let to_agent = to_agent.to_string();
+        let handoff = handoff.clone();
+
+        Box::pin(async move {
+            // First apply the inner policy's transformation (if any)
+            let messages = inner_policy
+                .transform_on_handoff(messages, &from_agent, &to_agent, &handoff)
+                .await?;
+
+            // Then apply compaction
+            tracing::debug!(
+                "Applying compaction during handoff from {} to {}",
+                from_agent,
+                to_agent
+            );
+
+            // Create a temporary compactor
+            let compactor = crate::auto_compaction::AutoCompaction::<
+                DummyStepService,
+                crate::provider::OpenAIProvider,
+                crate::auto_compaction::SimpleTokenCounter,
+            > {
+                inner: Arc::new(tokio::sync::Mutex::new(DummyStepService)),
+                policy: compaction_policy,
+                provider,
+                token_counter,
+            };
+
+            match compactor.compact_messages(messages.clone()).await {
+                Ok(compacted) => {
+                    tracing::info!(
+                        "Successfully compacted messages during handoff: {} -> {} messages",
+                        messages.len(),
+                        compacted.len()
+                    );
+                    Ok(compacted)
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Compaction failed during handoff, using original messages: {}",
+                        e
+                    );
+                    Ok(messages)
+                }
+            }
+        })
+    }
+}
+
+// ================================================================================================
 // Convenience Constructors
 // ================================================================================================
 
@@ -1165,6 +1360,7 @@ mod tests {
 
     mod handoff_policy_tests {
         use super::*;
+        use async_openai::types::ChatCompletionRequestUserMessageArgs;
 
         #[test]
         fn explicit_handoff_policy_generates_correct_tools() {
@@ -1235,6 +1431,32 @@ mod tests {
 
             // Explicit policies don't trigger automatic handoffs
             assert!(policy.should_handoff(&state, &outcome).is_none());
+        }
+
+        #[tokio::test]
+        async fn handoff_policy_default_transformation() {
+            // Test that the default transform_on_handoff returns messages unchanged
+            let policy = explicit_handoff_to("specialist");
+
+            let messages = vec![ChatCompletionRequestUserMessageArgs::default()
+                .content("Test message")
+                .build()
+                .unwrap()
+                .into()];
+
+            let handoff = HandoffRequest {
+                target_agent: "specialist".to_string(),
+                context: None,
+                reason: Some("Test handoff".to_string()),
+            };
+
+            let result = policy
+                .transform_on_handoff(messages.clone(), "agent1", "specialist", &handoff)
+                .await
+                .unwrap();
+
+            assert_eq!(result.len(), messages.len());
+            assert_eq!(result, messages);
         }
 
         #[test]
