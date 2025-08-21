@@ -675,6 +675,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::validation::{validate_conversation, ValidationPolicy};
     use futures::stream;
     use serde_json::json;
     use tokio::time::{sleep, Duration};
@@ -745,6 +746,13 @@ mod tests {
                         } => {
                             assert!(messages.len() >= 2); // assistant + tool
                             assert_eq!(invoked_tools, vec!["echo".to_string()]);
+                            let policy = ValidationPolicy {
+                                allow_repeated_roles: true,
+                                require_user_first: false,
+                                require_user_present: false,
+                                ..Default::default()
+                            };
+                            assert!(validate_conversation(&messages, &policy).is_none());
                         }
                         _ => panic!("expected Next"),
                     }
@@ -790,6 +798,13 @@ mod tests {
                     run.stop,
                     crate::core::AgentStopReason::DoneNoToolCalls
                 ));
+                let policy = ValidationPolicy {
+                    allow_repeated_roles: true,
+                    require_user_first: false,
+                    require_user_present: false,
+                    ..Default::default()
+                };
+                assert!(validate_conversation(&run.messages, &policy).is_none());
             }
         }
         assert!(saw_run_complete);
@@ -869,15 +884,32 @@ mod tests {
         let mut stream = svc.call(req).await.unwrap();
         let mut end_ids: Vec<String> = Vec::new();
         let mut saw_complete = false;
+        let mut final_messages: Option<Vec<ChatCompletionRequestMessage>> = None;
         while let Some(item) = stream.next().await {
             match item {
                 StepChunk::ToolCallEnd { id, .. } => end_ids.push(id),
-                StepChunk::StepComplete { .. } => saw_complete = true,
+                StepChunk::StepComplete { outcome } => {
+                    saw_complete = true;
+                    match outcome {
+                        StepOutcome::Next { messages, .. } | StepOutcome::Done { messages, .. } => {
+                            final_messages = Some(messages);
+                        }
+                    }
+                }
                 _ => {}
             }
         }
         assert!(saw_complete);
         assert_eq!(end_ids, vec!["c1".to_string(), "c2".to_string()]);
+        if let Some(msgs) = final_messages {
+            let policy = ValidationPolicy {
+                allow_repeated_roles: true,
+                require_user_first: false,
+                require_user_present: false,
+                ..Default::default()
+            };
+            assert!(validate_conversation(&msgs, &policy).is_none());
+        }
     }
 
     #[tokio::test]

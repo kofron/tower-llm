@@ -170,6 +170,29 @@ let coordinator = GroupBuilder::new()
 - Lints: `cargo clippy -D warnings`
 - Doctests: `cargo test --doc`
 
+## Conversation validation (tests/examples)
+
+This crate includes a pure validation facility to assert that conversations are well-formed for testing and examples.
+
+- API: `tower_llm::validation::{validate_conversation, ValidationPolicy}`
+- Examples: `examples/validate_conversation.rs`, `examples/generate_conversations.rs`
+
+Minimal usage:
+
+```rust
+use tower_llm::validation::{validate_conversation, ValidationPolicy};
+use async_openai::types::*;
+
+let sys = ChatCompletionRequestSystemMessageArgs::default().content("sys").build().unwrap();
+let usr = ChatCompletionRequestUserMessageArgs::default().content("hi").build().unwrap();
+let asst = ChatCompletionRequestAssistantMessageArgs::default().content("ok").build().unwrap();
+let msgs = vec![sys.into(), usr.into(), asst.into()];
+
+assert!(validate_conversation(&msgs, &ValidationPolicy::default()).is_none());
+```
+
+Generators and mutators are available under `tower_llm::validation::gen` and `tower_llm::validation::mutate` for property tests.
+
 ## Parallel tool execution
 
 You can enable concurrent execution of tool calls within a single step. Order of outputs is preserved.

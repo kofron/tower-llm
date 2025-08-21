@@ -44,10 +44,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use async_openai::types::{
-    ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
-    ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestToolMessageArgs,
-    ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequest,
-    CreateChatCompletionRequestArgs,
+    ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs,
+    ChatCompletionRequestToolMessageArgs, ChatCompletionRequestUserMessageArgs,
+    CreateChatCompletionRequest, CreateChatCompletionRequestArgs,
 };
 use tower::{BoxError, Layer, Service, ServiceExt};
 
@@ -501,8 +500,30 @@ where
             return Ok(result);
         }
 
-        // Extract messages to compact
-        let to_compact = &messages_to_compact[range.start..range.end];
+        // Extract messages to compact, extending end to include trailing tool responses
+        let mut adjusted_end = range.end;
+        if adjusted_end > range.start {
+            if let ChatCompletionRequestMessage::Assistant(asst) =
+                &messages_to_compact[adjusted_end - 1]
+            {
+                if let Some(tool_calls) = &asst.tool_calls {
+                    let ids: std::collections::HashSet<&str> =
+                        tool_calls.iter().map(|tc| tc.id.as_str()).collect();
+                    while adjusted_end < messages_to_compact.len() {
+                        if let ChatCompletionRequestMessage::Tool(t) =
+                            &messages_to_compact[adjusted_end]
+                        {
+                            if ids.contains(t.tool_call_id.as_str()) {
+                                adjusted_end += 1;
+                                continue;
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        let to_compact = &messages_to_compact[range.start..adjusted_end];
         let prompt = self.policy.compaction_prompt.generate(to_compact);
 
         // Build compaction request
@@ -516,17 +537,32 @@ where
             .into()];
 
         // Add the messages to be compacted
+        let mut pushed_non_system = false;
         for msg in to_compact {
+            if !pushed_non_system {
+                if matches!(msg, ChatCompletionRequestMessage::System(_)) {
+                    // Skip leading system messages to avoid back-to-back system
+                    continue;
+                } else {
+                    pushed_non_system = true;
+                }
+            }
             compact_messages.push(msg.clone());
         }
 
-        // Add instruction to summarize
-        compact_messages.push(
-            ChatCompletionRequestUserMessageArgs::default()
-                .content("Please provide a summary of the above conversation following the instructions.")
-                .build()?
-                .into(),
+        // Add instruction to summarize, avoiding repeated user role
+        let last_is_user = matches!(
+            compact_messages.last(),
+            Some(ChatCompletionRequestMessage::User(_))
         );
+        if !last_is_user {
+            compact_messages.push(
+                ChatCompletionRequestUserMessageArgs::default()
+                    .content("Please provide a summary of the above conversation following the instructions.")
+                    .build()?
+                    .into(),
+            );
+        }
 
         builder.messages(compact_messages);
         let compact_req = builder.build()?;
@@ -547,10 +583,10 @@ where
             result.push(msg.clone());
         }
 
-        // Add the compacted summary as an assistant message
+        // Add the compacted summary as a user message to maintain role validity
         if let Some(summary) = response.assistant.content {
             result.push(
-                ChatCompletionRequestAssistantMessageArgs::default()
+                ChatCompletionRequestUserMessageArgs::default()
                     .content(format!("[Previous conversation summary]: {}", summary))
                     .build()?
                     .into(),
@@ -558,7 +594,7 @@ where
         }
 
         // Keep messages after the compacted range
-        for msg in &messages_to_compact[range.end..] {
+        for msg in &messages_to_compact[adjusted_end..] {
             result.push(msg.clone());
         }
 
@@ -580,7 +616,62 @@ where
             }
         }
 
-        Ok(result)
+        // Normalize: drop empty assistant messages and coalesce adjacent assistants
+        let mut normalized: Vec<ChatCompletionRequestMessage> = Vec::with_capacity(result.len());
+        for msg in result.into_iter() {
+            if let Some(ChatCompletionRequestMessage::Assistant(prev)) = normalized.last_mut() {
+                if let ChatCompletionRequestMessage::Assistant(curr) = &msg {
+                    let curr_empty = matches!(&curr.content, Some(async_openai::types::ChatCompletionRequestAssistantMessageContent::Text(t)) if t.is_empty());
+                    let no_calls = prev
+                        .tool_calls
+                        .as_ref()
+                        .map(|v| v.is_empty())
+                        .unwrap_or(true)
+                        && curr
+                            .tool_calls
+                            .as_ref()
+                            .map(|v| v.is_empty())
+                            .unwrap_or(true);
+                    if curr_empty && no_calls {
+                        // skip pushing empty assistant
+                        continue;
+                    }
+                    if no_calls {
+                        let prev_text = match &prev.content {
+                            Some(async_openai::types::ChatCompletionRequestAssistantMessageContent::Text(t)) => Some(t.clone()),
+                            _ => None,
+                        };
+                        let curr_text = match &curr.content {
+                            Some(async_openai::types::ChatCompletionRequestAssistantMessageContent::Text(t)) => Some(t.clone()),
+                            _ => None,
+                        };
+                        if let (Some(p), Some(c)) = (prev_text, curr_text) {
+                            let combined = if p.is_empty() {
+                                c
+                            } else if c.is_empty() {
+                                p
+                            } else {
+                                format!("{}\n\n{}", p, c)
+                            };
+                            prev.content = Some(async_openai::types::ChatCompletionRequestAssistantMessageContent::Text(combined));
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            // default push (dropping empty assistants)
+            if let ChatCompletionRequestMessage::Assistant(a) = &msg {
+                let is_empty = matches!(&a.content, Some(async_openai::types::ChatCompletionRequestAssistantMessageContent::Text(t)) if t.is_empty())
+                    && a.tool_calls.as_ref().map(|v| v.is_empty()).unwrap_or(true);
+                if is_empty {
+                    continue;
+                }
+            }
+            normalized.push(msg);
+        }
+
+        Ok(normalized)
     }
 
     /// Check if the error is a context length error
@@ -722,6 +813,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::validation::gen;
+    use crate::validation::{validate_conversation, ValidationPolicy};
+    use async_openai::types::ChatCompletionRequestAssistantMessageArgs;
+    use proptest::prelude::*;
+    use std::sync::Arc as StdArc;
+    use tokio::sync::Mutex as AsyncMutex;
     use tower::Service;
 
     #[test]
@@ -964,6 +1061,83 @@ mod tests {
         );
 
         assert!(!has_orphaned_tool_calls(&messages_with_response));
+    }
+
+    #[derive(Clone)]
+    struct CapturingProvider {
+        captured: StdArc<AsyncMutex<Option<CreateChatCompletionRequest>>>,
+    }
+    impl CapturingProvider {
+        fn new() -> Self {
+            Self {
+                captured: StdArc::new(AsyncMutex::new(None)),
+            }
+        }
+        async fn get(&self) -> Option<CreateChatCompletionRequest> {
+            self.captured.lock().await.clone()
+        }
+    }
+    impl Service<CreateChatCompletionRequest> for CapturingProvider {
+        type Response = crate::provider::ProviderResponse;
+        type Error = BoxError;
+        type Future = std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>,
+        >;
+        fn poll_ready(
+            &mut self,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+        fn call(&mut self, req: CreateChatCompletionRequest) -> Self::Future {
+            let captured = self.captured.clone();
+            Box::pin(async move {
+                *captured.lock().await = Some(req);
+                #[allow(deprecated)]
+                let assistant = async_openai::types::ChatCompletionResponseMessage {
+                    content: Some("summary".into()),
+                    role: async_openai::types::Role::Assistant,
+                    tool_calls: None,
+                    refusal: None,
+                    audio: None,
+                    function_call: None,
+                };
+                Ok(crate::provider::ProviderResponse {
+                    assistant,
+                    prompt_tokens: 1,
+                    completion_tokens: 1,
+                })
+            })
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn compaction_preflight_and_post_valid_for_valid_inputs(msgs in gen::valid_conversation(gen::GeneratorConfig::default())) {
+            let provider = CapturingProvider::new();
+            let provider_clone = provider.clone();
+            let policy = CompactionPolicy {
+                compaction_model: "gpt-4o-mini".into(),
+                compaction_strategy: CompactionStrategy::CompactAllButLast(1),
+                orphaned_tool_call_strategy: OrphanedToolCallStrategy::AddPlaceholderResponses,
+                ..Default::default()
+            };
+            let counter = SimpleTokenCounter::new();
+            let dummy_inner = (); // unused by compact_messages
+            let ac = AutoCompaction {
+                inner: Arc::new(tokio::sync::Mutex::new(dummy_inner)),
+                policy,
+                provider: Arc::new(tokio::sync::Mutex::new(provider_clone)),
+                token_counter: Arc::new(counter),
+            };
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let out = rt.block_on(async move { ac.compact_messages(msgs.clone()).await.unwrap() });
+            // Preflight validity: captured request sent to compactor must be valid
+            let req = rt.block_on(async move { provider.get().await }).expect("captured");
+            prop_assert!(validate_conversation(&req.messages, &ValidationPolicy::default()).is_none());
+            // Post-compaction validity: output must be valid
+            prop_assert!(validate_conversation(&out, &ValidationPolicy::default()).is_none());
+        }
     }
 
     #[test]

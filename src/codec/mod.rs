@@ -238,7 +238,9 @@ pub fn items_to_messages(items: &[RunItem]) -> Vec<ChatCompletionRequestMessage>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::validation::{gen, validate_conversation, ValidationPolicy};
     use async_openai::types::ChatCompletionRequestMessage as ReqMsg;
+    use proptest::prop_assert;
 
     fn assistant_with_calls(name: &str, args: Value, id: &str) -> ReqMsg {
         let tc = async_openai::types::ChatCompletionMessageToolCall {
@@ -402,6 +404,15 @@ mod tests {
             } else {
                 panic!("expected text content");
             }
+        }
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn roundtrip_preserves_validity(msgs in gen::valid_conversation(gen::GeneratorConfig::default())) {
+            let items = messages_to_items(&msgs).unwrap();
+            let back = items_to_messages(&items);
+            prop_assert!(validate_conversation(&back, &ValidationPolicy::default()).is_none());
         }
     }
 

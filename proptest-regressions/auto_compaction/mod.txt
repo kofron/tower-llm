@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 81a1c5a61d705ae57798a3c3ed5476034ae002738421d642b9ada601bc9f7baf # shrinks to msgs = [Assistant(ChatCompletionRequestAssistantMessage { content: Some(Text("")), refusal: None, name: None, audio: None, tool_calls: None, function_call: None })]
+cc 65e022bf0bec47f2cdc0b5dbb2453b4b0a44113c34e6f29b3c34992dc3b29b12 # shrinks to msgs = [Tool(ChatCompletionRequestToolMessage { content: Text("{}"), tool_call_id: "id" })]
+cc e129869c3b2da8fea686965083d93ce2275a88f77b209d8a88b16816562fd002 # shrinks to msgs = [System(ChatCompletionRequestSystemMessage { content: Text("sys"), name: None }), User(ChatCompletionRequestUserMessage { content: Text("hi"), name: None }), Assistant(ChatCompletionRequestAssistantMessage { content: Some(Text("")), refusal: None, name: None, audio: None, tool_calls: Some([ChatCompletionMessageToolCall { id: "c1", type: Function, function: FunctionCall { name: "tool", arguments: "{}" } }]), function_call: None }), Tool(ChatCompletionRequestToolMessage { content: Text("{}"), tool_call_id: "c1" })]

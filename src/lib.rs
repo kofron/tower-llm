@@ -79,6 +79,7 @@ pub mod result;
 pub mod sessions;
 pub mod sqlite_session;
 pub mod streaming;
+pub mod validation;
 
 // Core module with main implementation
 mod core;
