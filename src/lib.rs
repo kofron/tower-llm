@@ -63,6 +63,7 @@
 //! ```
 
 pub mod approvals;
+pub mod auto_compaction;
 pub mod budgets;
 pub mod codec;
 pub mod concurrency;

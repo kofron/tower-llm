@@ -10,7 +10,7 @@ keywords = ["openai", "agents", "llm", "ai", "multi-agent"]
 
 
 [dependencies]
-async-openai = "0.29.0"
+async-openai = "0.29.1"
 async-trait = "0.1"
 tokio = { version = "1.41", features = ["full"] }
 tokio-stream = "0.1"
