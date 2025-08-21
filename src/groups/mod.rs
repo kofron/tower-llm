@@ -1743,8 +1743,10 @@ mod tests {
         #![allow(deprecated)]
         use super::*;
         use crate::provider::{FixedProvider, ProviderResponse};
+        use crate::validation::{gen, validate_conversation, ValidationPolicy};
         use crate::Agent;
         use async_openai::{config::OpenAIConfig, Client};
+        use proptest::prelude::*;
         use std::sync::Arc;
         use tower::{service_fn, ServiceExt};
 
@@ -1860,6 +1862,13 @@ mod tests {
                 format!("{:?}", result.messages[0]).contains("[triage]: I'll handle your request")
             );
             assert_eq!(result.steps, 1);
+            let policy = ValidationPolicy {
+                allow_repeated_roles: true,
+                require_user_first: false,
+                require_user_present: false,
+                ..Default::default()
+            };
+            assert!(validate_conversation(&result.messages, &policy).is_none());
 
             Ok(())
         }
@@ -1922,6 +1931,13 @@ mod tests {
             // The sequential policy doesn't have automatic handoff implemented in our mock agents
             // So it should just return the researcher's response
             assert!(format!("{:?}", result.messages[0]).contains("[researcher]: Research complete"));
+            let policy = ValidationPolicy {
+                allow_repeated_roles: true,
+                require_user_first: false,
+                require_user_present: false,
+                ..Default::default()
+            };
+            assert!(validate_conversation(&result.messages, &policy).is_none());
 
             Ok(())
         }
@@ -1959,6 +1975,13 @@ mod tests {
 
             // Should route directly to billing_agent
             assert!(format!("{:?}", result.messages[0]).contains("billing"));
+            let policy = ValidationPolicy {
+                allow_repeated_roles: true,
+                require_user_first: false,
+                require_user_present: false,
+                ..Default::default()
+            };
+            assert!(validate_conversation(&result.messages, &policy).is_none());
 
             // Test technical routing
             let tech_message = ChatCompletionRequestUserMessageArgs::default()
@@ -1978,6 +2001,13 @@ mod tests {
 
             // Should route directly to tech_agent
             assert!(format!("{:?}", result2.messages[0]).contains("tech"));
+            let policy = ValidationPolicy {
+                allow_repeated_roles: true,
+                require_user_first: false,
+                require_user_present: false,
+                ..Default::default()
+            };
+            assert!(validate_conversation(&result2.messages, &policy).is_none());
 
             Ok(())
         }
@@ -2049,6 +2079,13 @@ mod tests {
             // Should execute triage agent
             assert!(!result.messages.is_empty());
             assert!(format!("{:?}", result.messages[0]).contains("[triage]: Triage response"));
+            let policy = ValidationPolicy {
+                allow_repeated_roles: true,
+                require_user_first: false,
+                require_user_present: false,
+                ..Default::default()
+            };
+            assert!(validate_conversation(&result.messages, &policy).is_none());
 
             Ok(())
         }
@@ -2291,7 +2328,92 @@ mod tests {
             let out = ServiceExt::ready(&mut svc).await?.call(req).await?;
             // Should include specialist message at the end after handoff
             assert!(format!("{:?}", out.messages).contains("[specialist]: done"));
+            let policy = ValidationPolicy {
+                allow_repeated_roles: true,
+                ..Default::default()
+            };
+            assert!(validate_conversation(&out.messages, &policy).is_none());
             Ok(())
+        }
+
+        proptest! {
+            #[test]
+            fn handoff_preserves_validity_for_valid_inputs(msgs in gen::valid_conversation(gen::GeneratorConfig::default())) {
+                use async_openai::types::CreateChatCompletionRequest;
+                // Build two agents with deterministic providers
+                let tool_name = "handoff_to_specialist".to_string();
+                let tc = async_openai::types::ChatCompletionMessageToolCall {
+                    id: "call_prop".to_string(),
+                    r#type: async_openai::types::ChatCompletionToolType::Function,
+                    function: async_openai::types::FunctionCall {
+                        name: tool_name.clone(),
+                        arguments: "{\"reason\":\"pbt\"}".to_string(),
+                    },
+                };
+                let assistant_triage = async_openai::types::ChatCompletionResponseMessage {
+                    content: None,
+                    role: async_openai::types::Role::Assistant,
+                    tool_calls: Some(vec![tc]),
+                    function_call: None,
+                    refusal: None,
+                    audio: None,
+                };
+                let triage_provider = FixedProvider::new(ProviderResponse {
+                    assistant: assistant_triage,
+                    prompt_tokens: 1,
+                    completion_tokens: 1,
+                });
+
+                let assistant_specialist = async_openai::types::ChatCompletionResponseMessage {
+                    content: Some("[specialist]: ok".to_string()),
+                    role: async_openai::types::Role::Assistant,
+                    tool_calls: None,
+                    function_call: None,
+                    refusal: None,
+                    audio: None,
+                };
+                let specialist_provider = FixedProvider::new(ProviderResponse {
+                    assistant: assistant_specialist,
+                    prompt_tokens: 1,
+                    completion_tokens: 1,
+                });
+
+                let client = Arc::new(Client::<OpenAIConfig>::new());
+                let triage_agent = Agent::builder(client.clone())
+                    .model("gpt-4o")
+                    .handoff_policy(explicit_handoff_to("specialist").into())
+                    .with_provider(triage_provider)
+                    .policy(crate::CompositePolicy::new(vec![crate::core::policies::max_steps(2)]))
+                    .build();
+                let specialist_agent = Agent::builder(client.clone())
+                    .model("gpt-4o")
+                    .with_provider(specialist_provider)
+                    .policy(crate::CompositePolicy::new(vec![crate::core::policies::max_steps(1)]))
+                    .build();
+
+                #[derive(Clone)]
+                struct Picker;
+                impl Service<PickRequest> for Picker {
+                    type Response = String;
+                    type Error = BoxError;
+                    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+                    fn poll_ready(&mut self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> { std::task::Poll::Ready(Ok(())) }
+                    fn call(&mut self, _req: PickRequest) -> Self::Future { Box::pin(async move { Ok::<_, BoxError>("triage".to_string()) }) }
+                }
+
+                let coordinator = GroupBuilder::new()
+                    .agent("triage", triage_agent)
+                    .agent("specialist", specialist_agent)
+                    .picker(Picker)
+                    .handoff_policy(explicit_handoff_to("specialist"))
+                    .build();
+
+                let mut svc = coordinator;
+                let req = CreateChatCompletionRequest { messages: msgs, model: "gpt-4o".to_string(), ..Default::default() };
+                let result = futures::executor::block_on(async move { ServiceExt::ready(&mut svc).await.unwrap().call(req).await }).unwrap();
+                let policy = ValidationPolicy { allow_repeated_roles: true, allow_system_anywhere: true, require_user_first: false, require_user_present: false, ..Default::default() };
+                prop_assert!(validate_conversation(&result.messages, &policy).is_none());
+            }
         }
     }
 

@@ -234,6 +234,8 @@ mod tests {
     use super::*;
     use async_openai::types::ChatCompletionRequestUserMessageArgs;
     use tower::service_fn;
+    use crate::validation::{gen, validate_conversation, ValidationPolicy};
+    use proptest::prop_assert;
 
     fn req_with_user(s: &str) -> CreateChatCompletionRequest {
         let msg = ChatCompletionRequestUserMessageArgs::default()
@@ -446,6 +448,33 @@ mod tests {
                 }
             }
             _ => panic!("expected done"),
+        }
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn replay_service_returns_valid_messages_for_valid_trace(msgs in gen::valid_conversation(gen::GeneratorConfig::default())) {
+            let items = crate::codec::messages_to_items(&msgs).unwrap();
+            let store = InMemoryTraceStore::default();
+            let mut writer = store.clone();
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                tower::Service::call(&mut writer, WriteTrace { id: "t-valid".into(), items }).await.unwrap();
+            });
+            let mut replay = ReplayService::new(store, "t-valid", "gpt-4o");
+            let out = rt.block_on(async move {
+                ServiceExt::ready(&mut replay)
+                    .await
+                    .unwrap()
+                    .call(async_openai::types::CreateChatCompletionRequestArgs::default().model("gpt-4o").messages(vec![]).build().unwrap())
+                    .await
+                    .unwrap()
+            });
+            if let StepOutcome::Done { messages, .. } = out {
+                prop_assert!(validate_conversation(&messages, &ValidationPolicy::default()).is_none());
+            } else {
+                prop_assert!(false, "expected Done");
+            }
         }
     }
 }

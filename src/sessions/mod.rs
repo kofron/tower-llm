@@ -286,6 +286,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::validation::{validate_conversation, ValidationPolicy};
     use async_openai::types::{
         ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
     };
@@ -330,9 +331,17 @@ mod tests {
         .await
         .unwrap();
 
-        // Inner service echoes messages and returns them unchanged
-        let inner =
-            service_fn(|req: CreateChatCompletionRequest| async move { Ok::<_, BoxError>(req) });
+        // Inner service echoes messages and returns them unchanged; capture merged request
+        let captured: std::sync::Arc<tokio::sync::Mutex<Option<CreateChatCompletionRequest>>> =
+            std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let captured_clone = captured.clone();
+        let inner = service_fn(move |req: CreateChatCompletionRequest| {
+            let captured_inner = captured_clone.clone();
+            async move {
+                *captured_inner.lock().await = Some(req.clone());
+                Ok::<_, BoxError>(req)
+            }
+        });
 
         // Wrap with Memory layer
         let layer = MemoryLayer::new(
@@ -350,12 +359,25 @@ mod tests {
             .into()]);
         let _resp = tower::Service::call(&mut svc, req).await.unwrap();
 
+        // Validate preflight (merged) request messages are valid
+        let merged = captured.lock().await.clone().expect("captured");
+        let policy = ValidationPolicy {
+            allow_repeated_roles: true,
+            ..Default::default()
+        };
+        assert!(validate_conversation(&merged.messages, &policy).is_none());
+
         // Verify store now contains prior + new
         let mut load = store.clone();
         let history = tower::Service::call(&mut load, LoadSession { id: session_id })
             .await
             .unwrap();
         assert_eq!(history.len(), 3);
+        let policy = ValidationPolicy {
+            allow_repeated_roles: true,
+            ..Default::default()
+        };
+        assert!(validate_conversation(&history, &policy).is_none());
     }
 
     #[tokio::test]
