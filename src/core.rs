@@ -451,7 +451,9 @@ where
             if let Some(t) = req.temperature.or(temperature) {
                 builder.temperature(t);
             }
-            if let Some(mt) = max_tokens {
+            // Use request's max_tokens if set, otherwise use layer's max_tokens if set
+            #[allow(deprecated)]
+            if let Some(mt) = req.max_tokens.or(max_tokens) {
                 builder.max_tokens(mt);
             }
             if let Some(effort) = reasoning_effort {
@@ -737,6 +739,7 @@ pub struct AgentBuilder {
     tool_concurrency_limit: Option<usize>,
     tool_join_policy: ToolJoinPolicy,
     agent_service_map: Option<Arc<dyn Fn(AgentSvc) -> AgentSvc + Send + Sync + 'static>>, // optional final wrapper
+    auto_compaction: Option<crate::auto_compaction::CompactionPolicy>,
 }
 
 impl Agent {
@@ -755,6 +758,7 @@ impl Agent {
             tool_concurrency_limit: None,
             tool_join_policy: ToolJoinPolicy::FailFast,
             agent_service_map: None,
+            auto_compaction: None,
         }
     }
 }
@@ -833,6 +837,12 @@ impl AgentBuilder {
         self
     }
 
+    /// Enable auto-compaction with the specified policy
+    pub fn auto_compaction(mut self, policy: crate::auto_compaction::CompactionPolicy) -> Self {
+        self.auto_compaction = Some(policy);
+        self
+    }
+
     pub fn build(self) -> AgentSvc {
         let (router, mut specs) = ToolRouter::new(self.tools);
         // If handoff policy provided, wrap router and extend tool specs
@@ -856,11 +866,17 @@ impl AgentBuilder {
         } else {
             tower::util::BoxCloneService::new(OpenAIProvider::new(self.client))
         };
-        let mut step_layer = StepLayer::new(base_provider, self.model, specs)
-            .temperature(self.temperature.unwrap_or(0.0))
-            .max_tokens(self.max_tokens.unwrap_or(512))
+        let mut step_layer = StepLayer::new(base_provider.clone(), self.model, specs)
             .parallel_tools(self.enable_parallel_tools)
             .tool_join_policy(self.tool_join_policy);
+        // Only set temperature if explicitly provided
+        if let Some(t) = self.temperature {
+            step_layer = step_layer.temperature(t);
+        }
+        // Only set max_tokens if explicitly provided
+        if let Some(mt) = self.max_tokens {
+            step_layer = step_layer.max_tokens(mt);
+        }
         if let Some(effort) = self.reasoning_effort {
             step_layer = step_layer.reasoning_effort(effort);
         }
@@ -868,7 +884,24 @@ impl AgentBuilder {
             step_layer = step_layer.tool_concurrency_limit(lim);
         }
         let step = step_layer.layer(routed);
-        let agent = AgentLoopLayer::new(self.policy).layer(step);
+
+        // Apply auto-compaction if configured
+        let step_with_compaction: BoxService<CreateChatCompletionRequest, StepOutcome, BoxError> =
+            if let Some(compaction_policy) = self.auto_compaction {
+                // Use the provider for compaction
+                let compaction_provider = base_provider;
+                let token_counter = crate::auto_compaction::SimpleTokenCounter::new();
+                let compaction_layer = crate::auto_compaction::AutoCompactionLayer::new(
+                    compaction_policy,
+                    compaction_provider,
+                    token_counter,
+                );
+                BoxService::new(compaction_layer.layer(step))
+            } else {
+                BoxService::new(step)
+            };
+
+        let agent = AgentLoopLayer::new(self.policy).layer(step_with_compaction);
         let boxed = BoxService::new(agent);
         match &self.agent_service_map {
             Some(map) => (map)(boxed),
@@ -920,11 +953,17 @@ impl AgentBuilder {
         } else {
             tower::util::BoxCloneService::new(OpenAIProvider::new(self.client))
         };
-        let mut step_layer = StepLayer::new(base_provider, self.model, specs)
-            .temperature(self.temperature.unwrap_or(0.0))
-            .max_tokens(self.max_tokens.unwrap_or(512))
+        let mut step_layer = StepLayer::new(base_provider.clone(), self.model, specs)
             .parallel_tools(self.enable_parallel_tools)
             .tool_join_policy(self.tool_join_policy);
+        // Only set temperature if explicitly provided
+        if let Some(t) = self.temperature {
+            step_layer = step_layer.temperature(t);
+        }
+        // Only set max_tokens if explicitly provided
+        if let Some(mt) = self.max_tokens {
+            step_layer = step_layer.max_tokens(mt);
+        }
         if let Some(effort) = self.reasoning_effort {
             step_layer = step_layer.reasoning_effort(effort);
         }
@@ -933,9 +972,25 @@ impl AgentBuilder {
         }
         let step = step_layer.layer(routed);
 
+        // Apply auto-compaction if configured (before memory layer)
+        let step_with_compaction: BoxService<CreateChatCompletionRequest, StepOutcome, BoxError> =
+            if let Some(compaction_policy) = self.auto_compaction {
+                // Use the provider for compaction
+                let compaction_provider = base_provider;
+                let token_counter = crate::auto_compaction::SimpleTokenCounter::new();
+                let compaction_layer = crate::auto_compaction::AutoCompactionLayer::new(
+                    compaction_policy,
+                    compaction_provider,
+                    token_counter,
+                );
+                BoxService::new(compaction_layer.layer(step))
+            } else {
+                BoxService::new(step)
+            };
+
         // Attach memory layer
         let mem_layer = crate::sessions::MemoryLayer::new(load, save, session_id);
-        let step_with_mem = mem_layer.layer(step);
+        let step_with_mem = mem_layer.layer(step_with_compaction);
         let agent = AgentLoopLayer::new(self.policy).layer(step_with_mem);
         let boxed = BoxService::new(agent);
         match &self.agent_service_map {
@@ -1103,6 +1158,12 @@ where
             let mut state = LoopState::default();
             let base_model = req.model.clone();
             let mut current_messages = req.messages.clone();
+            // Preserve all original request parameters
+            let base_temperature = req.temperature;
+            #[allow(deprecated)]
+            let base_max_tokens = req.max_tokens;
+            let base_max_completion_tokens = req.max_completion_tokens;
+            let base_tools = req.tools.clone();
 
             // Log the initial model for the agent loop
             debug!(
@@ -1112,10 +1173,22 @@ where
             );
 
             loop {
-                // Rebuild request for this iteration
+                // Rebuild request for this iteration, preserving original parameters
                 let mut builder = CreateChatCompletionRequestArgs::default();
                 builder.model(&base_model);
                 builder.messages(current_messages.clone());
+                if let Some(t) = base_temperature {
+                    builder.temperature(t);
+                }
+                if let Some(mt) = base_max_tokens {
+                    builder.max_tokens(mt);
+                }
+                if let Some(mct) = base_max_completion_tokens {
+                    builder.max_completion_tokens(mct);
+                }
+                if let Some(tools) = base_tools.clone() {
+                    builder.tools(tools);
+                }
                 let current_req = builder
                     .build()
                     .map_err(|e| format!("build req error: {}", e))?;
