@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 92bf9abf093e08655d41101320201def62eab7a1895f8e91eb3126f48a3ebe6b # shrinks to msgs = [System(ChatCompletionRequestSystemMessage { content: Text("sys"), name: None }), User(ChatCompletionRequestUserMessage { content: Text("hi"), name: None }), Assistant(ChatCompletionRequestAssistantMessage { content: Some(Text("")), refusal: None, name: None, audio: None, tool_calls: None, function_call: None }), User(ChatCompletionRequestUserMessage { content: Text("next"), name: None }), Assistant(ChatCompletionRequestAssistantMessage { content: Some(Text("")), refusal: None, name: None, audio: None, tool_calls: None, function_call: None }), Assistant(ChatCompletionRequestAssistantMessage { content: Some(Text("")), refusal: None, name: None, audio: None, tool_calls: None, function_call: None }), User(ChatCompletionRequestUserMessage { content: Text("next"), name: None })]

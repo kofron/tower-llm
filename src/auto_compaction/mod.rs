@@ -722,6 +722,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::validation::{validate_conversation, ValidationPolicy};
+    use proptest::prelude::*;
     use tower::Service;
 
     #[test]
@@ -964,6 +966,92 @@ mod tests {
         );
 
         assert!(!has_orphaned_tool_calls(&messages_with_response));
+    }
+
+    proptest! {
+        #[test]
+        fn compaction_output_is_valid_for_random_inputs(msgs in proptest::collection::vec(any_message(), 0..20)) {
+            use crate::provider::FixedProvider;
+            use crate::provider::ProviderResponse;
+            // Provider that returns a dummy assistant content for summaries
+            let provider = FixedProvider::new(ProviderResponse{
+                assistant: async_openai::types::ChatCompletionResponseMessage {
+                    content: Some("summary".into()),
+                    role: async_openai::types::Role::Assistant,
+                    tool_calls: None,
+                    refusal: None,
+                    audio: None,
+                    function_call: None,
+                },
+                prompt_tokens: 1,
+                completion_tokens: 1,
+            });
+            let policy = CompactionPolicy {
+                compaction_model: "gpt-4o-mini".into(),
+                compaction_strategy: CompactionStrategy::CompactAllButLast(1),
+                orphaned_tool_call_strategy: OrphanedToolCallStrategy::AddPlaceholderResponses,
+                ..Default::default()
+            };
+            let counter = SimpleTokenCounter::new();
+            // Build minimal AutoCompaction directly (we are inside the module, fields are accessible)
+            let dummy_inner = (); // unused by compact_messages
+            let mut ac = AutoCompaction {
+                inner: Arc::new(tokio::sync::Mutex::new(dummy_inner)),
+                policy,
+                provider: Arc::new(tokio::sync::Mutex::new(provider)),
+                token_counter: Arc::new(counter),
+            };
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let out = rt.block_on(async move { ac.compact_messages(msgs).await.unwrap() });
+            let mut vp = ValidationPolicy::default();
+            vp.require_user_first = false;
+            vp.require_user_present = false;
+            vp.allow_system_anywhere = true;
+            vp.allow_repeated_roles = true;
+            vp.allow_dangling_tool_calls = true;
+            vp.allow_developer_and_function = true;
+            let v = validate_conversation(&out, &vp);
+            if let Some(violations) = v {
+                // For pathological inputs like a lone tool message, AutoCompaction cannot fabricate an assistant context.
+                // In that case, accept ToolBeforeAssistant as the only violation.
+                let only_allowed = violations.iter().all(|vi| matches!(vi.code, crate::validation::ViolationCode::ToolBeforeAssistant { .. }));
+                prop_assert!(only_allowed);
+            }
+        }
+    }
+
+    fn any_message() -> impl Strategy<Value = ChatCompletionRequestMessage> {
+        use async_openai::types::*;
+        let sys = Just(
+            ChatCompletionRequestSystemMessageArgs::default()
+                .content("s")
+                .build()
+                .unwrap()
+                .into(),
+        );
+        let usr = Just(
+            ChatCompletionRequestUserMessageArgs::default()
+                .content("u")
+                .build()
+                .unwrap()
+                .into(),
+        );
+        let asst = Just(
+            ChatCompletionRequestAssistantMessageArgs::default()
+                .content("")
+                .build()
+                .unwrap()
+                .into(),
+        );
+        let tool = Just(
+            ChatCompletionRequestToolMessageArgs::default()
+                .tool_call_id("id")
+                .content("{}")
+                .build()
+                .unwrap()
+                .into(),
+        );
+        prop_oneof![sys, usr, asst, tool]
     }
 
     #[test]
