@@ -1,6 +1,6 @@
 [package]
 name = "tower-llm"
-version = "0.0.3"
+version = "0.0.4"
 edition = "2021"
 description = "A Tower-based framework for building LLM & agent workflows in Rust."
 license = "MIT"
