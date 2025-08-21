@@ -280,10 +280,10 @@ impl<P, C> AutoCompactionLayer<P, C> {
 
 /// Service wrapper that performs auto-compaction
 pub struct AutoCompaction<S, P, C> {
-    inner: Arc<tokio::sync::Mutex<S>>,
-    policy: CompactionPolicy,
-    provider: Arc<tokio::sync::Mutex<P>>,
-    token_counter: Arc<C>,
+    pub(crate) inner: Arc<tokio::sync::Mutex<S>>,
+    pub(crate) policy: CompactionPolicy,
+    pub(crate) provider: Arc<tokio::sync::Mutex<P>>,
+    pub(crate) token_counter: Arc<C>,
 }
 
 impl<S, P, C> Layer<S> for AutoCompactionLayer<P, C>
@@ -364,7 +364,7 @@ where
     }
 
     /// Compact messages based on the configured strategy
-    async fn compact_messages(
+    pub(crate) async fn compact_messages(
         &self,
         messages: Vec<ChatCompletionRequestMessage>,
     ) -> Result<Vec<ChatCompletionRequestMessage>, BoxError> {
