@@ -12,6 +12,7 @@ use tower_llm::{
 };
 
 #[tokio::main]
+#[allow(deprecated)]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Initialize tracing with debug level for tower_llm
     tracing_subscriber::fmt()
@@ -65,7 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     println!("Request model field: {:?}\n", req1.model);
 
-    let mut agent1 = Agent::builder(client.clone())
+    let agent1 = Agent::builder(client.clone())
         .model("gpt-5") // Agent configured with gpt-5
         .temperature(0.7)
         .max_tokens(1000)
@@ -85,7 +86,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     println!("Request model field: {:?}\n", req2.model);
 
-    let mut agent2 = Agent::builder(client.clone())
+    let agent2 = Agent::builder(client)
         .model("gpt-5") // Agent configured with gpt-5
         .temperature(0.7)
         .max_tokens(1000)
