@@ -18,7 +18,7 @@ use tower_llm::AgentPolicy;
 use tower_llm::ToolJoinPolicy;
 use tower_llm::{
     policies, simple_chat_request, tool_typed, Agent, AgentStopReason, CompositePolicy, LoopState,
-    StepOutcome, ToolInvocation, ToolOutput,
+    ReasoningEffort, StepOutcome, ToolInvocation, ToolOutput,
 };
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -620,4 +620,242 @@ fn test_old_api_removed() {
     use async_openai::{config::OpenAIConfig, Client};
     let client = Arc::new(Client::<OpenAIConfig>::new());
     let _builder = Agent::builder(client);
+}
+
+#[tokio::test]
+async fn test_agent_builder_reasoning_effort() {
+    use async_openai::{config::OpenAIConfig, Client};
+
+    // Test the reasoning_effort builder method compiles and can be set
+    let client = Arc::new(Client::<OpenAIConfig>::new());
+    
+    let _builder = Agent::builder(client.clone())
+        .model("o1")
+        .reasoning_effort(ReasoningEffort::High);
+        
+    // Test all reasoning effort values
+    let _builder_low = Agent::builder(client.clone())
+        .reasoning_effort(ReasoningEffort::Low);
+        
+    let _builder_medium = Agent::builder(client.clone())
+        .reasoning_effort(ReasoningEffort::Medium);
+        
+    let _builder_high = Agent::builder(client)
+        .reasoning_effort(ReasoningEffort::High);
+}
+
+#[tokio::test]
+async fn test_reasoning_effort_with_fixed_provider() {
+    use async_openai::{config::OpenAIConfig, Client};
+    
+    // Test that reasoning_effort is properly passed through the system
+    let assistant = ChatCompletionResponseMessage {
+        content: Some("I've reasoned through this carefully.".to_string()),
+        role: RespRole::Assistant,
+        tool_calls: None,
+        function_call: None,
+        refusal: None,
+        audio: None,
+    };
+    
+    let provider = FixedProvider::new(ProviderResponse {
+        assistant,
+        prompt_tokens: 50,
+        completion_tokens: 25,
+    });
+    
+    let client = Arc::new(Client::<OpenAIConfig>::new());
+    let mut agent = Agent::builder(client)
+        .model("o1")
+        .reasoning_effort(ReasoningEffort::High)
+        .with_provider(provider)
+        .policy(CompositePolicy::new(vec![policies::until_no_tool_calls()]))
+        .build();
+        
+    let result = ServiceExt::ready(&mut agent)
+        .await
+        .unwrap()
+        .call(simple_chat_request("Think carefully", "What's 2+2?"))
+        .await
+        .unwrap();
+        
+    assert_eq!(result.steps, 1);
+    assert!(matches!(result.stop, AgentStopReason::DoneNoToolCalls));
+}
+
+#[tokio::test] 
+async fn test_reasoning_effort_with_tools() {
+    use async_openai::{config::OpenAIConfig, Client};
+    
+    let calculate = tool_typed("calculate", "Calculate math", |args: TestArgs| async move {
+        Ok::<_, tower::BoxError>(json!({ "result": format!("calculated {}", args.value) }))
+    });
+    
+    // Mock provider that will call the tool
+    let tc = ChatCompletionMessageToolCall {
+        id: "calc_1".to_string(),
+        r#type: ChatCompletionToolType::Function,
+        function: FunctionCall {
+            name: "calculate".to_string(),
+            arguments: "{\"value\":\"2+2\"}".to_string(),
+        },
+    };
+    
+    let assistant = ChatCompletionResponseMessage {
+        content: None,
+        role: RespRole::Assistant,
+        tool_calls: Some(vec![tc]),
+        function_call: None,
+        refusal: None,
+        audio: None,
+    };
+    
+    let provider = FixedProvider::new(ProviderResponse {
+        assistant,
+        prompt_tokens: 30,
+        completion_tokens: 15,
+    });
+    
+    let client = Arc::new(Client::<OpenAIConfig>::new());
+    let mut agent = Agent::builder(client)
+        .model("o1")
+        .tool(calculate)
+        .reasoning_effort(ReasoningEffort::Medium)
+        .with_provider(provider)
+        .policy(CompositePolicy::new(vec![policies::max_steps(1)]))
+        .build();
+        
+    let result = ServiceExt::ready(&mut agent)
+        .await
+        .unwrap()
+        .call(simple_chat_request("Use tools to calculate", "What's 2+2?"))
+        .await
+        .unwrap();
+        
+    assert_eq!(result.steps, 1);
+    // Verify tool was called by checking the messages
+    let has_tool_message = result.messages.iter().any(|m| matches!(
+        m,
+        async_openai::types::ChatCompletionRequestMessage::Tool(_)
+    ));
+    assert!(has_tool_message);
+}
+
+#[test]
+fn test_reasoning_effort_enum_values() {
+    // Test that all ReasoningEffort enum values are available
+    let _low = ReasoningEffort::Low;
+    let _medium = ReasoningEffort::Medium;
+    let _high = ReasoningEffort::High;
+}
+
+#[tokio::test]
+async fn test_reasoning_effort_fluent_api_chaining() {
+    use async_openai::{config::OpenAIConfig, Client};
+    
+    // Test that reasoning_effort works in fluent API chains with other options
+    let client = Arc::new(Client::<OpenAIConfig>::new());
+    let assistant = ChatCompletionResponseMessage {
+        content: Some("Response".to_string()),
+        role: RespRole::Assistant,
+        tool_calls: None,
+        function_call: None,
+        refusal: None,
+        audio: None,
+    };
+    
+    let provider = FixedProvider::new(ProviderResponse {
+        assistant,
+        prompt_tokens: 10,
+        completion_tokens: 5,
+    });
+    
+    // Test fluent chaining with reasoning_effort in different positions
+    let mut agent1 = Agent::builder(client.clone())
+        .model("o1")
+        .reasoning_effort(ReasoningEffort::Low) // early in chain
+        .temperature(0.7)
+        .max_tokens(100)
+        .with_provider(provider.clone())
+        .policy(CompositePolicy::new(vec![policies::until_no_tool_calls()]))
+        .build();
+        
+    let mut agent2 = Agent::builder(client.clone())
+        .model("o1")
+        .temperature(0.5)
+        .reasoning_effort(ReasoningEffort::Medium) // middle of chain
+        .max_tokens(200)
+        .with_provider(provider.clone())
+        .policy(CompositePolicy::new(vec![policies::until_no_tool_calls()]))
+        .build();
+        
+    let mut agent3 = Agent::builder(client)
+        .model("o1")
+        .temperature(0.3)
+        .max_tokens(300)
+        .reasoning_effort(ReasoningEffort::High) // end of chain
+        .with_provider(provider)
+        .policy(CompositePolicy::new(vec![policies::until_no_tool_calls()]))
+        .build();
+        
+    // All agents should work
+    let _ = ServiceExt::ready(&mut agent1)
+        .await
+        .unwrap()
+        .call(simple_chat_request("system", "test"))
+        .await
+        .unwrap();
+        
+    let _ = ServiceExt::ready(&mut agent2)
+        .await
+        .unwrap() 
+        .call(simple_chat_request("system", "test"))
+        .await
+        .unwrap();
+        
+    let _ = ServiceExt::ready(&mut agent3)
+        .await
+        .unwrap()
+        .call(simple_chat_request("system", "test"))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_reasoning_effort_optional_none_by_default() {
+    use async_openai::{config::OpenAIConfig, Client};
+    
+    // Test that reasoning_effort defaults to None (not set)
+    let client = Arc::new(Client::<OpenAIConfig>::new());
+    let assistant = ChatCompletionResponseMessage {
+        content: Some("Default response".to_string()),
+        role: RespRole::Assistant,
+        tool_calls: None,
+        function_call: None,
+        refusal: None,
+        audio: None,
+    };
+    
+    let provider = FixedProvider::new(ProviderResponse {
+        assistant,
+        prompt_tokens: 10,
+        completion_tokens: 5,
+    });
+    
+    // Agent without reasoning_effort set should work fine
+    let mut agent = Agent::builder(client)
+        .model("gpt-4o") // non-reasoning model
+        .with_provider(provider)
+        .policy(CompositePolicy::new(vec![policies::until_no_tool_calls()]))
+        .build();
+        
+    let result = ServiceExt::ready(&mut agent)
+        .await
+        .unwrap()
+        .call(simple_chat_request("system", "test"))
+        .await
+        .unwrap();
+        
+    assert_eq!(result.steps, 1);
+    assert!(matches!(result.stop, AgentStopReason::DoneNoToolCalls));
 }

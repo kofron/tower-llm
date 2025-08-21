@@ -104,6 +104,7 @@ pub use async_openai::{
     config::OpenAIConfig,
     types::{
         ChatCompletionRequestMessage, CreateChatCompletionRequest, CreateChatCompletionRequestArgs,
+        ReasoningEffort,
     },
     Client,
 };

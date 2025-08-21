@@ -11,7 +11,7 @@ use async_openai::{
         ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestToolMessageArgs,
         ChatCompletionRequestUserMessageArgs, ChatCompletionTool, ChatCompletionToolArgs,
         ChatCompletionToolType, CreateChatCompletionRequest, CreateChatCompletionRequestArgs,
-        FunctionObjectArgs,
+        FunctionObjectArgs, ReasoningEffort,
     },
     Client,
 };
@@ -24,6 +24,7 @@ use tower::{
     util::{BoxCloneService, BoxService},
     BoxError, Layer, Service, ServiceExt,
 };
+use tracing::{debug, trace};
 
 /// Join policy for parallel tool execution
 #[derive(Debug, Clone, Copy, Default)]
@@ -243,6 +244,7 @@ pub struct Step<S, P> {
     model: String,
     temperature: Option<f32>,
     max_tokens: Option<u32>,
+    reasoning_effort: Option<ReasoningEffort>,
     tools: S,
     tool_specs: Arc<Vec<ChatCompletionTool>>, // supplied to requests if missing
     parallel_tools: bool,
@@ -262,6 +264,7 @@ impl<S, P> Step<S, P> {
             model: model.into(),
             temperature: None,
             max_tokens: None,
+            reasoning_effort: None,
             tools,
             tool_specs: Arc::new(tool_specs),
             parallel_tools: false,
@@ -294,6 +297,11 @@ impl<S, P> Step<S, P> {
         self.join_policy = policy;
         self
     }
+
+    pub fn reasoning_effort(mut self, effort: ReasoningEffort) -> Self {
+        self.reasoning_effort = Some(effort);
+        self
+    }
 }
 
 /// Layer that lifts a routed tool service `S` into a `Step<S>` service.
@@ -302,6 +310,7 @@ pub struct StepLayer<P> {
     model: String,
     temperature: Option<f32>,
     max_tokens: Option<u32>,
+    reasoning_effort: Option<ReasoningEffort>,
     tool_specs: Arc<Vec<ChatCompletionTool>>,
     parallel_tools: bool,
     tool_concurrency_limit: Option<usize>,
@@ -315,6 +324,7 @@ impl<P> StepLayer<P> {
             model: model.into(),
             temperature: None,
             max_tokens: None,
+            reasoning_effort: None,
             tool_specs: Arc::new(tool_specs),
             parallel_tools: false,
             tool_concurrency_limit: None,
@@ -346,6 +356,11 @@ impl<P> StepLayer<P> {
         self.join_policy = policy;
         self
     }
+
+    pub fn reasoning_effort(mut self, effort: ReasoningEffort) -> Self {
+        self.reasoning_effort = Some(effort);
+        self
+    }
 }
 
 impl<S, P> Layer<S> for StepLayer<P>
@@ -363,6 +378,7 @@ where
         );
         s.temperature = self.temperature;
         s.max_tokens = self.max_tokens;
+        s.reasoning_effort = self.reasoning_effort.clone();
         s.parallel_tools = self.parallel_tools;
         s.tool_concurrency_limit = self.tool_concurrency_limit;
         s.join_policy = self.join_policy;
@@ -394,6 +410,7 @@ where
         let model = self.model.clone();
         let temperature = self.temperature;
         let max_tokens = self.max_tokens;
+        let reasoning_effort = self.reasoning_effort.clone();
         let tools = self.tools.clone();
         let tool_specs = self.tool_specs.clone();
         let parallel_tools = self.parallel_tools;
@@ -403,6 +420,26 @@ where
         Box::pin(async move {
             // Rebuild request using builder to avoid deprecated field access
             let effective_model: Option<String> = req.model.clone().into();
+
+            // Determine which model will be used
+            let model_to_use = if let Some(m) = effective_model.as_ref() {
+                m.clone()
+            } else {
+                model.clone()
+            };
+
+            // Log model parameters
+            debug!(
+                model = %model_to_use,
+                temperature = ?req.temperature.or(temperature),
+                max_tokens = ?max_tokens,
+                tools_count = if req.tools.is_some() {
+                    req.tools.as_ref().map(|t| t.len())
+                } else {
+                    Some(tool_specs.len())
+                },
+                "Step service preparing API request"
+            );
 
             let mut builder = CreateChatCompletionRequestArgs::default();
             builder.messages(req.messages.clone());
@@ -417,6 +454,9 @@ where
             if let Some(mt) = max_tokens {
                 builder.max_tokens(mt);
             }
+            if let Some(effort) = reasoning_effort {
+                builder.reasoning_effort(effort);
+            }
             if let Some(ts) = req.tools.clone() {
                 builder.tools(ts);
             } else if !tool_specs.is_empty() {
@@ -426,6 +466,13 @@ where
             let rebuilt_req = builder
                 .build()
                 .map_err(|e| format!("request build error: {}", e))?;
+
+            // Trace the final request model
+            trace!(
+                final_model = ?rebuilt_req.model,
+                messages_count = rebuilt_req.messages.len(),
+                "Step service final request built"
+            );
 
             let mut messages = rebuilt_req.messages.clone();
 
@@ -675,6 +722,7 @@ pub struct AgentBuilder {
     model: String,
     temperature: Option<f32>,
     max_tokens: Option<u32>,
+    reasoning_effort: Option<ReasoningEffort>,
     tools: Vec<ToolDef>,
     policy: CompositePolicy,
     handoff: Option<crate::groups::AnyHandoffPolicy>,
@@ -698,6 +746,7 @@ impl Agent {
             model: "gpt-4o".to_string(),
             temperature: None,
             max_tokens: None,
+            reasoning_effort: None,
             tools: Vec::new(),
             policy: CompositePolicy::default(),
             handoff: None,
@@ -721,6 +770,10 @@ impl AgentBuilder {
     }
     pub fn max_tokens(mut self, mt: u32) -> Self {
         self.max_tokens = Some(mt);
+        self
+    }
+    pub fn reasoning_effort(mut self, effort: ReasoningEffort) -> Self {
+        self.reasoning_effort = Some(effort);
         self
     }
     pub fn tool(mut self, tool: ToolDef) -> Self {
@@ -808,6 +861,9 @@ impl AgentBuilder {
             .max_tokens(self.max_tokens.unwrap_or(512))
             .parallel_tools(self.enable_parallel_tools)
             .tool_join_policy(self.tool_join_policy);
+        if let Some(effort) = self.reasoning_effort {
+            step_layer = step_layer.reasoning_effort(effort);
+        }
         if let Some(lim) = self.tool_concurrency_limit {
             step_layer = step_layer.tool_concurrency_limit(lim);
         }
@@ -869,6 +925,9 @@ impl AgentBuilder {
             .max_tokens(self.max_tokens.unwrap_or(512))
             .parallel_tools(self.enable_parallel_tools)
             .tool_join_policy(self.tool_join_policy);
+        if let Some(effort) = self.reasoning_effort {
+            step_layer = step_layer.reasoning_effort(effort);
+        }
         if let Some(lim) = self.tool_concurrency_limit {
             step_layer = step_layer.tool_concurrency_limit(lim);
         }
@@ -1044,6 +1103,14 @@ where
             let mut state = LoopState::default();
             let base_model = req.model.clone();
             let mut current_messages = req.messages.clone();
+
+            // Log the initial model for the agent loop
+            debug!(
+                model = ?base_model,
+                initial_messages = current_messages.len(),
+                "AgentLoop starting with model"
+            );
+
             loop {
                 // Rebuild request for this iteration
                 let mut builder = CreateChatCompletionRequestArgs::default();
@@ -1052,6 +1119,13 @@ where
                 let current_req = builder
                     .build()
                     .map_err(|e| format!("build req error: {}", e))?;
+
+                trace!(
+                    step = state.steps + 1,
+                    model = ?current_req.model,
+                    messages = current_messages.len(),
+                    "AgentLoop iteration"
+                );
 
                 let mut guard = inner.lock().await;
                 let outcome = guard.ready().await?.call(current_req).await?;
