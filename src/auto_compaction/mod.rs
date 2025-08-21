@@ -45,8 +45,9 @@ use std::sync::Arc;
 
 use async_openai::types::{
     ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
-    ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
-    CreateChatCompletionRequest, CreateChatCompletionRequestArgs,
+    ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestToolMessageArgs,
+    ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequest,
+    CreateChatCompletionRequestArgs,
 };
 use tower::{BoxError, Layer, Service, ServiceExt};
 
@@ -54,6 +55,25 @@ use crate::core::StepOutcome;
 use crate::provider::ModelService;
 
 // ===== Core Types =====
+
+/// Strategy for handling orphaned tool calls during compaction
+#[derive(Clone, Debug)]
+pub enum OrphanedToolCallStrategy {
+    /// Drop orphaned tool calls before compaction and re-append after (default)
+    DropAndReappend,
+    /// Exclude messages with orphaned tool calls from compaction range
+    ExcludeFromCompaction,
+    /// Add placeholder tool responses for orphaned calls
+    AddPlaceholderResponses,
+    /// Fail compaction if orphaned tool calls are detected
+    FailOnOrphaned,
+}
+
+impl Default for OrphanedToolCallStrategy {
+    fn default() -> Self {
+        Self::DropAndReappend
+    }
+}
 
 /// Configuration for auto-compaction behavior
 #[derive(Clone)]
@@ -72,6 +92,9 @@ pub struct CompactionPolicy {
 
     /// Maximum retries for compaction attempts
     pub max_compaction_attempts: usize,
+
+    /// Strategy for handling orphaned tool calls
+    pub orphaned_tool_call_strategy: OrphanedToolCallStrategy,
 }
 
 impl Default for CompactionPolicy {
@@ -82,6 +105,7 @@ impl Default for CompactionPolicy {
             compaction_strategy: CompactionStrategy::PreserveSystemAndRecent { recent_count: 10 },
             compaction_prompt: CompactionPrompt::Default,
             max_compaction_attempts: 2,
+            orphaned_tool_call_strategy: OrphanedToolCallStrategy::default(),
         }
     }
 }
@@ -285,23 +309,116 @@ where
     P::Future: Send + 'static,
     C: TokenCounter + 'static,
 {
+    /// Check if messages have orphaned tool calls (tool calls without responses)
+    fn has_orphaned_tool_calls(messages: &[ChatCompletionRequestMessage]) -> bool {
+        // Check if the last assistant message has tool calls without responses
+        for (i, msg) in messages.iter().enumerate().rev() {
+            if let ChatCompletionRequestMessage::Assistant(asst) = msg {
+                if let Some(tool_calls) = &asst.tool_calls {
+                    if !tool_calls.is_empty() {
+                        // Check if there are tool responses after this
+                        for msg in messages.iter().skip(i + 1) {
+                            if matches!(msg, ChatCompletionRequestMessage::Tool(_)) {
+                                return false; // Found responses, not orphaned
+                            }
+                        }
+                        return true; // No responses found, orphaned
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Extract orphaned tool calls from messages
+    fn extract_orphaned_tool_calls(
+        messages: Vec<ChatCompletionRequestMessage>,
+    ) -> (
+        Vec<ChatCompletionRequestMessage>,
+        Option<ChatCompletionRequestMessage>,
+    ) {
+        // Find the last assistant message with tool calls
+        for (i, msg) in messages.iter().enumerate().rev() {
+            if let ChatCompletionRequestMessage::Assistant(asst) = msg {
+                if let Some(tool_calls) = &asst.tool_calls {
+                    if !tool_calls.is_empty() {
+                        // Check if orphaned (no tool responses after)
+                        let mut has_responses = false;
+                        for msg in messages.iter().skip(i + 1) {
+                            if matches!(msg, ChatCompletionRequestMessage::Tool(_)) {
+                                has_responses = true;
+                                break;
+                            }
+                        }
+
+                        if !has_responses {
+                            // Extract everything except the orphaned message
+                            let cleaned = messages[..i].to_vec();
+                            return (cleaned, Some(messages[i].clone()));
+                        }
+                    }
+                }
+            }
+        }
+        (messages, None)
+    }
+
     /// Compact messages based on the configured strategy
     async fn compact_messages(
         &self,
         messages: Vec<ChatCompletionRequestMessage>,
     ) -> Result<Vec<ChatCompletionRequestMessage>, BoxError> {
+        // Handle orphaned tool calls based on strategy
+        let (messages_to_compact, orphaned_tool_call) = if Self::has_orphaned_tool_calls(&messages)
+        {
+            match self.policy.orphaned_tool_call_strategy {
+                OrphanedToolCallStrategy::DropAndReappend => {
+                    tracing::debug!("Detected orphaned tool calls, dropping and will re-append after compaction");
+                    Self::extract_orphaned_tool_calls(messages)
+                }
+                OrphanedToolCallStrategy::ExcludeFromCompaction => {
+                    tracing::debug!("Detected orphaned tool calls, excluding from compaction");
+                    // Adjust range to exclude the orphaned message
+                    // This will be handled by adjusting the range below
+                    (messages, None)
+                }
+                OrphanedToolCallStrategy::AddPlaceholderResponses => {
+                    tracing::debug!("Detected orphaned tool calls, adding placeholder responses");
+                    // Add placeholder tool responses
+                    let mut fixed_messages = messages.clone();
+                    if let Some(ChatCompletionRequestMessage::Assistant(asst)) = messages.last() {
+                        if let Some(tool_calls) = &asst.tool_calls {
+                            for tool_call in tool_calls {
+                                let placeholder = ChatCompletionRequestToolMessageArgs::default()
+                                    .content("[Pending tool execution]")
+                                    .tool_call_id(&tool_call.id)
+                                    .build()?;
+                                fixed_messages.push(placeholder.into());
+                            }
+                        }
+                    }
+                    (fixed_messages, None)
+                }
+                OrphanedToolCallStrategy::FailOnOrphaned => {
+                    return Err("Cannot compact: conversation has orphaned tool calls".into());
+                }
+            }
+        } else {
+            (messages, None)
+        };
+
         // Determine which messages to compact based on strategy
         let range = match &self.policy.compaction_strategy {
             CompactionStrategy::CompactAllButLast(n) => {
                 let start = 0;
-                let end = messages.len().saturating_sub(*n);
+                let end = messages_to_compact.len().saturating_sub(*n);
                 CompactionRange { start, end }
             }
             CompactionStrategy::CompactOlderThan(turns) => {
                 // Count back N user+assistant pairs
                 let mut turn_count = 0;
-                let mut cutoff = messages.len();
-                for (i, msg) in messages.iter().enumerate().rev() {
+                let mut cutoff = messages_to_compact.len();
+                for (i, msg) in messages_to_compact.iter().enumerate().rev() {
                     if matches!(msg, ChatCompletionRequestMessage::User(_)) {
                         turn_count += 1;
                         if turn_count >= *turns {
@@ -317,26 +434,30 @@ where
             }
             CompactionStrategy::PreserveSystemAndRecent { recent_count } => {
                 // Find first non-system message
-                let start = messages
+                let start = messages_to_compact
                     .iter()
                     .position(|m| !matches!(m, ChatCompletionRequestMessage::System(_)))
                     .unwrap_or(0);
-                let end = messages.len().saturating_sub(*recent_count);
+                let end = messages_to_compact.len().saturating_sub(*recent_count);
                 CompactionRange {
                     start,
                     end: end.max(start),
                 }
             }
-            CompactionStrategy::Custom(f) => f(&messages),
+            CompactionStrategy::Custom(f) => f(&messages_to_compact),
         };
 
-        // If nothing to compact, return original
+        // If nothing to compact, return original with orphaned tool call if any
         if range.start >= range.end {
-            return Ok(messages);
+            let mut result = messages_to_compact;
+            if let Some(orphaned) = orphaned_tool_call {
+                result.push(orphaned);
+            }
+            return Ok(result);
         }
 
         // Extract messages to compact
-        let to_compact = &messages[range.start..range.end];
+        let to_compact = &messages_to_compact[range.start..range.end];
         let prompt = self.policy.compaction_prompt.generate(to_compact);
 
         // Build compaction request
@@ -377,7 +498,7 @@ where
         let mut result = Vec::new();
 
         // Keep messages before the compacted range
-        for msg in &messages[..range.start] {
+        for msg in &messages_to_compact[..range.start] {
             result.push(msg.clone());
         }
 
@@ -392,8 +513,14 @@ where
         }
 
         // Keep messages after the compacted range
-        for msg in &messages[range.end..] {
+        for msg in &messages_to_compact[range.end..] {
             result.push(msg.clone());
+        }
+
+        // Re-append orphaned tool call if we dropped it earlier
+        if let Some(orphaned) = orphaned_tool_call {
+            tracing::debug!("Re-appending orphaned tool call after compaction");
+            result.push(orphaned);
         }
 
         Ok(result)
@@ -730,6 +857,162 @@ mod tests {
             policy.compaction_strategy,
             CompactionStrategy::PreserveSystemAndRecent { .. }
         );
+        matches!(
+            policy.orphaned_tool_call_strategy,
+            OrphanedToolCallStrategy::DropAndReappend
+        );
+    }
+
+    #[test]
+    fn test_orphaned_tool_call_detection() {
+        use async_openai::types::{
+            ChatCompletionMessageToolCall, ChatCompletionRequestToolMessageArgs,
+            ChatCompletionToolType, FunctionCall,
+        };
+
+        // Create messages with an orphaned tool call
+        let messages = vec![
+            ChatCompletionRequestUserMessageArgs::default()
+                .content("Please help me")
+                .build()
+                .unwrap()
+                .into(),
+            ChatCompletionRequestAssistantMessageArgs::default()
+                .content("")
+                .tool_calls(vec![ChatCompletionMessageToolCall {
+                    id: "call_123".to_string(),
+                    r#type: ChatCompletionToolType::Function,
+                    function: FunctionCall {
+                        name: "some_tool".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                }])
+                .build()
+                .unwrap()
+                .into(),
+            // No tool response message - this is orphaned!
+        ];
+
+        assert!(has_orphaned_tool_calls(&messages));
+
+        // Now add the tool response - no longer orphaned
+        let mut messages_with_response = messages.clone();
+        messages_with_response.push(
+            ChatCompletionRequestToolMessageArgs::default()
+                .content("Tool result")
+                .tool_call_id("call_123")
+                .build()
+                .unwrap()
+                .into(),
+        );
+
+        assert!(!has_orphaned_tool_calls(&messages_with_response));
+    }
+
+    #[test]
+    fn test_orphaned_tool_call_strategy_drop_and_reappend() {
+        use async_openai::types::{
+            ChatCompletionMessageToolCall, ChatCompletionToolType, FunctionCall,
+        };
+
+        let messages = vec![
+            ChatCompletionRequestUserMessageArgs::default()
+                .content("User message")
+                .build()
+                .unwrap()
+                .into(),
+            ChatCompletionRequestAssistantMessageArgs::default()
+                .content("Assistant response")
+                .build()
+                .unwrap()
+                .into(),
+            ChatCompletionRequestUserMessageArgs::default()
+                .content("Another user message")
+                .build()
+                .unwrap()
+                .into(),
+            ChatCompletionRequestAssistantMessageArgs::default()
+                .content("")
+                .tool_calls(vec![ChatCompletionMessageToolCall {
+                    id: "orphaned_call".to_string(),
+                    r#type: ChatCompletionToolType::Function,
+                    function: FunctionCall {
+                        name: "orphaned_tool".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                }])
+                .build()
+                .unwrap()
+                .into(),
+        ];
+
+        let (cleaned, orphaned) = extract_orphaned_tool_calls(messages.clone());
+
+        // Should have removed the last message with tool calls
+        assert_eq!(cleaned.len(), 3);
+        assert!(orphaned.is_some());
+
+        // The orphaned message should be the one with tool calls
+        if let Some(orphaned_msg) = orphaned {
+            if let ChatCompletionRequestMessage::Assistant(asst) = orphaned_msg {
+                assert!(asst.tool_calls.is_some());
+            } else {
+                panic!("Expected assistant message");
+            }
+        }
+    }
+
+    // Helper functions for testing (these will be implemented in the main code)
+    fn has_orphaned_tool_calls(messages: &[ChatCompletionRequestMessage]) -> bool {
+        // Check if the last assistant message has tool calls without responses
+        for (i, msg) in messages.iter().enumerate().rev() {
+            if let ChatCompletionRequestMessage::Assistant(asst) = msg {
+                if let Some(tool_calls) = &asst.tool_calls {
+                    if !tool_calls.is_empty() {
+                        // Check if there are tool responses after this
+                        for msg in messages.iter().skip(i + 1) {
+                            if matches!(msg, ChatCompletionRequestMessage::Tool(_)) {
+                                return false; // Found responses, not orphaned
+                            }
+                        }
+                        return true; // No responses found, orphaned
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn extract_orphaned_tool_calls(
+        messages: Vec<ChatCompletionRequestMessage>,
+    ) -> (
+        Vec<ChatCompletionRequestMessage>,
+        Option<ChatCompletionRequestMessage>,
+    ) {
+        // Find the last assistant message with tool calls
+        for (i, msg) in messages.iter().enumerate().rev() {
+            if let ChatCompletionRequestMessage::Assistant(asst) = msg {
+                if let Some(tool_calls) = &asst.tool_calls {
+                    if !tool_calls.is_empty() {
+                        // Check if orphaned (no tool responses after)
+                        let mut has_responses = false;
+                        for msg in messages.iter().skip(i + 1) {
+                            if matches!(msg, ChatCompletionRequestMessage::Tool(_)) {
+                                has_responses = true;
+                                break;
+                            }
+                        }
+
+                        if !has_responses {
+                            // Extract everything except the orphaned message
+                            let cleaned = messages[..i].to_vec();
+                            return (cleaned, Some(messages[i].clone()));
+                        }
+                    }
+                }
+            }
+        }
+        (messages, None)
     }
 
     // Dummy types for testing

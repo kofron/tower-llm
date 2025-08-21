@@ -10,7 +10,10 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::json;
 use tower_llm::{
-    auto_compaction::{CompactionPolicy, CompactionPrompt, CompactionStrategy, ProactiveThreshold},
+    auto_compaction::{
+        CompactionPolicy, CompactionPrompt, CompactionStrategy, OrphanedToolCallStrategy,
+        ProactiveThreshold,
+    },
     Agent, CompositePolicy, Service, ServiceExt,
 };
 
@@ -63,6 +66,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         ),
 
         max_compaction_attempts: 2,
+
+        // Handle orphaned tool calls (tool calls without responses) by dropping and re-appending
+        orphaned_tool_call_strategy: OrphanedToolCallStrategy::DropAndReappend,
     };
 
     // Build agent with auto-compaction
