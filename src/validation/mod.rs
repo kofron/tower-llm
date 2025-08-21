@@ -1,12 +1,36 @@
 //! Conversation validation utilities (pure, test-focused).
 //!
-//! Provides:
+//! What this module provides
 //! - `validate_conversation` to detect ordering and tool-call consistency violations
-//! - `ValidationPolicy` to configure strictness
-//! - `ViolationCode` and `Violation` to describe issues precisely
+//! - `ValidationPolicy` to configure strictness per test or example
+//! - `ViolationCode` and `Violation` to describe issues precisely for assertions
+//!
+//! Invariants validated (when enabled by policy)
+//! - Role sequencing: first non-system is user; no assistant before first user; optional repeated-role rejection
+//! - Tool-calls: assistant tool_calls must be followed by tool messages with matching ids, before the next assistant
+//! - Tool outputs: unknown, duplicate, and out-of-order tool responses detected
+//! - Structure: system-not-first; unsupported message kinds (developer/function) when disallowed
+//! - Extras: duplicate/empty tool_call ids; empty tool message ids; tool-before-assistant; contiguity of tool responses; require at least one user
+//!
+//! Policies
+//! - `allow_system_anywhere`, `require_user_first`, `allow_repeated_roles`
+//! - `enforce_tool_response_order`, `allow_unknown_tool_response`, `allow_duplicate_tool_response`
+//! - `allow_developer_and_function`, `enforce_contiguous_tool_responses`, `require_user_present`, `allow_dangling_tool_calls`
+//!
+//! Quick start (tests/examples)
+//! ```rust
+//! use tower_llm::validation::{validate_conversation, ValidationPolicy};
+//! use async_openai::types::*;
+//!
+//! let sys = ChatCompletionRequestSystemMessageArgs::default().content("sys").build().unwrap();
+//! let usr = ChatCompletionRequestUserMessageArgs::default().content("hi").build().unwrap();
+//! let asst = ChatCompletionRequestAssistantMessageArgs::default().content("ok").build().unwrap();
+//! let msgs = vec![sys.into(), usr.into(), asst.into()];
+//! assert!(validate_conversation(&msgs, &ValidationPolicy::default()).is_none());
+//! ```
 //!
 //! This module is self-contained and has no side effects. It is intended for
-//! tests and examples. Downstream integration is out of scope for the initial cut.
+//! tests and examples, but can be used in layers to assert correctness post-transform.
 
 use async_openai::types::ChatCompletionRequestMessage as ReqMsg;
 
