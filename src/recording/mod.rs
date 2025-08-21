@@ -232,10 +232,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_openai::types::ChatCompletionRequestUserMessageArgs;
-    use tower::service_fn;
     use crate::validation::{gen, validate_conversation, ValidationPolicy};
+    use async_openai::types::ChatCompletionRequestUserMessageArgs;
     use proptest::prop_assert;
+    use tower::service_fn;
 
     fn req_with_user(s: &str) -> CreateChatCompletionRequest {
         let msg = ChatCompletionRequestUserMessageArgs::default()

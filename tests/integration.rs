@@ -14,13 +14,13 @@ use tower::{Service, ServiceExt};
 
 use tower::ServiceBuilder;
 use tower_llm::provider::{FixedProvider, ProviderResponse};
+use tower_llm::validation::{validate_conversation, ValidationPolicy};
 use tower_llm::AgentPolicy;
 use tower_llm::ToolJoinPolicy;
 use tower_llm::{
     policies, simple_chat_request, tool_typed, Agent, AgentStopReason, CompositePolicy, LoopState,
     ReasoningEffort, StepOutcome, ToolInvocation, ToolOutput,
 };
-use tower_llm::validation::{validate_conversation, ValidationPolicy};
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct TestArgs {
@@ -102,7 +102,10 @@ async fn test_step_parallel_tools_preserve_order() {
         }
     }
     assert_eq!(labels, vec!["slow".to_string(), "fast".to_string()]);
-    let policy = ValidationPolicy { allow_repeated_roles: true, ..Default::default() };
+    let policy = ValidationPolicy {
+        allow_repeated_roles: true,
+        ..Default::default()
+    };
     assert!(validate_conversation(&out.messages, &policy).is_none());
 }
 
