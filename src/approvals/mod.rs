@@ -51,7 +51,7 @@ pub enum Stage {
 #[derive(Debug, Clone)]
 pub enum ApprovalRequest {
     Model {
-        request: CreateChatCompletionRequest,
+        request: Box<CreateChatCompletionRequest>,
     },
     Tool {
         invocation: ToolInvocation,
@@ -66,7 +66,7 @@ pub enum Decision {
         reason: String,
     },
     ModifyModel {
-        request: CreateChatCompletionRequest,
+        request: Box<CreateChatCompletionRequest>,
     },
     ModifyTool {
         invocation: ToolInvocation,
@@ -134,7 +134,7 @@ where
             let decision = ServiceExt::ready(&mut approver)
                 .await?
                 .call(ApprovalRequest::Model {
-                    request: req.clone(),
+                    request: Box::new(req.clone()),
                 })
                 .await?;
             match decision {
@@ -148,7 +148,7 @@ where
                 }),
                 Decision::ModifyModel { request } => {
                     let mut guard = inner.lock().await;
-                    Service::call(&mut *guard, request).await
+                    Service::call(&mut *guard, *request).await
                 }
             }
         })
@@ -331,7 +331,7 @@ mod tests {
                             .unwrap();
                     b.messages(vec![sys.into()]);
                     let modified = b.build().unwrap();
-                    Ok::<_, BoxError>(Decision::ModifyModel { request: modified })
+                    Ok::<_, BoxError>(Decision::ModifyModel { request: Box::new(modified) })
                 }
                 _ => Ok::<_, BoxError>(Decision::Allow),
             }
