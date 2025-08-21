@@ -166,7 +166,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("Stop reason: {:?}", result.stop);
 
     // Display the final message
-    if let Some(async_openai::types::ChatCompletionRequestMessage::Assistant(asst)) = result.messages.last() {
+    if let Some(async_openai::types::ChatCompletionRequestMessage::Assistant(asst)) =
+        result.messages.last()
+    {
         if let Some(content) = &asst.content {
             println!("\n=== Final Output ===");
             match content {
