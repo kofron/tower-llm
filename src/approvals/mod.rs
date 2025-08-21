@@ -331,7 +331,9 @@ mod tests {
                             .unwrap();
                     b.messages(vec![sys.into()]);
                     let modified = b.build().unwrap();
-                    Ok::<_, BoxError>(Decision::ModifyModel { request: Box::new(modified) })
+                    Ok::<_, BoxError>(Decision::ModifyModel {
+                        request: Box::new(modified),
+                    })
                 }
                 _ => Ok::<_, BoxError>(Decision::Allow),
             }
