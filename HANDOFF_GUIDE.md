@@ -288,6 +288,29 @@ let observable_coordinator = tower_llm::observability::TracingLayer::new()
 3. **Prevent loops**: Include maximum handoff limits
 4. **Clear semantics**: Tool names should be self-explanatory
 
+### Agent Instructions (System Prompt)
+
+- Prefer setting per-agent instructions on the agent itself via `AgentBuilder::instructions(...)`.
+- At runtime, each agent injects its instructions as the first `system` message for its steps.
+- Handoff policies and the coordinator should not mutate `system` messages; keep that concern at the agent boundary.
+- Example:
+
+```rust
+use std::sync::Arc;
+use async_openai::{config::OpenAIConfig, Client};
+use tower_llm::{Agent, run_user};
+
+let client = Arc::new(Client::<OpenAIConfig>::new());
+let triage = Agent::builder(client.clone())
+    .model("gpt-4o")
+    .instructions("You are TRIAGE. Ask clarifying questions and route appropriately.")
+    .build();
+let specialist = Agent::builder(client.clone())
+    .model("gpt-4o")
+    .instructions("You are SPECIALIST. Provide precise, technical answers.")
+    .build();
+```
+
 ### Error Handling
 
 1. **Validate handoffs**: Check target agents exist

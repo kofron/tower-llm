@@ -1586,6 +1586,139 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn per_agent_instructions_applied_to_each_agent_request() {
+        use crate::core::{Agent, CompositePolicy};
+        use crate::provider::ProviderResponse;
+        use async_openai::config::OpenAIConfig;
+        use async_openai::types::{ChatCompletionResponseMessage, Role as RespRole};
+        use std::sync::Arc as StdArc;
+
+        // Capturing provider that records the last request it received
+        #[derive(Clone)]
+        struct CapturingProvider {
+            captured: StdArc<tokio::sync::Mutex<Option<CreateChatCompletionRequest>>>,
+        }
+        impl tower::Service<CreateChatCompletionRequest> for CapturingProvider {
+            type Response = ProviderResponse;
+            type Error = BoxError;
+            type Future = std::pin::Pin<
+                Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>,
+            >;
+            fn poll_ready(
+                &mut self,
+                _cx: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<Result<(), Self::Error>> {
+                std::task::Poll::Ready(Ok(()))
+            }
+            fn call(&mut self, req: CreateChatCompletionRequest) -> Self::Future {
+                let captured = self.captured.clone();
+                Box::pin(async move {
+                    *captured.lock().await = Some(req);
+                    #[allow(deprecated)]
+                    let assistant = ChatCompletionResponseMessage {
+                        content: Some("ok".into()),
+                        role: RespRole::Assistant,
+                        tool_calls: None,
+                        function_call: None,
+                        refusal: None,
+                        audio: None,
+                    };
+                    Ok(ProviderResponse {
+                        assistant,
+                        prompt_tokens: 1,
+                        completion_tokens: 1,
+                    })
+                })
+            }
+        }
+
+        let client = StdArc::new(async_openai::Client::<OpenAIConfig>::new());
+
+        // Agent A with instructions "A"
+        let cap_a: StdArc<tokio::sync::Mutex<Option<CreateChatCompletionRequest>>> =
+            StdArc::new(tokio::sync::Mutex::new(None));
+        let provider_a = CapturingProvider {
+            captured: cap_a.clone(),
+        };
+        let agent_a = Agent::builder(client.clone())
+            .with_provider(provider_a)
+            .model("gpt-4o")
+            .instructions("A")
+            .policy(CompositePolicy::new(vec![
+                crate::core::policies::until_no_tool_calls(),
+                crate::core::policies::max_steps(1),
+            ]))
+            .build();
+
+        // Agent B with instructions "B"
+        let cap_b: StdArc<tokio::sync::Mutex<Option<CreateChatCompletionRequest>>> =
+            StdArc::new(tokio::sync::Mutex::new(None));
+        let provider_b = CapturingProvider {
+            captured: cap_b.clone(),
+        };
+        let agent_b = Agent::builder(client.clone())
+            .with_provider(provider_b)
+            .model("gpt-4o")
+            .instructions("B")
+            .policy(CompositePolicy::new(vec![
+                crate::core::policies::until_no_tool_calls(),
+                crate::core::policies::max_steps(1),
+            ]))
+            .build();
+
+        // Coordinator with sequential handoff A -> B
+        let mut agents = std::collections::HashMap::new();
+        agents.insert("a".to_string(), agent_a);
+        agents.insert("b".to_string(), agent_b);
+        let picker =
+            tower::service_fn(|_pr: PickRequest| async move { Ok::<_, BoxError>("a".to_string()) });
+        let policy = SequentialHandoffPolicy::new(vec!["a".into(), "b".into()]);
+        let mut coord = HandoffCoordinator::new(agents, picker, policy);
+
+        // User-only request
+        let req = CreateChatCompletionRequestArgs::default()
+            .model("gpt-4o")
+            .messages(vec![
+                async_openai::types::ChatCompletionRequestUserMessageArgs::default()
+                    .content("hi")
+                    .build()
+                    .unwrap()
+                    .into(),
+            ])
+            .build()
+            .unwrap();
+
+        let _run = tower::ServiceExt::ready(&mut coord)
+            .await
+            .unwrap()
+            .call(req)
+            .await
+            .unwrap();
+
+        // Assert captured requests for each agent have their own instructions as the first system
+        let got_a = cap_a.lock().await.clone().expect("captured request a");
+        match &got_a.messages[0] {
+            ChatCompletionRequestMessage::System(s) => match &s.content {
+                async_openai::types::ChatCompletionRequestSystemMessageContent::Text(t) => {
+                    assert_eq!(t, "A");
+                }
+                _ => panic!("expected text content"),
+            },
+            _ => panic!("expected first message to be system"),
+        }
+        let got_b = cap_b.lock().await.clone().expect("captured request b");
+        match &got_b.messages[0] {
+            ChatCompletionRequestMessage::System(s) => match &s.content {
+                async_openai::types::ChatCompletionRequestSystemMessageContent::Text(t) => {
+                    assert_eq!(t, "B");
+                }
+                _ => panic!("expected text content"),
+            },
+            _ => panic!("expected first message to be system"),
+        }
+    }
+
     // ================================================================================================
     // Handoff Layer Integration Tests
     // ================================================================================================

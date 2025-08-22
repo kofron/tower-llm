@@ -61,6 +61,120 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
+## Architecture and rationale
+
+At its core, tower-llm treats agents, tools, and coordinators as Tower services you compose with layers. This keeps business logic pure and testable while pushing side effects (I/O, retries, tracing, storage) to the edges.
+
+- Agents are services that turn chat requests into outcomes.
+- Tools are services invoked by the agent when the model asks for them.
+- Layers add cross-cutting behavior without coupling concerns.
+
+Why this design works well:
+
+- Composable by default: you assemble exactly what you need.
+- Static dependency injection: no global registries or runtime lookups.
+- Functional core, imperative shell: easy to reason about and to test.
+
+## A layered story: from hello world to production
+
+Start small, add power as you go:
+
+1. Hello world agent: see [Quickstart](#quickstart). One model, one tool, a simple stop policy.
+
+2. Keep state between turns: add [Sessions](#sessions-stateful-agents) with `MemoryLayer` and an in-memory or SQLite store.
+
+3. See what's happening: add [Observability](#observability-tracing-and-metrics) via `TracingLayer` and `MetricsLayer` to emit spans and metrics.
+
+4. Bound cost and behavior: compose a [Budget policy](#budgeting-tokens-tools-time) with your stop policies.
+
+5. Be resilient: wrap the agent with resilience layers (retry/timeout/circuit-breaker) from `resilience`.
+
+6. Record and reproduce: tap runs with [Recording/Replay](#recording-and-replay) to debug or build fixtures without model calls.
+
+7. Speed up tools: enable [Parallel tool execution](#parallel-tool-execution) and pick a join policy when multiple tools can run concurrently.
+
+8. Stream in real time: use `streaming::StepStreamService` and `AgentLoopStreamLayer` for token-by-token UIs (see the streaming snippet below).
+
+9. Go multi-agent: coordinate specialists with [Handoffs](#handoffs-multi-agent). Start with explicit or sequential policies; compose them as needed.
+
+10. Keep context tight: add `auto_compaction::AutoCompactionLayer` or `groups::CompactingHandoffPolicy` to trim history during long runs (see `examples/handoff_compaction.rs`).
+
+11. Validate conversations: use [Conversation validation](#conversation-validation-testsexamples) to assert invariants in tests and examples.
+
+Throughout, you can swap providers or run entirely offline using [Provider override](#provider-override-no-network-testing).
+
+## Layer catalog at a glance
+
+- Sessions: persist and reload history around each call.
+
+  - When: you need stateful conversations or persistence.
+  - How: `sessions::MemoryLayer`, with `InMemorySessionStore` or `SqliteSessionStore`.
+
+- Observability: trace spans and emit metrics for every step/agent call.
+
+  - When: you want visibility in dev and prod.
+  - How: `observability::{TracingLayer, MetricsLayer}` with your metrics sink.
+
+- Approvals: gate model outputs and tool invocations.
+
+  - When: you need review or policy enforcement.
+  - How: `approvals::{ModelApprovalLayer, ToolApprovalLayer}` plus an `Approver` service.
+
+- Resilience: retry, time out, and break circuits around calls.
+
+  - When: you want robust error handling for flaky dependencies.
+  - How: `resilience::{RetryLayer, TimeoutLayer, CircuitBreakerLayer}`.
+
+- Recording/Replay: capture runs, replay deterministically without network.
+
+  - When: you want debuggable, repeatable scenarios or tests.
+  - How: `recording::{RecorderLayer, ReplayService}` with a trace store.
+
+- Budgets: constrain tokens, tools, or steps.
+
+  - When: you want cost and behavior bounds.
+  - How: `budgets::budget_policy(...)`, composed in `CompositePolicy`.
+
+- Concurrency: execute multiple tools concurrently; preserve output order.
+
+  - When: independent tools can run in parallel.
+  - How: enable parallel tools on the builder or use `concurrency::ParallelToolRouter`; select a join policy.
+
+- Streaming: emit tokens and tool events incrementally for UIs.
+
+  - When: you need real-time output.
+  - How: `streaming::{StepStreamService, AgentLoopStreamLayer, StreamTapLayer}`.
+
+- Handoffs (multi-agent): coordinate multiple agents at runtime.
+
+  - When: you have specialists or workflows.
+  - How: `groups::{AgentPicker, HandoffPolicy, HandoffCoordinator, GroupBuilder}`; see also `CompactingHandoffPolicy`.
+
+- Auto compaction: trim conversation history safely.
+
+  - When: you approach token limits or want faster iterations.
+  - How: `auto_compaction::{AutoCompactionLayer, CompactionPolicy}`; or wrap handoffs with `CompactingHandoffPolicy`.
+
+- Provider override: swap the model implementation.
+  - When: offline tests or custom backends.
+  - How: `provider::{FixedProvider, SequenceProvider, OpenAIProvider}` with the `ModelService` trait.
+
+## Agent-level instructions (system)
+
+Attach the system prompt at the agent level so it applies consistently across steps and handoffs.
+
+```rust
+let mut agent = Agent::builder(client)
+  .model("gpt-4o")
+  .instructions("You are a helpful assistant.")
+  .tool(echo)
+  .policy(policies::max_steps(1).into())
+  .build();
+
+// Send only a user message; the agent injects its instructions as a system message
+let _ = tower_llm::run_user(&mut agent, "Say hi").await?;
+```
+
 ## Sessions (stateful agents)
 
 Attach `MemoryLayer` at build time using store services that implement `Service<LoadSession>` and `Service<SaveSession>`.

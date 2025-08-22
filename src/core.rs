@@ -245,6 +245,7 @@ pub struct Step<S, P> {
     temperature: Option<f32>,
     max_tokens: Option<u32>,
     reasoning_effort: Option<ReasoningEffort>,
+    instructions: Option<String>,
     tools: S,
     tool_specs: Arc<Vec<ChatCompletionTool>>, // supplied to requests if missing
     parallel_tools: bool,
@@ -265,6 +266,7 @@ impl<S, P> Step<S, P> {
             temperature: None,
             max_tokens: None,
             reasoning_effort: None,
+            instructions: None,
             tools,
             tool_specs: Arc::new(tool_specs),
             parallel_tools: false,
@@ -311,6 +313,7 @@ pub struct StepLayer<P> {
     temperature: Option<f32>,
     max_tokens: Option<u32>,
     reasoning_effort: Option<ReasoningEffort>,
+    instructions: Option<String>,
     tool_specs: Arc<Vec<ChatCompletionTool>>,
     parallel_tools: bool,
     tool_concurrency_limit: Option<usize>,
@@ -325,6 +328,7 @@ impl<P> StepLayer<P> {
             temperature: None,
             max_tokens: None,
             reasoning_effort: None,
+            instructions: None,
             tool_specs: Arc::new(tool_specs),
             parallel_tools: false,
             tool_concurrency_limit: None,
@@ -361,6 +365,11 @@ impl<P> StepLayer<P> {
         self.reasoning_effort = Some(effort);
         self
     }
+
+    pub fn instructions(mut self, text: impl Into<String>) -> Self {
+        self.instructions = Some(text.into());
+        self
+    }
 }
 
 impl<S, P> Layer<S> for StepLayer<P>
@@ -379,6 +388,9 @@ where
         s.temperature = self.temperature;
         s.max_tokens = self.max_tokens;
         s.reasoning_effort = self.reasoning_effort.clone();
+        s.instructions = self.instructions.clone();
+        // propagate instructions if StepLayer has it
+        // Note: StepLayer currently doesn't store instructions; this will be set via AgentBuilder mapping below
         s.parallel_tools = self.parallel_tools;
         s.tool_concurrency_limit = self.tool_concurrency_limit;
         s.join_policy = self.join_policy;
@@ -416,6 +428,7 @@ where
         let parallel_tools = self.parallel_tools;
         let _tool_concurrency_limit = self.tool_concurrency_limit;
         let join_policy = self.join_policy;
+        let instructions = self.instructions.clone();
 
         Box::pin(async move {
             // Rebuild request using builder to avoid deprecated field access
@@ -441,8 +454,27 @@ where
                 "Step service preparing API request"
             );
 
+            // Prepare messages with optional agent-level instructions injection
+            let mut injected_messages = req.messages.clone();
+            if let Some(instr) = instructions {
+                // Build a system message for the instructions
+                let sys_msg = ChatCompletionRequestSystemMessageArgs::default()
+                    .content(instr)
+                    .build()
+                    .map(ChatCompletionRequestMessage::from)
+                    .map_err(|e| format!("system msg build error: {}", e))?;
+                // Ensure exactly one system message at the front
+                if let Some(pos) = injected_messages
+                    .iter()
+                    .position(|m| matches!(m, ChatCompletionRequestMessage::System(_)))
+                {
+                    injected_messages.remove(pos);
+                }
+                injected_messages.insert(0, sys_msg);
+            }
+
             let mut builder = CreateChatCompletionRequestArgs::default();
-            builder.messages(req.messages.clone());
+            builder.messages(injected_messages);
             if let Some(m) = effective_model.as_ref() {
                 builder.model(m);
             } else {
@@ -663,6 +695,20 @@ pub fn simple_chat_request(system: &str, user: &str) -> CreateChatCompletionRequ
         .expect("chat req")
 }
 
+/// Build a simple chat request with only a user message.
+#[allow(dead_code)]
+pub fn simple_user_request(user: &str) -> CreateChatCompletionRequest {
+    let usr = ChatCompletionRequestUserMessageArgs::default()
+        .content(user)
+        .build()
+        .expect("user msg");
+    CreateChatCompletionRequestArgs::default()
+        .model("gpt-4o")
+        .messages(vec![usr.into()])
+        .build()
+        .expect("chat req")
+}
+
 // =============================
 // Agent loop: composable policies and layer
 // =============================
@@ -725,6 +771,7 @@ pub struct AgentBuilder {
     temperature: Option<f32>,
     max_tokens: Option<u32>,
     reasoning_effort: Option<ReasoningEffort>,
+    instructions: Option<String>,
     tools: Vec<ToolDef>,
     policy: CompositePolicy,
     handoff: Option<crate::groups::AnyHandoffPolicy>,
@@ -750,6 +797,7 @@ impl Agent {
             temperature: None,
             max_tokens: None,
             reasoning_effort: None,
+            instructions: None,
             tools: Vec::new(),
             policy: CompositePolicy::default(),
             handoff: None,
@@ -778,6 +826,12 @@ impl AgentBuilder {
     }
     pub fn reasoning_effort(mut self, effort: ReasoningEffort) -> Self {
         self.reasoning_effort = Some(effort);
+        self
+    }
+
+    /// Set agent-level instructions (system prompt). These will be injected on each step.
+    pub fn instructions(mut self, text: impl Into<String>) -> Self {
+        self.instructions = Some(text.into());
         self
     }
     pub fn tool(mut self, tool: ToolDef) -> Self {
@@ -869,6 +923,9 @@ impl AgentBuilder {
         let mut step_layer = StepLayer::new(base_provider.clone(), self.model, specs)
             .parallel_tools(self.enable_parallel_tools)
             .tool_join_policy(self.tool_join_policy);
+        if let Some(instr) = &self.instructions {
+            step_layer = step_layer.instructions(instr.clone());
+        }
         // Only set temperature if explicitly provided
         if let Some(t) = self.temperature {
             step_layer = step_layer.temperature(t);
@@ -956,6 +1013,9 @@ impl AgentBuilder {
         let mut step_layer = StepLayer::new(base_provider.clone(), self.model, specs)
             .parallel_tools(self.enable_parallel_tools)
             .tool_join_policy(self.tool_join_policy);
+        if let Some(instr) = &self.instructions {
+            step_layer = step_layer.instructions(instr.clone());
+        }
         // Only set temperature if explicitly provided
         if let Some(t) = self.temperature {
             step_layer = step_layer.temperature(t);
@@ -1005,6 +1065,308 @@ pub async fn run(agent: &mut AgentSvc, system: &str, user: &str) -> Result<Agent
     let req = simple_chat_request(system, user);
     let resp = ServiceExt::ready(agent).await?.call(req).await?;
     Ok(resp)
+}
+
+/// Convenience: run a user message through an agent service. System instructions come from the agent.
+#[allow(dead_code)]
+pub async fn run_user(agent: &mut AgentSvc, user: &str) -> Result<AgentRun, BoxError> {
+    let req = simple_user_request(user);
+    let resp = ServiceExt::ready(agent).await?.call(req).await?;
+    Ok(resp)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_openai::types::ChatCompletionRequestUserMessageArgs;
+
+    #[tokio::test]
+    async fn step_injects_instructions_prepend_or_replace() {
+        // Provider that echoes back with minimal tokens
+        #[allow(deprecated)]
+        let assistant = async_openai::types::ChatCompletionResponseMessage {
+            content: Some("ok".into()),
+            role: async_openai::types::Role::Assistant,
+            tool_calls: None,
+            function_call: None,
+            refusal: None,
+            audio: None,
+        };
+        let provider = crate::provider::FixedProvider::new(crate::provider::ProviderResponse {
+            assistant,
+            prompt_tokens: 1,
+            completion_tokens: 1,
+        });
+
+        // No tools
+        let (router, specs) = ToolRouter::new(vec![]);
+        let step = StepLayer::new(provider, "gpt-4o", specs)
+            .instructions("AGENT INSTR")
+            .layer(router);
+        let mut svc = tower::ServiceExt::boxed(step);
+
+        // Build request with only user message
+        let user = ChatCompletionRequestUserMessageArgs::default()
+            .content("hello")
+            .build()
+            .unwrap();
+        let req = CreateChatCompletionRequestArgs::default()
+            .model("gpt-4o")
+            .messages(vec![user.into()])
+            .build()
+            .unwrap();
+
+        let out = tower::ServiceExt::ready(&mut svc)
+            .await
+            .unwrap()
+            .call(req)
+            .await
+            .unwrap();
+        let msgs = match out {
+            StepOutcome::Next { messages, .. } => messages,
+            StepOutcome::Done { messages, .. } => messages,
+        };
+        // First message must be system with injected content
+        match &msgs[0] {
+            ChatCompletionRequestMessage::System(s) => {
+                if let async_openai::types::ChatCompletionRequestSystemMessageContent::Text(t) =
+                    &s.content
+                {
+                    assert_eq!(t, "AGENT INSTR");
+                } else {
+                    panic!("expected text content in system message");
+                }
+            }
+            _ => panic!("expected first message to be system"),
+        }
+    }
+
+    #[test]
+    fn builds_user_request() {
+        let _ = simple_user_request("hi");
+    }
+
+    #[tokio::test]
+    async fn run_user_executes_with_instructions() {
+        #[allow(deprecated)]
+        let assistant = async_openai::types::ChatCompletionResponseMessage {
+            content: Some("ok".into()),
+            role: async_openai::types::Role::Assistant,
+            tool_calls: None,
+            function_call: None,
+            refusal: None,
+            audio: None,
+        };
+        let provider = crate::provider::FixedProvider::new(crate::provider::ProviderResponse {
+            assistant,
+            prompt_tokens: 1,
+            completion_tokens: 1,
+        });
+        let client =
+            std::sync::Arc::new(async_openai::Client::<async_openai::config::OpenAIConfig>::new());
+        let mut agent = Agent::builder(client)
+            .with_provider(provider)
+            .model("gpt-4o")
+            .instructions("INSTR")
+            .policy(CompositePolicy::new(vec![policies::max_steps(1)]))
+            .build();
+        let run = run_user(&mut agent, "hello").await.unwrap();
+        assert!(!run.messages.is_empty());
+        match &run.messages[0] {
+            ChatCompletionRequestMessage::System(s) => match &s.content {
+                async_openai::types::ChatCompletionRequestSystemMessageContent::Text(t) => {
+                    assert_eq!(t, "INSTR");
+                }
+                _ => panic!("expected text content"),
+            },
+            _ => panic!("expected first message to be system"),
+        }
+    }
+
+    #[tokio::test]
+    async fn sessions_preserve_agent_instructions_in_merged_request() {
+        use crate::sessions::{InMemorySessionStore, SessionId};
+        // Capturing provider
+        #[derive(Clone)]
+        struct CapturingProvider {
+            captured: std::sync::Arc<tokio::sync::Mutex<Option<CreateChatCompletionRequest>>>,
+        }
+        impl tower::Service<CreateChatCompletionRequest> for CapturingProvider {
+            type Response = crate::provider::ProviderResponse;
+            type Error = BoxError;
+            type Future = std::pin::Pin<
+                Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>,
+            >;
+            fn poll_ready(
+                &mut self,
+                _cx: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<Result<(), Self::Error>> {
+                std::task::Poll::Ready(Ok(()))
+            }
+            fn call(&mut self, req: CreateChatCompletionRequest) -> Self::Future {
+                let captured = self.captured.clone();
+                Box::pin(async move {
+                    *captured.lock().await = Some(req);
+                    #[allow(deprecated)]
+                    let assistant = async_openai::types::ChatCompletionResponseMessage {
+                        content: Some("ok".into()),
+                        role: async_openai::types::Role::Assistant,
+                        tool_calls: None,
+                        function_call: None,
+                        refusal: None,
+                        audio: None,
+                    };
+                    Ok(crate::provider::ProviderResponse {
+                        assistant,
+                        prompt_tokens: 1,
+                        completion_tokens: 1,
+                    })
+                })
+            }
+        }
+
+        let captured = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let provider = CapturingProvider {
+            captured: captured.clone(),
+        };
+
+        let client =
+            std::sync::Arc::new(async_openai::Client::<async_openai::config::OpenAIConfig>::new());
+        let load = std::sync::Arc::new(InMemorySessionStore::default());
+        let save = load.clone();
+        let mut agent = Agent::builder(client)
+            .with_provider(provider)
+            .model("gpt-4o")
+            .instructions("INSTR")
+            .policy(CompositePolicy::new(vec![policies::max_steps(1)]))
+            .build_with_session(load, save, SessionId("s1".into()));
+
+        let req = CreateChatCompletionRequestArgs::default()
+            .model("gpt-4o")
+            .messages(vec![ChatCompletionRequestUserMessageArgs::default()
+                .content("hi")
+                .build()
+                .unwrap()
+                .into()])
+            .build()
+            .unwrap();
+        let _ = tower::ServiceExt::ready(&mut agent)
+            .await
+            .unwrap()
+            .call(req)
+            .await
+            .unwrap();
+
+        let got = captured.lock().await.clone().expect("captured");
+        match &got.messages[0] {
+            ChatCompletionRequestMessage::System(s) => match &s.content {
+                async_openai::types::ChatCompletionRequestSystemMessageContent::Text(t) => {
+                    assert_eq!(t, "INSTR");
+                }
+                _ => panic!("expected text content"),
+            },
+            _ => panic!("expected first message to be system"),
+        }
+    }
+
+    #[tokio::test]
+    async fn auto_compaction_preserves_instructions() {
+        use crate::auto_compaction::{CompactionPolicy, CompactionStrategy, ProactiveThreshold};
+        // Capturing provider
+        #[derive(Clone)]
+        struct CapturingProvider {
+            captured: std::sync::Arc<tokio::sync::Mutex<Option<CreateChatCompletionRequest>>>,
+        }
+        impl tower::Service<CreateChatCompletionRequest> for CapturingProvider {
+            type Response = crate::provider::ProviderResponse;
+            type Error = BoxError;
+            type Future = std::pin::Pin<
+                Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>,
+            >;
+            fn poll_ready(
+                &mut self,
+                _cx: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<Result<(), Self::Error>> {
+                std::task::Poll::Ready(Ok(()))
+            }
+            fn call(&mut self, req: CreateChatCompletionRequest) -> Self::Future {
+                let captured = self.captured.clone();
+                Box::pin(async move {
+                    *captured.lock().await = Some(req);
+                    #[allow(deprecated)]
+                    let assistant = async_openai::types::ChatCompletionResponseMessage {
+                        content: Some("ok".into()),
+                        role: async_openai::types::Role::Assistant,
+                        tool_calls: None,
+                        function_call: None,
+                        refusal: None,
+                        audio: None,
+                    };
+                    Ok(crate::provider::ProviderResponse {
+                        assistant,
+                        prompt_tokens: 1,
+                        completion_tokens: 1,
+                    })
+                })
+            }
+        }
+
+        let captured = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let provider = CapturingProvider {
+            captured: captured.clone(),
+        };
+        let client =
+            std::sync::Arc::new(async_openai::Client::<async_openai::config::OpenAIConfig>::new());
+
+        let policy = CompactionPolicy {
+            compaction_model: "gpt-4o-mini".to_string(),
+            proactive_threshold: Some(ProactiveThreshold {
+                token_threshold: 1,
+                percentage_threshold: None,
+            }),
+            compaction_strategy: CompactionStrategy::PreserveSystemAndRecent { recent_count: 1 },
+            ..Default::default()
+        };
+
+        let mut agent = Agent::builder(client)
+            .with_provider(provider)
+            .model("gpt-4o")
+            .instructions("INSTR")
+            .auto_compaction(policy)
+            .policy(CompositePolicy::new(vec![policies::max_steps(1)]))
+            .build();
+
+        let mut long_user = String::new();
+        for _ in 0..200 {
+            long_user.push('x');
+        }
+        let req = CreateChatCompletionRequestArgs::default()
+            .model("gpt-4o")
+            .messages(vec![ChatCompletionRequestUserMessageArgs::default()
+                .content(long_user)
+                .build()
+                .unwrap()
+                .into()])
+            .build()
+            .unwrap();
+        let _ = tower::ServiceExt::ready(&mut agent)
+            .await
+            .unwrap()
+            .call(req)
+            .await
+            .unwrap();
+
+        let got = captured.lock().await.clone().expect("captured");
+        match &got.messages[0] {
+            ChatCompletionRequestMessage::System(s) => match &s.content {
+                async_openai::types::ChatCompletionRequestSystemMessageContent::Text(t) => {
+                    assert_eq!(t, "INSTR");
+                }
+                _ => panic!("expected text content"),
+            },
+            _ => panic!("expected first message to be system"),
+        }
+    }
 }
 
 /// Loop state visible to policies.
