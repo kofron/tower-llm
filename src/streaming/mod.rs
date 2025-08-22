@@ -36,8 +36,8 @@ use std::sync::Arc;
 
 use async_openai::types::{
     ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
-    ChatCompletionRequestToolMessageArgs, CreateChatCompletionRequest,
-    CreateChatCompletionRequestArgs,
+    ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestToolMessageArgs,
+    CreateChatCompletionRequest, CreateChatCompletionRequestArgs,
 };
 use futures::{Stream, StreamExt};
 use serde_json::Value;
@@ -95,6 +95,7 @@ pub trait StepProvider: Send + Sync + 'static {
 pub struct StepStreamService<P, T> {
     provider: Arc<P>,
     tools: T, // routed tool service (clonable for parallel)
+    instructions: Option<String>,
     parallel_tools: bool,
     tool_concurrency_limit: Option<usize>,
     join_policy: ToolJoinPolicy,
@@ -105,6 +106,7 @@ impl<P, T> StepStreamService<P, T> {
         Self {
             provider,
             tools,
+            instructions: None,
             parallel_tools: false,
             tool_concurrency_limit: None,
             join_policy: ToolJoinPolicy::FailFast,
@@ -123,6 +125,11 @@ impl<P, T> StepStreamService<P, T> {
 
     pub fn tool_join_policy(mut self, policy: ToolJoinPolicy) -> Self {
         self.join_policy = policy;
+        self
+    }
+
+    pub fn instructions(mut self, text: impl Into<String>) -> Self {
+        self.instructions = Some(text.into());
         self
     }
 }
@@ -150,6 +157,7 @@ where
         let parallel = self.parallel_tools;
         let _limit = self.tool_concurrency_limit;
         let join_policy = self.join_policy;
+        let instructions = self.instructions.clone();
         Box::pin(async move {
             let mut token_buf = String::new();
             let mut tool_calls: Vec<(String, String, Value)> = Vec::new();
@@ -160,7 +168,23 @@ where
             // Ensure model/messages present using builder semantics to normalize
             let mut builder = CreateChatCompletionRequestArgs::default();
             builder.model(base_model.clone());
-            builder.messages(req.messages.clone());
+            // Inject instructions if provided
+            let mut injected_messages = req.messages.clone();
+            if let Some(instr) = instructions.clone() {
+                let sys_msg = ChatCompletionRequestSystemMessageArgs::default()
+                    .content(instr)
+                    .build()
+                    .map(ChatCompletionRequestMessage::from)
+                    .map_err(|e| format!("system msg build error: {}", e))?;
+                if let Some(pos) = injected_messages
+                    .iter()
+                    .position(|m| matches!(m, ChatCompletionRequestMessage::System(_)))
+                {
+                    injected_messages.remove(pos);
+                }
+                injected_messages.insert(0, sys_msg);
+            }
+            builder.messages(injected_messages);
             let normalized_req = builder.build().map_err(|e| format!("build req: {}", e))?;
 
             let stream = provider.stream_step(normalized_req).await?;
@@ -676,6 +700,7 @@ where
 mod tests {
     use super::*;
     use crate::validation::{validate_conversation, ValidationPolicy};
+    use async_openai::types::ChatCompletionRequestUserMessageArgs;
     use futures::stream;
     use serde_json::json;
     use tokio::time::{sleep, Duration};
@@ -695,6 +720,25 @@ mod tests {
             Box::pin(
                 async move { Ok(Box::pin(s) as Pin<Box<dyn Stream<Item = StepChunk> + Send>>) },
             )
+        }
+    }
+
+    struct CapturingProvider {
+        captured: Arc<tokio::sync::Mutex<Option<CreateChatCompletionRequest>>>,
+    }
+
+    impl StepProvider for CapturingProvider {
+        type Stream = Pin<Box<dyn Stream<Item = StepChunk> + Send>>;
+        fn stream_step(
+            &self,
+            req: CreateChatCompletionRequest,
+        ) -> Pin<Box<dyn Future<Output = Result<Self::Stream, BoxError>> + Send>> {
+            let captured = self.captured.clone();
+            Box::pin(async move {
+                *captured.lock().await = Some(req);
+                let s = stream::iter(Vec::<StepChunk>::new());
+                Ok(Box::pin(s) as Pin<Box<dyn Stream<Item = StepChunk> + Send>>)
+            })
         }
     }
 
@@ -844,6 +888,44 @@ mod tests {
         // Drain
         while let Some(_ev) = stream.next().await {}
         assert!(!tap_log.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn instructions_are_injected_in_streaming_request() {
+        let captured: Arc<tokio::sync::Mutex<Option<CreateChatCompletionRequest>>> =
+            Arc::new(tokio::sync::Mutex::new(None));
+        let provider = Arc::new(CapturingProvider {
+            captured: captured.clone(),
+        });
+        let tool = service_fn(|_inv: ToolInvocation| async move {
+            Ok::<_, BoxError>(ToolOutput {
+                id: "x".into(),
+                result: json!({}),
+            })
+        });
+        let mut svc = StepStreamService::new(provider, tool).instructions("INSTR");
+        let req = CreateChatCompletionRequestArgs::default()
+            .model("gpt-4o")
+            .messages(vec![ChatCompletionRequestUserMessageArgs::default()
+                .content("hi")
+                .build()
+                .unwrap()
+                .into()])
+            .build()
+            .unwrap();
+        // Call the service and drop the stream immediately; capture happens on call
+        let _ = svc.call(req).await.unwrap();
+        let got = captured.lock().await.clone().expect("captured req");
+        assert!(!got.messages.is_empty());
+        match &got.messages[0] {
+            ChatCompletionRequestMessage::System(s) => match &s.content {
+                async_openai::types::ChatCompletionRequestSystemMessageContent::Text(t) => {
+                    assert_eq!(t, "INSTR");
+                }
+                _ => panic!("expected text content"),
+            },
+            _ => panic!("expected first message to be system"),
+        }
     }
 
     #[tokio::test]

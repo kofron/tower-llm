@@ -16,7 +16,7 @@
 //! Set your OpenAI API key in the `OPENAI_API_KEY` environment variable.
 //!
 //! ```rust,no_run
-//! use tower_llm::{Agent, tool_typed, policies, CompositePolicy};
+//! use tower_llm::{Agent, tool_typed, policies, CompositePolicy, run_user};
 //! use async_openai::{config::OpenAIConfig, Client};
 //! use schemars::JsonSchema;
 //! use serde::Deserialize;
@@ -42,20 +42,18 @@
 //!     },
 //! );
 //!
-//! // Build an agent
+//! // Build an agent with per-agent instructions
 //! let agent = Agent::builder(client)
-//!     .model("gpt-4")
+//!     .model("gpt-4o")
+//!     .instructions("You are a helpful math assistant")
 //!     .tool(calculator)
 //!     .policy(CompositePolicy::new(vec![policies::until_no_tool_calls()]))
 //!     .build();
 //!
 //! // Use the agent with Tower's Service trait
 //! let mut agent = agent;
-//! let request = tower_llm::simple_chat_request(
-//!     "You are a helpful math assistant",
-//!     "What is 2 + 2?"
-//! );
-//! let response = agent.ready().await?.call(request).await?;
+//! // Send only a user message; the agent injects its instructions as a system message
+//! let response = run_user(&mut agent, "What is 2 + 2?").await?;
 //!
 //! println!("Agent: {:?}", response);
 //! # Ok(())
@@ -87,10 +85,10 @@ mod core;
 
 // Re-export core types
 pub use core::{
-    policies, run, simple_chat_request, tool_typed, Agent, AgentBuilder, AgentLoop, AgentLoopLayer,
-    AgentPolicy, AgentRun, AgentStopReason, AgentSvc, CompositePolicy, LoopState, Policy, PolicyFn,
-    Step, StepAux, StepLayer, StepOutcome, ToolDef, ToolInvocation, ToolOutput, ToolRouter,
-    ToolSvc,
+    policies, run, run_user, simple_chat_request, simple_user_request, tool_typed, Agent,
+    AgentBuilder, AgentLoop, AgentLoopLayer, AgentPolicy, AgentRun, AgentStopReason, AgentSvc,
+    CompositePolicy, LoopState, Policy, PolicyFn, Step, StepAux, StepLayer, StepOutcome, ToolDef,
+    ToolInvocation, ToolOutput, ToolRouter, ToolSvc,
 };
 
 // Re-export join policy for tool execution configuration
