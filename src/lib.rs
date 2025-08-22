@@ -86,10 +86,9 @@ mod core;
 // Re-export core types
 pub use core::{
     policies, run, run_user, simple_chat_request, simple_user_request, tool_typed, Agent,
-    AgentBuilder, AgentLoop, AgentLoopLayer,
-    AgentPolicy, AgentRun, AgentStopReason, AgentSvc, CompositePolicy, LoopState, Policy, PolicyFn,
-    Step, StepAux, StepLayer, StepOutcome, ToolDef, ToolInvocation, ToolOutput, ToolRouter,
-    ToolSvc,
+    AgentBuilder, AgentLoop, AgentLoopLayer, AgentPolicy, AgentRun, AgentStopReason, AgentSvc,
+    CompositePolicy, LoopState, Policy, PolicyFn, Step, StepAux, StepLayer, StepOutcome, ToolDef,
+    ToolInvocation, ToolOutput, ToolRouter, ToolSvc,
 };
 
 // Re-export join policy for tool execution configuration
