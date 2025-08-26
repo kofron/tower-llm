@@ -530,41 +530,125 @@ where
         let mut builder = CreateChatCompletionRequestArgs::default();
         builder.model(&self.policy.compaction_model);
 
-        // Add messages to compact as context
+        // Start with a system prompt
         let mut compact_messages = vec![ChatCompletionRequestSystemMessageArgs::default()
             .content(prompt)
             .build()?
             .into()];
 
-        // Add the messages to be compacted
-        let mut pushed_non_system = false;
-        for msg in to_compact {
-            if !pushed_non_system {
-                if matches!(msg, ChatCompletionRequestMessage::System(_)) {
-                    // Skip leading system messages to avoid back-to-back system
-                    continue;
-                } else {
-                    pushed_non_system = true;
+        // Identify the last assistant-with-tool_calls inside the slice
+        let mut last_asst_rel_idx: Option<usize> = None;
+        for (i, msg) in to_compact.iter().enumerate() {
+            if let ChatCompletionRequestMessage::Assistant(asst) = msg {
+                if asst
+                    .tool_calls
+                    .as_ref()
+                    .map(|v| !v.is_empty())
+                    .unwrap_or(false)
+                {
+                    last_asst_rel_idx = Some(i);
                 }
             }
-            compact_messages.push(msg.clone());
         }
 
-        // Add instruction to summarize, avoiding repeated user role
-        let last_is_user = matches!(
-            compact_messages.last(),
-            Some(ChatCompletionRequestMessage::User(_))
-        );
-        if !last_is_user {
-            compact_messages.push(
-                ChatCompletionRequestUserMessageArgs::default()
-                    .content("Please provide a summary of the above conversation following the instructions.")
-                    .build()?
-                    .into(),
+        if let Some(rel_idx) = last_asst_rel_idx {
+            // Gather tool ids from the last assistant
+            let abs_last = range.start + rel_idx;
+            let mut remaining_ids: std::collections::HashSet<String> =
+                if let ChatCompletionRequestMessage::Assistant(asst) =
+                    &messages_to_compact[abs_last]
+                {
+                    asst.tool_calls
+                        .as_ref()
+                        .map(|tc| tc.iter().map(|t| t.id.clone()).collect())
+                        .unwrap_or_else(std::collections::HashSet::new)
+                } else {
+                    std::collections::HashSet::new()
+                };
+
+            // Phase 1: push messages up to and including the assistant (skip leading system)
+            let mut pushed_non_system = false;
+            for msg in &to_compact[..=rel_idx] {
+                if !pushed_non_system {
+                    if matches!(msg, ChatCompletionRequestMessage::System(_)) {
+                        continue;
+                    } else {
+                        pushed_non_system = true;
+                    }
+                }
+                compact_messages.push(msg.clone());
+            }
+
+            // Phase 2: scan forward beyond the slice for matching tool responses, skipping non-tool messages
+            let mut extra_tools: Vec<ChatCompletionRequestMessage> = Vec::new();
+            if !remaining_ids.is_empty() {
+                let mut idx = abs_last + 1;
+                while idx < messages_to_compact.len() && !remaining_ids.is_empty() {
+                    match &messages_to_compact[idx] {
+                        ChatCompletionRequestMessage::Tool(t) => {
+                            if remaining_ids.contains(&t.tool_call_id) {
+                                extra_tools.push(messages_to_compact[idx].clone());
+                                remaining_ids.remove(&t.tool_call_id);
+                            }
+                        }
+                        ChatCompletionRequestMessage::Assistant(_) => {
+                            break; // stop at next assistant
+                        }
+                        _ => {
+                            // skip non-tool messages
+                        }
+                    }
+                    idx += 1;
+                }
+            }
+
+            // Append extra tool responses (contiguously after the assistant)
+            compact_messages.extend(extra_tools);
+
+            // Add instruction to summarize if needed
+            let last_is_user = matches!(
+                compact_messages.last(),
+                Some(ChatCompletionRequestMessage::User(_))
             );
-        }
+            if !last_is_user {
+                compact_messages.push(
+                    ChatCompletionRequestUserMessageArgs::default()
+                        .content("Please provide a summary of the above conversation following the instructions.")
+                        .build()?
+                        .into(),
+                );
+            }
 
-        builder.messages(compact_messages);
+            builder.messages(compact_messages);
+        } else {
+            // Fallback: no assistant with tool_calls inside the slice; include the slice as-is (skipping leading system)
+            let mut pushed_non_system = false;
+            for msg in to_compact {
+                if !pushed_non_system {
+                    if matches!(msg, ChatCompletionRequestMessage::System(_)) {
+                        continue;
+                    } else {
+                        pushed_non_system = true;
+                    }
+                }
+                compact_messages.push(msg.clone());
+            }
+
+            let last_is_user = matches!(
+                compact_messages.last(),
+                Some(ChatCompletionRequestMessage::User(_))
+            );
+            if !last_is_user {
+                compact_messages.push(
+                    ChatCompletionRequestUserMessageArgs::default()
+                        .content("Please provide a summary of the above conversation following the instructions.")
+                        .build()?
+                        .into(),
+                );
+            }
+
+            builder.messages(compact_messages);
+        }
         let compact_req = builder.build()?;
 
         // Call compaction model
@@ -841,6 +925,505 @@ mod tests {
         assert!(count > 0);
         // Rough estimate: ~50 chars / 4 = ~12 tokens
         assert!((10..=20).contains(&count));
+    }
+
+    // =============================================================================================
+    // Boundary and slice-invariance tests for compaction preflight requests
+    // =============================================================================================
+
+    /// Build a minimal AutoCompaction with a capturing provider used only for compact_messages
+    fn make_compactor_with_policy(
+        policy: CompactionPolicy,
+        provider: CapturingProvider,
+    ) -> AutoCompaction<(), CapturingProvider, SimpleTokenCounter> {
+        AutoCompaction {
+            inner: Arc::new(tokio::sync::Mutex::new(())),
+            policy,
+            provider: Arc::new(tokio::sync::Mutex::new(provider)),
+            token_counter: Arc::new(SimpleTokenCounter::new()),
+        }
+    }
+
+    fn asst_with_tool_calls(ids: &[&str]) -> ChatCompletionRequestMessage {
+        use async_openai::types::{
+            ChatCompletionMessageToolCall, ChatCompletionToolType, FunctionCall,
+        };
+        let calls: Vec<ChatCompletionMessageToolCall> = ids
+            .iter()
+            .map(|id| ChatCompletionMessageToolCall {
+                id: (*id).to_string(),
+                r#type: ChatCompletionToolType::Function,
+                function: FunctionCall {
+                    name: "x".to_string(),
+                    arguments: "{}".to_string(),
+                },
+            })
+            .collect();
+        ChatCompletionRequestAssistantMessageArgs::default()
+            .content("")
+            .tool_calls(calls)
+            .build()
+            .unwrap()
+            .into()
+    }
+
+    fn tool_msg(id: &str, content: &str) -> ChatCompletionRequestMessage {
+        ChatCompletionRequestToolMessageArgs::default()
+            .tool_call_id(id)
+            .content(content)
+            .build()
+            .unwrap()
+            .into()
+    }
+
+    fn user_msg(text: &str) -> ChatCompletionRequestMessage {
+        ChatCompletionRequestUserMessageArgs::default()
+            .content(text)
+            .build()
+            .unwrap()
+            .into()
+    }
+
+    fn system_msg(text: &str) -> ChatCompletionRequestMessage {
+        ChatCompletionRequestSystemMessageArgs::default()
+            .content(text)
+            .build()
+            .unwrap()
+            .into()
+    }
+
+    #[test]
+    fn compaction_preflight_excludes_tools_at_slice_end_custom_end() {
+        // TODO: tests_compaction_slice_end_missing_tools
+        // Construct a transcript that is acceptable under default validation (contiguity not enforced),
+        // but where we select a slice that ends immediately after an assistant with tool_calls
+        // (thus excluding tool responses), provoking a preflight request that violates tool invariants.
+
+        // Messages: [sys, user1, assistant(tc c1), user_interrupt, tool(c1)]
+        let msgs = vec![
+            system_msg("S"),
+            user_msg("U1"),
+            asst_with_tool_calls(&["c1"]),
+            user_msg("interrupt"),
+            tool_msg("c1", "{}"),
+        ];
+
+        // Policy: Custom compaction range to include up to (but not including) the interrupt user
+        // so the slice ends with the assistant with tool_calls.
+        let range_fn: PromptGeneratorFn = Arc::new(|_m| "".to_string());
+        let range_select: CompactionRangeFn = Arc::new(|m| {
+            // Find assistant with tool_calls index (expect index 2), set end = idx + 1
+            let idx = m
+                .iter()
+                .position(|mm| matches!(mm, ChatCompletionRequestMessage::Assistant(_)))
+                .unwrap();
+            CompactionRange {
+                start: 1,
+                end: idx + 1,
+            }
+        });
+        let policy = CompactionPolicy {
+            compaction_model: "gpt-4o-mini".into(),
+            proactive_threshold: None,
+            compaction_strategy: CompactionStrategy::Custom(range_select),
+            compaction_prompt: CompactionPrompt::Dynamic(range_fn),
+            max_compaction_attempts: 1,
+            orphaned_tool_call_strategy: OrphanedToolCallStrategy::DropAndReappend,
+        };
+
+        // Capturing provider to inspect the preflight request sent to the model
+        let provider = CapturingProvider::new();
+        let provider_clone = provider.clone();
+        let ac = make_compactor_with_policy(policy, provider_clone);
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let out = rt
+            .block_on(async move { ac.compact_messages(msgs.clone()).await })
+            .unwrap();
+
+        // Preflight request should violate tool invariants: assistant tool_calls without tool responses
+        let req = rt
+            .block_on(async move { provider.get().await })
+            .expect("captured");
+        let strict = ValidationPolicy {
+            require_user_first: false,
+            allow_repeated_roles: true, // allow tool blocks
+            enforce_contiguous_tool_responses: true,
+            ..Default::default()
+        };
+        assert!(
+            validate_conversation(&req.messages, &strict).is_none(),
+            "expected preflight to be valid when slice ends after assistant (slice-aware)"
+        );
+
+        // Post-compaction output exists (we're not asserting validity here)
+        assert!(!out.is_empty());
+    }
+
+    #[test]
+    fn compaction_slice_starts_with_tool_message_custom_start() {
+        // TODO: tests_compaction_slice_starts_with_tool
+        // Construct a valid transcript, then select a slice that begins at a tool message.
+        let msgs = vec![
+            system_msg("S"),
+            user_msg("U1"),
+            asst_with_tool_calls(&["c1"]),
+            tool_msg("c1", "{}"),
+            user_msg("U2"),
+        ];
+
+        // Custom range: start at the first Tool message index
+        let range_fn: PromptGeneratorFn = Arc::new(|_m| "".to_string());
+        let range_select: CompactionRangeFn = Arc::new(|m| {
+            let start = m
+                .iter()
+                .position(|mm| matches!(mm, ChatCompletionRequestMessage::Tool(_)))
+                .unwrap();
+            CompactionRange {
+                start,
+                end: start + 1,
+            }
+        });
+        let policy = CompactionPolicy {
+            compaction_model: "gpt-4o-mini".into(),
+            proactive_threshold: None,
+            compaction_strategy: CompactionStrategy::Custom(range_select),
+            compaction_prompt: CompactionPrompt::Dynamic(range_fn),
+            max_compaction_attempts: 1,
+            orphaned_tool_call_strategy: OrphanedToolCallStrategy::DropAndReappend,
+        };
+
+        let provider = CapturingProvider::new();
+        let ac = make_compactor_with_policy(policy, provider.clone());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _ = rt
+            .block_on(async move { ac.compact_messages(msgs).await })
+            .unwrap();
+        let req = rt
+            .block_on(async move { provider.get().await })
+            .expect("captured");
+
+        // Starting with a Tool message should be invalid (tool before assistant)
+        let strict = ValidationPolicy {
+            require_user_first: false,
+            ..Default::default()
+        };
+        let violations = validate_conversation(&req.messages, &strict).expect("violations");
+        assert!(
+            violations.iter().any(|v| matches!(
+                v.code,
+                crate::validation::ViolationCode::ToolBeforeAssistant { .. }
+            )),
+            "expected ToolBeforeAssistant violation in preflight request"
+        );
+    }
+
+    #[test]
+    fn compaction_appends_user_after_assistant_with_missing_tools() {
+        // TODO: tests_compaction_appended_user_after_tools_missing
+        // Similar to the first test, but assert the appended user instruction appears
+        // immediately after an assistant with tool_calls when no tools are in-slice.
+        let msgs = vec![
+            system_msg("S"),
+            user_msg("U1"),
+            asst_with_tool_calls(&["c1"]),
+            user_msg("interrupt"),
+            tool_msg("c1", "{}"),
+        ];
+
+        // Select range that ends right after assistant (excludes tool response and the interrupt)
+        let range_fn: PromptGeneratorFn = Arc::new(|_m| "".to_string());
+        let range_select: CompactionRangeFn = Arc::new(|m| {
+            let idx = m
+                .iter()
+                .position(|mm| matches!(mm, ChatCompletionRequestMessage::Assistant(_)))
+                .unwrap();
+            CompactionRange {
+                start: 1,
+                end: idx + 1,
+            }
+        });
+        let policy = CompactionPolicy {
+            compaction_model: "gpt-4o-mini".into(),
+            proactive_threshold: None,
+            compaction_strategy: CompactionStrategy::Custom(range_select),
+            compaction_prompt: CompactionPrompt::Dynamic(range_fn),
+            max_compaction_attempts: 1,
+            orphaned_tool_call_strategy: OrphanedToolCallStrategy::DropAndReappend,
+        };
+
+        let provider = CapturingProvider::new();
+        let ac = make_compactor_with_policy(policy, provider.clone());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _ = rt
+            .block_on(async move { ac.compact_messages(msgs).await })
+            .unwrap();
+        let req = rt
+            .block_on(async move { provider.get().await })
+            .expect("captured");
+
+        // The compactor appends a user instruction if the slice doesn't end with a user
+        // We ended with assistant, so a user instruction should have been appended.
+        assert!(
+            matches!(
+                req.messages.last(),
+                Some(ChatCompletionRequestMessage::User(_))
+            ),
+            "expected appended user instruction at end of preflight"
+        );
+    }
+
+    #[test]
+    fn compaction_boundary_extends_to_include_all_tool_responses_for_last_assistant() {
+        // TODO: tests_compaction_multicall_boundary_complete
+        // Assistant with two tool_calls followed by two tool responses; end is set at assistant,
+        // compactor should extend to include both contiguous tool responses.
+        let msgs = vec![
+            system_msg("S"),
+            user_msg("U1"),
+            asst_with_tool_calls(&["c1", "c2"]),
+            tool_msg("c1", "r1"),
+            tool_msg("c2", "r2"),
+            user_msg("U2"),
+        ];
+
+        let range_fn: PromptGeneratorFn = Arc::new(|_m| "".to_string());
+        let range_select: CompactionRangeFn = Arc::new(|m| {
+            let idx = m
+                .iter()
+                .position(|mm| matches!(mm, ChatCompletionRequestMessage::Assistant(_)))
+                .unwrap();
+            CompactionRange {
+                start: 1,
+                end: idx + 1,
+            }
+        });
+        let policy = CompactionPolicy {
+            compaction_model: "gpt-4o-mini".into(),
+            proactive_threshold: None,
+            compaction_strategy: CompactionStrategy::Custom(range_select),
+            compaction_prompt: CompactionPrompt::Dynamic(range_fn),
+            max_compaction_attempts: 1,
+            orphaned_tool_call_strategy: OrphanedToolCallStrategy::DropAndReappend,
+        };
+
+        let provider = CapturingProvider::new();
+        let ac = make_compactor_with_policy(policy, provider.clone());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _ = rt
+            .block_on(async move { ac.compact_messages(msgs).await })
+            .unwrap();
+        let req = rt
+            .block_on(async move { provider.get().await })
+            .expect("captured");
+
+        // Expect both tool responses present (no violations under strict contiguity policy)
+        let strict = ValidationPolicy {
+            require_user_first: false,
+            allow_repeated_roles: true,
+            enforce_contiguous_tool_responses: true,
+            ..Default::default()
+        };
+        if let Some(violations) = validate_conversation(&req.messages, &strict) {
+            eprintln!(
+                "strict policy: allow_repeated_roles={}, enforce_contiguous_tool_responses={}",
+                strict.allow_repeated_roles, strict.enforce_contiguous_tool_responses
+            );
+            eprintln!("violations: {:?}", violations);
+            panic!("expected preflight to be valid when contiguous tools exist");
+        }
+    }
+
+    #[test]
+    fn compaction_global_ok_but_slice_orphaned_missing_tools() {
+        // TODO: tests_compaction_global_vs_slice_orphan
+        // Full transcript is valid (assistant tool_calls followed by tool),
+        // but the chosen slice excludes the tool response, making the preflight invalid.
+        let full = vec![
+            system_msg("S"),
+            user_msg("U1"),
+            asst_with_tool_calls(&["c1"]),
+            tool_msg("c1", "{}"),
+            user_msg("U2"),
+        ];
+
+        let base_policy = ValidationPolicy {
+            require_user_first: false,
+            ..Default::default()
+        };
+        assert!(validate_conversation(&full, &base_policy).is_none());
+
+        // Custom range excludes the tool response (end at assistant)
+        let range_fn: PromptGeneratorFn = Arc::new(|_m| "".to_string());
+        let range_select: CompactionRangeFn = Arc::new(|m| {
+            let idx = m
+                .iter()
+                .position(|mm| matches!(mm, ChatCompletionRequestMessage::Assistant(_)))
+                .unwrap();
+            CompactionRange {
+                start: 1,
+                end: idx + 1,
+            }
+        });
+        let policy = CompactionPolicy {
+            compaction_model: "gpt-4o-mini".into(),
+            proactive_threshold: None,
+            compaction_strategy: CompactionStrategy::Custom(range_select),
+            compaction_prompt: CompactionPrompt::Dynamic(range_fn),
+            max_compaction_attempts: 1,
+            orphaned_tool_call_strategy: OrphanedToolCallStrategy::DropAndReappend,
+        };
+
+        let provider = CapturingProvider::new();
+        let ac = make_compactor_with_policy(policy, provider.clone());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _ = rt
+            .block_on(async move { ac.compact_messages(full).await })
+            .unwrap();
+        let req = rt
+            .block_on(async move { provider.get().await })
+            .expect("captured");
+
+        let strict = ValidationPolicy {
+            require_user_first: false,
+            allow_repeated_roles: true,
+            enforce_contiguous_tool_responses: true,
+            ..Default::default()
+        };
+        assert!(validate_conversation(&req.messages, &strict).is_none());
+    }
+
+    #[test]
+    fn compaction_strategy_comparison_drop_vs_placeholder() {
+        // TODO: tests_compaction_property_strategy_comparison
+        // Same input/slice, compare DropAndReappend vs AddPlaceholderResponses
+        let msgs = vec![
+            system_msg("S"),
+            user_msg("U1"),
+            asst_with_tool_calls(&["c1"]),
+            user_msg("interrupt"),
+            tool_msg("c1", "{}"),
+        ];
+
+        let range_fn: PromptGeneratorFn = Arc::new(|_m| "".to_string());
+        let range_select: CompactionRangeFn = Arc::new(|m| {
+            let idx = m
+                .iter()
+                .position(|mm| matches!(mm, ChatCompletionRequestMessage::Assistant(_)))
+                .unwrap();
+            CompactionRange {
+                start: 1,
+                end: idx + 1,
+            }
+        });
+
+        let mk_pol = |strat| CompactionPolicy {
+            compaction_model: "gpt-4o-mini".into(),
+            proactive_threshold: None,
+            compaction_strategy: CompactionStrategy::Custom(range_select.clone()),
+            compaction_prompt: CompactionPrompt::Dynamic(range_fn.clone()),
+            max_compaction_attempts: 1,
+            orphaned_tool_call_strategy: strat,
+        };
+
+        // DropAndReappend
+        let prov1 = CapturingProvider::new();
+        let ac1 = make_compactor_with_policy(
+            mk_pol(OrphanedToolCallStrategy::DropAndReappend),
+            prov1.clone(),
+        );
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _ = rt
+            .block_on(async { ac1.compact_messages(msgs.clone()).await })
+            .unwrap();
+        let req1 = rt.block_on(async move { prov1.get().await }).unwrap();
+
+        // AddPlaceholderResponses
+        let prov2 = CapturingProvider::new();
+        let ac2 = make_compactor_with_policy(
+            mk_pol(OrphanedToolCallStrategy::AddPlaceholderResponses),
+            prov2.clone(),
+        );
+        let _ = rt
+            .block_on(async { ac2.compact_messages(msgs.clone()).await })
+            .unwrap();
+        let req2 = rt.block_on(async move { prov2.get().await }).unwrap();
+
+        let strict = ValidationPolicy {
+            require_user_first: false,
+            allow_repeated_roles: true,
+            enforce_contiguous_tool_responses: true,
+            ..Default::default()
+        };
+        if validate_conversation(&req2.messages, &strict).is_some() {
+            eprintln!(
+                "placeholder violations: {:?}",
+                validate_conversation(&req2.messages, &strict).unwrap()
+            );
+        }
+        // With slice-aware boundary repair, both strategies should yield valid preflight
+        assert!(
+            validate_conversation(&req1.messages, &strict).is_none(),
+            "DropAndReappend should be valid with slice-aware boundary repair"
+        );
+        assert!(
+            validate_conversation(&req2.messages, &strict).is_none(),
+            "AddPlaceholderResponses should be valid with slice-aware boundary repair"
+        );
+    }
+
+    #[test]
+    fn compaction_on_merged_history_like_handoff_preflight_validity() {
+        // TODO: tests_compaction_handoff_merged_preflight
+        // Simulate merged history (original + accumulated) and ensure preflight validity can fail
+        // with the strict policy when slice cuts across tool boundaries.
+        let merged = vec![
+            system_msg("S"),
+            user_msg("U1"),
+            asst_with_tool_calls(&["c1"]),
+            user_msg("interrupt"),
+            tool_msg("c1", "{}"),
+            user_msg("U2"),
+        ];
+
+        let range_fn: PromptGeneratorFn = Arc::new(|_m| "".to_string());
+        let range_select: CompactionRangeFn = Arc::new(|m| {
+            // Cut right after assistant (exclude interrupt/user and tools)
+            let idx = m
+                .iter()
+                .position(|mm| matches!(mm, ChatCompletionRequestMessage::Assistant(_)))
+                .unwrap();
+            CompactionRange {
+                start: 1,
+                end: idx + 1,
+            }
+        });
+        let policy = CompactionPolicy {
+            compaction_model: "gpt-4o-mini".into(),
+            proactive_threshold: None,
+            compaction_strategy: CompactionStrategy::Custom(range_select),
+            compaction_prompt: CompactionPrompt::Dynamic(range_fn),
+            max_compaction_attempts: 1,
+            orphaned_tool_call_strategy: OrphanedToolCallStrategy::DropAndReappend,
+        };
+
+        let provider = CapturingProvider::new();
+        let ac = make_compactor_with_policy(policy, provider.clone());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _ = rt
+            .block_on(async move { ac.compact_messages(merged).await })
+            .unwrap();
+        let req = rt
+            .block_on(async move { provider.get().await })
+            .expect("captured");
+
+        let strict = ValidationPolicy {
+            require_user_first: false,
+            enforce_contiguous_tool_responses: true,
+            ..Default::default()
+        };
+        // TDD red: expect valid preflight with slice-aware compaction
+        assert!(validate_conversation(&req.messages, &strict).is_none());
     }
 
     #[test]
