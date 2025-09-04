@@ -9,12 +9,13 @@ use async_openai::{
     types::{
         ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
         ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestToolMessageArgs,
-        ChatCompletionRequestUserMessageArgs, ChatCompletionTool, ChatCompletionToolArgs,
-        ChatCompletionToolType, CreateChatCompletionRequest, CreateChatCompletionRequestArgs,
-        FunctionObjectArgs, ReasoningEffort,
+        ChatCompletionRequestUserMessageArgs, ChatCompletionResponseMessage, ChatCompletionTool,
+        ChatCompletionToolArgs, ChatCompletionToolType, CreateChatCompletionRequest,
+        CreateChatCompletionRequestArgs, FunctionObjectArgs, ReasoningEffort,
     },
     Client,
 };
+use async_trait::async_trait;
 use futures::future::BoxFuture;
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
@@ -210,6 +211,20 @@ impl Service<ToolInvocation> for ToolRouter {
     }
 }
 
+// ======================================================================
+// Agent instruction provider - abstraction over creating a system prompt
+// ======================================================================
+#[async_trait]
+pub trait LLMInstructionProvider: Send + Sync {
+    async fn instructions(&self) -> Option<String>;
+}
+
+#[derive(Clone)]
+enum InstructionSource {
+    Static(String),
+    Dynamic(Arc<dyn LLMInstructionProvider>),
+}
+
 // =============================
 // Step service and layer
 // =============================
@@ -238,6 +253,35 @@ pub enum StepOutcome {
     },
 }
 
+fn summarize_request_messages(messages: &[ChatCompletionRequestMessage]) -> Vec<&'static str> {
+    messages
+        .iter()
+        .map(|message| match message {
+            ChatCompletionRequestMessage::System(_) => "system",
+            ChatCompletionRequestMessage::User(_) => "user",
+            ChatCompletionRequestMessage::Assistant(_) => "assistant",
+            ChatCompletionRequestMessage::Tool(_) => "tool",
+            ChatCompletionRequestMessage::Function(_) => "function",
+            ChatCompletionRequestMessage::Developer(_) => "developer",
+        })
+        .collect()
+}
+
+fn summarize_assistant_message(message: &ChatCompletionResponseMessage) -> String {
+    let content_shape = if message
+        .content
+        .as_ref()
+        .map(|c| !c.is_empty())
+        .unwrap_or(false)
+    {
+        "text"
+    } else {
+        "none"
+    };
+    let tool_calls = message.tool_calls.as_ref().map(|c| c.len()).unwrap_or(0);
+    format!("assistant(content={content_shape}, tool_calls={tool_calls})")
+}
+
 /// One-step agent service parameterized by a routed tool service `S`.
 pub struct Step<S, P> {
     provider: Arc<tokio::sync::Mutex<P>>,
@@ -245,7 +289,7 @@ pub struct Step<S, P> {
     temperature: Option<f32>,
     max_tokens: Option<u32>,
     reasoning_effort: Option<ReasoningEffort>,
-    instructions: Option<String>,
+    instructions: Option<InstructionSource>,
     tools: S,
     tool_specs: Arc<Vec<ChatCompletionTool>>, // supplied to requests if missing
     parallel_tools: bool,
@@ -313,7 +357,7 @@ pub struct StepLayer<P> {
     temperature: Option<f32>,
     max_tokens: Option<u32>,
     reasoning_effort: Option<ReasoningEffort>,
-    instructions: Option<String>,
+    instructions: Option<InstructionSource>,
     tool_specs: Arc<Vec<ChatCompletionTool>>,
     parallel_tools: bool,
     tool_concurrency_limit: Option<usize>,
@@ -367,7 +411,12 @@ impl<P> StepLayer<P> {
     }
 
     pub fn instructions(mut self, text: impl Into<String>) -> Self {
-        self.instructions = Some(text.into());
+        self.instructions = Some(InstructionSource::Static(text.into()));
+        self
+    }
+
+    pub fn instruction_provider(mut self, provider: Arc<dyn LLMInstructionProvider>) -> Self {
+        self.instructions = Some(InstructionSource::Dynamic(provider));
         self
     }
 }
@@ -428,7 +477,7 @@ where
         let parallel_tools = self.parallel_tools;
         let _tool_concurrency_limit = self.tool_concurrency_limit;
         let join_policy = self.join_policy;
-        let instructions = self.instructions.clone();
+        let instruction_source = self.instructions.clone();
 
         Box::pin(async move {
             // Rebuild request using builder to avoid deprecated field access
@@ -456,6 +505,12 @@ where
 
             // Prepare messages with optional agent-level instructions injection
             let mut injected_messages = req.messages.clone();
+            let instructions = match instruction_source {
+                Some(InstructionSource::Static(text)) => Some(text),
+                Some(InstructionSource::Dynamic(provider)) => provider.instructions().await,
+                None => None,
+            };
+
             if let Some(instr) = instructions {
                 // Build a system message for the instructions
                 let sys_msg = ChatCompletionRequestSystemMessageArgs::default()
@@ -501,10 +556,13 @@ where
                 .build()
                 .map_err(|e| format!("request build error: {}", e))?;
 
+            let request_shape = summarize_request_messages(&rebuilt_req.messages);
+
             // Trace the final request model
             trace!(
                 final_model = ?rebuilt_req.model,
                 messages_count = rebuilt_req.messages.len(),
+                message_roles = ?request_shape,
                 "Step service final request built"
             );
 
@@ -518,6 +576,13 @@ where
                 prompt_tokens,
                 completion_tokens,
             } = ServiceExt::ready(&mut *p).await?.call(rebuilt_req).await?;
+            let response_shape = summarize_assistant_message(&assistant);
+            trace!(
+                response_shape = %response_shape,
+                prompt_tokens,
+                completion_tokens,
+                "Step service received provider response"
+            );
             let mut aux = StepAux {
                 prompt_tokens,
                 completion_tokens,
@@ -560,6 +625,10 @@ where
                     }
                 })
                 .collect();
+
+            if !invoked_names.is_empty() {
+                trace!(tool_names = ?invoked_names, "Step service invoking tools");
+            }
 
             if invocations.len() > 1 && parallel_tools {
                 // Fire in parallel, preserve order
@@ -772,6 +841,7 @@ pub struct AgentBuilder {
     max_tokens: Option<u32>,
     reasoning_effort: Option<ReasoningEffort>,
     instructions: Option<String>,
+    instruction_provider: Option<Arc<dyn LLMInstructionProvider>>,
     tools: Vec<ToolDef>,
     policy: CompositePolicy,
     handoff: Option<crate::groups::AnyHandoffPolicy>,
@@ -798,6 +868,7 @@ impl Agent {
             max_tokens: None,
             reasoning_effort: None,
             instructions: None,
+            instruction_provider: None,
             tools: Vec::new(),
             policy: CompositePolicy::default(),
             handoff: None,
@@ -832,6 +903,10 @@ impl AgentBuilder {
     /// Set agent-level instructions (system prompt). These will be injected on each step.
     pub fn instructions(mut self, text: impl Into<String>) -> Self {
         self.instructions = Some(text.into());
+        self
+    }
+    pub fn instruction_provider(mut self, provider: Arc<dyn LLMInstructionProvider>) -> Self {
+        self.instruction_provider = Some(provider);
         self
     }
     pub fn tool(mut self, tool: ToolDef) -> Self {
@@ -925,6 +1000,8 @@ impl AgentBuilder {
             .tool_join_policy(self.tool_join_policy);
         if let Some(instr) = &self.instructions {
             step_layer = step_layer.instructions(instr.clone());
+        } else if let Some(provider) = &self.instruction_provider {
+            step_layer = step_layer.instruction_provider(provider.clone());
         }
         // Only set temperature if explicitly provided
         if let Some(t) = self.temperature {
@@ -1015,6 +1092,8 @@ impl AgentBuilder {
             .tool_join_policy(self.tool_join_policy);
         if let Some(instr) = &self.instructions {
             step_layer = step_layer.instructions(instr.clone());
+        } else if let Some(provider) = &self.instruction_provider {
+            step_layer = step_layer.instruction_provider(provider.clone());
         }
         // Only set temperature if explicitly provided
         if let Some(t) = self.temperature {
@@ -1079,6 +1158,8 @@ pub async fn run_user(agent: &mut AgentSvc, user: &str) -> Result<AgentRun, BoxE
 mod tests {
     use super::*;
     use async_openai::types::ChatCompletionRequestUserMessageArgs;
+    use async_trait::async_trait;
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn step_injects_instructions_prepend_or_replace() {
@@ -1138,6 +1219,83 @@ mod tests {
                 }
             }
             _ => panic!("expected first message to be system"),
+        }
+    }
+
+    #[derive(Clone)]
+    struct CountingInstructionProvider {
+        counter: Arc<tokio::sync::Mutex<usize>>,
+    }
+
+    #[async_trait]
+    impl LLMInstructionProvider for CountingInstructionProvider {
+        async fn instructions(&self) -> Option<String> {
+            let mut guard = self.counter.lock().await;
+            *guard += 1;
+            Some(format!("CTX {}", *guard))
+        }
+    }
+
+    #[tokio::test]
+    async fn step_uses_instruction_provider_each_call() {
+        #[allow(deprecated)]
+        let assistant = async_openai::types::ChatCompletionResponseMessage {
+            content: Some("ok".into()),
+            role: async_openai::types::Role::Assistant,
+            tool_calls: None,
+            function_call: None,
+            refusal: None,
+            audio: None,
+        };
+        let provider = crate::provider::FixedProvider::new(crate::provider::ProviderResponse {
+            assistant,
+            prompt_tokens: 1,
+            completion_tokens: 1,
+        });
+
+        let (router, specs) = ToolRouter::new(vec![]);
+        let instruction_provider = Arc::new(CountingInstructionProvider {
+            counter: Arc::new(tokio::sync::Mutex::new(0)),
+        });
+        let step = StepLayer::new(provider, "gpt-4o", specs)
+            .instruction_provider(instruction_provider)
+            .layer(router);
+        let mut svc = tower::ServiceExt::boxed(step);
+
+        let build_request = || {
+            let user = ChatCompletionRequestUserMessageArgs::default()
+                .content("hello")
+                .build()
+                .unwrap();
+            CreateChatCompletionRequestArgs::default()
+                .model("gpt-4o")
+                .messages(vec![user.into()])
+                .build()
+                .unwrap()
+        };
+
+        for expected in ["CTX 1", "CTX 2"] {
+            let resp = tower::ServiceExt::ready(&mut svc)
+                .await
+                .unwrap()
+                .call(build_request())
+                .await
+                .unwrap();
+
+            let messages = match resp {
+                StepOutcome::Next { messages, .. } => messages,
+                StepOutcome::Done { messages, .. } => messages,
+            };
+
+            match &messages[0] {
+                ChatCompletionRequestMessage::System(s) => match &s.content {
+                    async_openai::types::ChatCompletionRequestSystemMessageContent::Text(t) => {
+                        assert_eq!(t, expected);
+                    }
+                    _ => panic!("expected text content in system message"),
+                },
+                _ => panic!("expected first message to be system"),
+            }
         }
     }
 
