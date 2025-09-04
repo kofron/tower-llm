@@ -415,10 +415,7 @@ impl<P> StepLayer<P> {
         self
     }
 
-    pub fn instruction_provider(
-        mut self,
-        provider: Arc<dyn LLMInstructionProvider>,
-    ) -> Self {
+    pub fn instruction_provider(mut self, provider: Arc<dyn LLMInstructionProvider>) -> Self {
         self.instructions = Some(InstructionSource::Dynamic(provider));
         self
     }
