@@ -559,7 +559,7 @@ where
             let request_shape = summarize_request_messages(&rebuilt_req.messages);
 
             // Trace the final request model
-            trace!(
+            debug!(
                 final_model = ?rebuilt_req.model,
                 messages_count = rebuilt_req.messages.len(),
                 message_roles = ?request_shape,
@@ -577,7 +577,7 @@ where
                 completion_tokens,
             } = ServiceExt::ready(&mut *p).await?.call(rebuilt_req).await?;
             let response_shape = summarize_assistant_message(&assistant);
-            trace!(
+            debug!(
                 response_shape = %response_shape,
                 prompt_tokens,
                 completion_tokens,
@@ -627,7 +627,7 @@ where
                 .collect();
 
             if !invoked_names.is_empty() {
-                trace!(tool_names = ?invoked_names, "Step service invoking tools");
+                debug!(tool_names = ?invoked_names, "Step service invoking tools");
             }
 
             if invocations.len() > 1 && parallel_tools {

@@ -113,6 +113,9 @@ pub use async_openai::{
 // Re-export Tower traits that users need
 pub use tower::{Layer, Service, ServiceExt};
 
+// Re-export llm instruction provider
+pub use core::LLMInstructionProvider;
+
 #[cfg(test)]
 mod tests {
     use super::*;
