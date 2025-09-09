@@ -93,7 +93,7 @@ Start small, add power as you go:
 
 7. Speed up tools: enable [Parallel tool execution](#parallel-tool-execution) and pick a join policy when multiple tools can run concurrently.
 
-8. Stream in real time: use `streaming::StepStreamService` and `AgentLoopStreamLayer` for token-by-token UIs (see the streaming snippet below).
+8. Stream in real time: use `streaming::StepStreamService` and `AgentLoopStreamLayer` for token-by-token UIs (see `examples/streaming_agent.rs` for a terminal demo that streams OpenAI SSE events, invokes tools inline, and optionally dumps the raw deltas).
 
 9. Go multi-agent: coordinate specialists with [Handoffs](#handoffs-multi-agent). Start with explicit or sequential policies; compose them as needed.
 
@@ -102,6 +102,18 @@ Start small, add power as you go:
 11. Validate conversations: use [Conversation validation](#conversation-validation-testsexamples) to assert invariants in tests and examples.
 
 Throughout, you can swap providers or run entirely offline using [Provider override](#provider-override-no-network-testing).
+
+### Streaming agent demo
+
+Need to showcase a real-time agent loop? `examples/streaming_agent.rs` wires the streaming primitives together so you can see tokens, tool-call deltas, and tool outputs as they arrive:
+
+```bash
+OPENAI_API_KEY=... cargo run --example streaming_agent
+```
+
+- **What it does:** issues a streaming request to `gpt-4o`, surfaces the incremental tokens in the terminal, and executes whichever arithmetic tools the model asks for (`add_numbers`, `multiply_numbers`) before continuing the stream.
+- **Raw events (optional):** set `STREAMING_AGENT_SHOW_RAW=1` to tee the underlying SSE JSON alongside the pretty output.
+- **Why it’s handy:** reuse it as a template for TUIs/CLIs that need to surface `(tokens …)(tool call …)(tokens …)` without building a web front-end.
 
 ## Layer catalog at a glance
 
