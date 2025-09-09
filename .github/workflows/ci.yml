@@ -31,26 +31,28 @@ jobs:
           override: true
           components: rustfmt, clippy
 
+      - name: Restore sccache
+        uses: mozilla-actions/sccache-action@v0.0.3
+
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
 
+      - name: Configure compiler cache
+        run: |
+          echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
+          echo "SCCACHE_CACHE_SIZE=1G" >> $GITHUB_ENV
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
-
-      - name: Cargo fetch
-        run: cargo fetch
+        with:
+          shared-key: ${{ runner.os }}-stable
+          cache-on-failure: true
 
       - name: Check formatting
         run: cargo fmt --all --check
 
-      - name: Cargo check (all targets)
-        run: cargo check --all --all-targets --all-features --locked
-
       - name: Run linter (clippy)
-        run: cargo clippy --all --all-targets --all-features -- -D warnings
+        run: cargo clippy --all --all-targets --all-features --locked -- -D warnings
 
       - name: Run tests
-        run: cargo test --all --all-features --locked
-
-      - name: Doctests
-        run: cargo test --doc --all --all-features --locked
+        run: cargo test --all-targets --all-features --doc --locked
